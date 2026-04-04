@@ -1,0 +1,12 @@
+## Interface: 20505
+## Title: SPHelper - Shadow Priest HUD
+## Notes: Cast bar with Mind Flay clip, multi-target DoT tracker, and rotation advisor for TBC Shadow Priests.
+## Author: Copilot
+## Version: 1.1.0
+## SavedVariables: SPHelperDB SPHelperDebugLog
+
+Core.lua
+CastBar.lua
+DotTracker.lua
+Rotation.lua
+Config.lua
