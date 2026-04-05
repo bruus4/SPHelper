@@ -988,25 +988,7 @@ function A:InitConfig()
                 print("|cff8882d5SPHelper|r: Usage: /sph swd always|execute|never")
             end
 
-        elseif msg == "debug" then
-            A.debugEnabled = not A.debugEnabled
-            A.db.debugEnabled = A.debugEnabled
-            if A.debugEnabled then
-                print("|cff8882d5SPHelper|r: Debug logging |cff00ff00ENABLED|r — use |cff8882d5/sph debugdump|r to save.")
-            else
-                print("|cff8882d5SPHelper|r: Debug logging |cffff4040DISABLED|r.")
-            end
-
-        elseif msg == "debugdump" then
-            SPHelperDebugLog = A.debugLog
-            local count = #A.debugLog
-            print("|cff8882d5SPHelper|r: Saved " .. count .. " log entries to SPHelperDebugLog.")
-            print("|cff8882d5SPHelper|r: /reload or logout to write to disk, then find it in:")
-            print("  WTF\\Account\\<NAME>\\SavedVariables\\SPHelper.lua")
-
-        elseif msg == "debugclear" then
-            wipe(A.debugLog)
-            print("|cff8882d5SPHelper|r: Debug log cleared.")
+        
 
         else
             print("|cff8882d5SPHelper|r commands:")
@@ -1015,9 +997,6 @@ function A:InitConfig()
             print("  /sph unlock     — Unlock frames for dragging")
             print("  /sph scale N    — Set UI scale (0.5-3.0)")
             print("  /sph swd MODE   — SW:D mode: always / execute / never")
-            print("  /sph debug      — Toggle debug logging")
-            print("  /sph debugdump  — Save debug log to SavedVariables")
-            print("  /sph debugclear — Clear debug log buffer")
             print("  /sph reset      — Reset all settings")
         end
     end

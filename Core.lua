@@ -298,20 +298,13 @@ function A.FormatTime(sec)
 end
 
 ------------------------------------------------------------------------
--- Debug logging (ring buffer — capped at 500 entries)
+-- Debug logging removed for release builds. Provide a stable no-op
+-- implementation so existing call-sites remain safe.
 ------------------------------------------------------------------------
-A.debugEnabled = false
-A.debugLog     = {}
-local DEBUG_MAX = 500
+function A.DebugLog() end
 
-function A.DebugLog(category, msg)
-    if not A.debugEnabled then return end
-    local entry = string.format("[%.2f][%s] %s", GetTime(), category, msg)
-    A.debugLog[#A.debugLog + 1] = entry
-    if #A.debugLog > DEBUG_MAX then
-        table.remove(A.debugLog, 1)
-    end
-end
+-- Maintain a runtime flag for backwards compatibility with existing checks.
+A.debugEnabled = false
 
 ------------------------------------------------------------------------
 -- Saved-variables defaults
@@ -319,7 +312,6 @@ end
 A.defaults = {
     locked      = false,
     scale       = 1.0,
-    debugEnabled = false,
     castBar     = { enabled = true, width = 250, height = 20, tickSound = "click", tickFlash = "green", colorMode = "dynamic", color = {0.58, 0.51, 0.79, 1}, tickMarkers = "all" },
     dotTracker  = { enabled = true, width = 300, height = 40, rowHeight = 40,
                     maxTargets = 8, warnSeconds = 3, blinkSpeed = 4, dotIconSize = 18,
@@ -397,8 +389,7 @@ function A.InitDB()
         A.db.runeManaThreshold = A.db.consumableManaThreshold
     end
 
-    -- Sync debug toggle from saved vars
-    A.debugEnabled = A.db.debugEnabled or false
+    -- Debug logging removed; no runtime toggle to sync.
 end
 
 -- Play a tick sound (shared helper used by both the cast bar and tick manager)

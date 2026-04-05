@@ -3,7 +3,7 @@
 ## Notes: Cast bar with Mind Flay clip, multi-target DoT tracker, and rotation advisor for TBC Shadow Priests.
 ## Author: Copilot
 ## Version: 1.1.0
-## SavedVariables: SPHelperDB SPHelperDebugLog
+## SavedVariables: SPHelperDB
 
 Core.lua
 CastBar.lua
