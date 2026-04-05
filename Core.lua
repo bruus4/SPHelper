@@ -287,9 +287,11 @@ end
 ------------------------------------------------------------------------
 function A.FormatTime(sec)
     if sec >= 60 then
-        return string.format("%d:%02d", sec / 60, sec % 60)
+        local mins = math.floor(sec / 60)
+        local secs = math.floor(sec % 60)
+        return string.format("%d:%02d", mins, secs)
     elseif sec >= 10 then
-        return string.format("%d", sec)
+        return string.format("%d", math.floor(sec))
     else
         return string.format("%.1f", sec)
     end
@@ -318,9 +320,11 @@ A.defaults = {
     locked      = false,
     scale       = 1.0,
     debugEnabled = false,
-    castBar     = { enabled = true, width = 250, height = 20, tickSound = "click", tickFlash = "green" },
+    castBar     = { enabled = true, width = 250, height = 20, tickSound = "click", tickFlash = "green", colorMode = "dynamic", color = {0.58, 0.51, 0.79, 1}, tickMarkers = "all" },
     dotTracker  = { enabled = true, width = 300, height = 40, rowHeight = 40,
-                    maxTargets = 8, warnSeconds = 3, blinkSpeed = 4, dotIconSize = 18 },
+                    maxTargets = 8, warnSeconds = 3, blinkSpeed = 4, dotIconSize = 18,
+                    portraitSide = "left", warnMode = "border",
+                    warnBorderSize = 4, warnBarAlpha = 0.35, warnIconAlpha = 0.6, newTargetPosition = "bottom", anchorPosition = "top" },
     rotation    = { enabled = true, iconSize = 40, primaryIconSize = 40,
                     ifInsert = { enabled = true, onlyForBoss = true, before = "MB" } },
     -- Selected consumables to track (item IDs). Use "none" to disable.
@@ -371,6 +375,17 @@ function A.InitDB()
         if A.db.castBar.tickSound == false then A.db.castBar.tickSound = "none"  end
         if A.db.castBar.tickFlash == true  then A.db.castBar.tickFlash = "green" end
         if A.db.castBar.tickFlash == false then A.db.castBar.tickFlash = "none"  end
+    end
+    -- Migrate old castBar colorIndex (legacy) into new colorMode/color
+    if A.db.castBar then
+        if A.db.castBar.colorIndex then
+            -- preserve current primary MF color as solid choice
+            A.db.castBar.color = A.COLORS.MF or A.db.castBar.color
+            A.db.castBar.colorMode = A.db.castBar.colorMode or "solid"
+            A.db.castBar.colorIndex = nil
+        end
+        if not A.db.castBar.colorMode then A.db.castBar.colorMode = "dynamic" end
+        if not A.db.castBar.color then A.db.castBar.color = {0.58, 0.51, 0.79, 1} end
     end
     -- Migrate old combined consumable setting
     if A.db.suggestConsumables ~= nil and A.db.suggestPot == nil then
@@ -534,8 +549,26 @@ function A.InitTickManager()
         if cleuSpellName ~= (A.SPELLS and A.SPELLS.MF and A.SPELLS.MF.name) then return end
         -- Suppress if the cast bar UI is currently visible (it handles ticks itself)
         if A.castBarFrame and A.castBarFrame:IsShown() then return end
-        pcall(A.PlayTickSound)
-        pcall(A.DoTickFlash)
+        -- Respect the user's Mind Flay tick mode even when the cast bar is disabled.
+        local mode = (A.db and A.db.castBar and A.db.castBar.tickMarkers) or "all"
+        if mode == "all" then
+            pcall(function() if A.PlayTickSound then A.PlayTickSound() end end)
+            pcall(function() if A.DoTickFlash then A.DoTickFlash() end end)
+        else
+            -- Track consecutive ticks to detect the 2nd tick. Reset if ticks are too far apart.
+            A._tickManagerState = A._tickManagerState or { last = 0, count = 0 }
+            local now = GetTime()
+            if (now - A._tickManagerState.last) > 2.0 then
+                A._tickManagerState.count = 1
+            else
+                A._tickManagerState.count = A._tickManagerState.count + 1
+            end
+            A._tickManagerState.last = now
+            if A._tickManagerState.count == 2 then
+                pcall(function() if A.PlayTickSound then A.PlayTickSound() end end)
+                pcall(function() if A.DoTickFlash then A.DoTickFlash() end end)
+            end
+        end
     end)
 end
 

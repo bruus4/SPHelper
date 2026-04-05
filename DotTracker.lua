@@ -42,8 +42,13 @@ function A:InitDotTracker()
     local WARN_SEC    = db.warnSeconds or 3
     local BLINK_SPD   = db.blinkSpeed  or 4
     local PORTRAIT_SZ = ROW_H
+    local PORTRAIT_SIDE = db.portraitSide or "left"
+    local WARN_MODE   = db.warnMode or "border" -- options: border, icon, bar, none
+    local BORDER_SIZE = db.warnBorderSize or 2
+    local ANCHOR_POS  = db.anchorPosition or "top"
     local DOT_ICON_SZ = db.dotIconSize or math.max(14, math.floor(ROW_H * 0.45))
-    local HP_BAR_W    = ROW_W - PORTRAIT_SZ - 2
+    local HP_BAR_W    = (PORTRAIT_SIDE == "none") and (ROW_W - 2) or (ROW_W - PORTRAIT_SZ - 2)
+    local addCounter   = 0
     local playerGUID  = UnitGUID("player")
     local TOMB_LIFE   = 12 -- seconds to keep a tombstone preventing re-adds
 
@@ -97,7 +102,6 @@ function A:InitDotTracker()
     ----------------------------------------------------------------
     local targets = {}
     local rows    = {}
-    -- tombstones prevent recently-removed targets from being re-added
     local tombstones = {}
     -- tombstoneNames records names of recently-removed mobs
     local tombstoneNames = {}
@@ -115,24 +119,34 @@ function A:InitDotTracker()
     local function InjectDummyData()
         wipe(targets)
         local now = GetTime()
-        local dummies = {
-            { name = "Fel Reaver",        hp = 0.85, ri = 8, swp = 12, vt = 9 },
-            { name = "Void Reaver",       hp = 0.62, ri = 7, swp = 3,  vt = 2 },
-            { name = "Shade of Aran",     hp = 0.41, ri = 1, swp = 16 },
-            { name = "Hydross the Unstable", hp = 0.23 },
-        }
-        for i, d in ipairs(dummies) do
+        local sampleNames = { "Fel Reaver", "Void Reaver", "Shade of Aran", "Hydross the Unstable", "Doomwalker", "Warbringer" }
+        for i = 1, MAX do
             local guid = "preview-" .. i
+            local name = sampleNames[((i - 1) % #sampleNames) + 1] or ("Dummy " .. i)
+            local hp = math.max(0.12, 0.95 - (i - 1) * 0.06)
+            addCounter = addCounter + 1
             targets[guid] = {
-                name = d.name,
+                name = name,
                 _addedAt = now - (i * 2),
                 _inCombat = true,
                 _preview  = true,
-                hpPct = d.hp,
-                raidIcon = d.ri,
+                hpPct = hp,
+                raidIcon = ((i - 1) % #RAID_ICONS) + 1,
+                _addOrder = addCounter,
             }
-            if d.swp then targets[guid].swp_exp = now + d.swp; targets[guid].swp_dur = 18 end
-            if d.vt  then targets[guid].vt_exp  = now + d.vt;  targets[guid].vt_dur  = 15 end
+            -- Stagger debuffs so preview timers don't all line up
+            if (i % 3) == 1 then
+                targets[guid].swp_exp = now + 6 + i
+                targets[guid].swp_dur = 18
+            elseif (i % 3) == 2 then
+                targets[guid].vt_exp = now + 4 + i
+                targets[guid].vt_dur = 15
+            else
+                targets[guid].swp_exp = now + 8 + i
+                targets[guid].swp_dur = 18
+                targets[guid].vt_exp  = now + 3 + i
+                targets[guid].vt_dur  = 15
+            end
         end
         previewActive = true
         A.dotTrackerPreviewActive = true
@@ -161,7 +175,11 @@ function A:InitDotTracker()
     local function CreateRow(index)
         local row = CreateFrame("Frame", "SPHelperDotRow"..index, anchor, "BackdropTemplate")
         row:SetSize(ROW_W, ROW_H)
-        row:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -(index - 1) * (ROW_H + 2))
+        if ANCHOR_POS == "top" then
+            row:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -(index - 1) * (ROW_H + 2))
+        else
+            row:SetPoint("BOTTOMLEFT", anchor, "TOPLEFT", 0, (index - 1) * (ROW_H + 2))
+        end
         row:SetBackdrop({
             bgFile   = "Interface\\BUTTONS\\WHITE8X8",
             edgeFile = "Interface\\BUTTONS\\WHITE8X8",
@@ -173,7 +191,15 @@ function A:InitDotTracker()
         ---- Portrait container with border ----
         local ptFrame = CreateFrame("Frame", nil, row, "BackdropTemplate")
         ptFrame:SetSize(PORTRAIT_SZ, PORTRAIT_SZ)
-        ptFrame:SetPoint("LEFT", row, "LEFT", 0, 0)
+        if PORTRAIT_SIDE == "left" then
+            ptFrame:SetPoint("LEFT", row, "LEFT", 0, 0)
+            ptFrame:Show()
+        elseif PORTRAIT_SIDE == "right" then
+            ptFrame:SetPoint("RIGHT", row, "RIGHT", 0, 0)
+            ptFrame:Show()
+        else
+            ptFrame:Hide()
+        end
         ptFrame:SetBackdrop({
             bgFile   = "Interface\\BUTTONS\\WHITE8X8",
             edgeFile = "Interface\\BUTTONS\\WHITE8X8",
@@ -197,10 +223,27 @@ function A:InitDotTracker()
         raidIcon:Hide()
         row.raidIcon = raidIcon
 
+        -- Overlay used for a large flashing border so we don't alter layout
+        local overlay = CreateFrame("Frame", nil, row, "BackdropTemplate")
+        overlay:SetAllPoints(row)
+        overlay:SetBackdrop({ bgFile = "Interface\\BUTTONS\\WHITE8X8", edgeFile = "Interface\\BUTTONS\\WHITE8X8", edgeSize = BORDER_SIZE })
+        overlay:SetBackdropColor(0, 0, 0, 0)
+        overlay:SetBackdropBorderColor(0, 0, 0, 0)
+        overlay:SetFrameLevel(row:GetFrameLevel() + 6)
+        overlay:Hide()
+        row.borderOverlay = overlay
+
         ---- Health bar (fills remaining width) ----
         local hpBar = CreateFrame("StatusBar", nil, row)
-        hpBar:SetSize(HP_BAR_W, ROW_H - 2)
-        hpBar:SetPoint("LEFT", ptFrame, "RIGHT", 2, 0)
+        local hpWidth = (PORTRAIT_SIDE == "none") and (ROW_W - 2) or (ROW_W - PORTRAIT_SZ - 2)
+        hpBar:SetSize(hpWidth, ROW_H - 2)
+        if PORTRAIT_SIDE == "left" then
+            hpBar:SetPoint("LEFT", ptFrame, "RIGHT", 2, 0)
+        elseif PORTRAIT_SIDE == "right" then
+            hpBar:SetPoint("RIGHT", ptFrame, "LEFT", -2, 0)
+        else
+            hpBar:SetPoint("LEFT", row, "LEFT", 1, 0)
+        end
         hpBar:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
         hpBar:SetStatusBarColor(0.2, 0.8, 0.2, 1)
         hpBar:SetMinMaxValues(0, 1)
@@ -277,11 +320,31 @@ function A:InitDotTracker()
         ROW_W       = db.width       or 300
         ROW_H       = db.rowHeight   or 40
         PORTRAIT_SZ = ROW_H
+        PORTRAIT_SIDE = db.portraitSide or "left"
+        WARN_MODE = db.warnMode or "border"
+        BORDER_SIZE = db.warnBorderSize or 2
+        ANCHOR_POS  = db.anchorPosition or "top"
         DOT_ICON_SZ = db.dotIconSize or math.max(14, math.floor(ROW_H * 0.45))
         HP_BAR_W    = ROW_W - PORTRAIT_SZ - 2
         NAME_FONT   = math.max(9, math.floor(ROW_H * 0.28))
         HP_FONT     = math.max(8, math.floor(ROW_H * 0.24))
         TIMER_FONT  = math.max(7, math.floor(DOT_ICON_SZ * 0.55))
+
+        -- Update MAX and ensure rows exist/hide extras
+        local newMax = db.maxTargets or 8
+        local oldMax = MAX
+        if newMax > oldMax then
+            for i = oldMax + 1, newMax do CreateRow(i) end
+        elseif newMax < oldMax then
+            for i = newMax + 1, oldMax do
+                if rows[i] then
+                    rows[i]:Hide()
+                    rows[i].lastGUID = nil
+                    rows[i].targetGUID = nil
+                end
+            end
+        end
+        MAX = newMax
 
         anchor:SetSize(ROW_W + 2, 14)
 
@@ -289,12 +352,37 @@ function A:InitDotTracker()
             local row = rows[i]
             row:SetSize(ROW_W, ROW_H)
             row:ClearAllPoints()
-            row:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -(i - 1) * (ROW_H + 2))
+            if ANCHOR_POS == "top" then
+                row:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -(i - 1) * (ROW_H + 2))
+            else
+                row:SetPoint("BOTTOMLEFT", anchor, "TOPLEFT", 0, (i - 1) * (ROW_H + 2))
+            end
 
             row.ptFrame:SetSize(PORTRAIT_SZ, PORTRAIT_SZ)
             row.raidIcon:SetSize(PORTRAIT_SZ * 0.45, PORTRAIT_SZ * 0.45)
+            -- keep a narrow permanent backdrop on the row itself; large flashing border uses overlay
+            row:SetBackdrop({ bgFile = "Interface\\BUTTONS\\WHITE8X8", edgeFile = "Interface\\BUTTONS\\WHITE8X8", edgeSize = 2 })
 
-            row.hpBar:SetSize(HP_BAR_W, ROW_H - 2)
+            local hpWidth = (PORTRAIT_SIDE == "none") and (ROW_W - 2) or (ROW_W - PORTRAIT_SZ - 2)
+            row.hpBar:SetSize(hpWidth, ROW_H - 2)
+            -- ensure overlay matches row size and uses configured border size
+                if row.borderOverlay then
+                row.borderOverlay:SetAllPoints(row)
+                row.borderOverlay:SetBackdrop({ bgFile = "Interface\\BUTTONS\\WHITE8X8", edgeFile = "Interface\\BUTTONS\\WHITE8X8", edgeSize = BORDER_SIZE })
+                row.borderOverlay:SetBackdropColor(0, 0, 0, 0)
+                row.borderOverlay:SetFrameLevel(row:GetFrameLevel() + 6)
+            end
+            -- reposition portrait/hpBar depending on side
+            if PORTRAIT_SIDE == "left" then
+                row.ptFrame:ClearAllPoints(); row.ptFrame:SetPoint("LEFT", row, "LEFT", 0, 0); row.ptFrame:Show()
+                row.hpBar:ClearAllPoints(); row.hpBar:SetPoint("LEFT", row.ptFrame, "RIGHT", 2, 0)
+            elseif PORTRAIT_SIDE == "right" then
+                row.ptFrame:ClearAllPoints(); row.ptFrame:SetPoint("RIGHT", row, "RIGHT", 0, 0); row.ptFrame:Show()
+                row.hpBar:ClearAllPoints(); row.hpBar:SetPoint("RIGHT", row.ptFrame, "LEFT", -2, 0)
+                else
+                row.ptFrame:ClearAllPoints(); row.ptFrame:Hide()
+                row.hpBar:ClearAllPoints(); row.hpBar:SetPoint("LEFT", row, "LEFT", 1, 0)
+            end
 
             row.nameText:SetFont("Fonts\\FRIZQT__.TTF", NAME_FONT, "OUTLINE")
             row.hpText:SetFont("Fonts\\FRIZQT__.TTF", HP_FONT, "OUTLINE")
@@ -305,9 +393,9 @@ function A:InitDotTracker()
             end
         end
 
-        -- Refresh dummy data timers if preview is active
+        -- Refresh dummy data timers if preview is active (rebuild preview targets)
         if previewActive and A.DotTrackerPreviewOn then
-            A.DotTrackerPreviewOn()
+            pcall(A.DotTrackerPreviewOn)
         end
     end
 
@@ -345,6 +433,8 @@ function A:InitDotTracker()
                         local max = UnitHealthMax(unit) or 1
                         targets[guid].hpPct = (max > 0) and (UnitHealth(unit) / max) or 1
                         recentNames[targets[guid].name] = now
+                        addCounter = addCounter + 1
+                        targets[guid]._addOrder = addCounter
                         added = true
                         break
                     end
@@ -362,6 +452,8 @@ function A:InitDotTracker()
                     local max = UnitHealthMax(unit) or 1
                     targets[guid].hpPct = (max > 0) and (UnitHealth(unit) / max) or 1
                     recentNames[targets[guid].name] = now
+                    addCounter = addCounter + 1
+                    targets[guid]._addOrder = addCounter
                     added = true
                 end
             end
@@ -379,6 +471,7 @@ function A:InitDotTracker()
                     t.name = unitName or t.name
                     t[def.key .. "_dur"] = duration
                     t[def.key .. "_exp"] = expirationTime
+                        if not t._addOrder then addCounter = addCounter + 1; t._addOrder = addCounter end
                 end
             end
         end
@@ -418,6 +511,9 @@ function A:InitDotTracker()
         local now = GetTime()
         local warnThreshold = A.db.dotTracker.warnSeconds or WARN_SEC
         local blinkSpeed    = A.db.dotTracker.blinkSpeed  or BLINK_SPD
+        local warnBorderSize = A.db.dotTracker.warnBorderSize or 4
+        local warnBarAlpha   = A.db.dotTracker.warnBarAlpha   or 0.35
+        local warnIconAlpha  = A.db.dotTracker.warnIconAlpha  or 0.6
 
         -- Cleanup recently-dead targets: mark when hp reaches 0 and remove
         -- them after a short grace period so the UI doesn't linger forever.
@@ -457,10 +553,16 @@ function A:InitDotTracker()
             end
         end
 
-        -- Sort by insertion order for stable positions
+        -- Sort by insertion order for stable positions (respect newTargetPosition)
         table.sort(sorted, function(a, b)
             local ta, tb = targets[a], targets[b]
-            return (ta._addedAt or 0) < (tb._addedAt or 0)
+            local pa = (ta and ta._addOrder) or 0
+            local pb = (tb and tb._addOrder) or 0
+            if A.db and A.db.dotTracker and A.db.dotTracker.newTargetPosition == "top" then
+                return pa > pb
+            else
+                return pa < pb
+            end
         end)
 
         -- Blink alpha oscillator
@@ -532,23 +634,36 @@ function A:InitDotTracker()
                         local col = A.COLORS[def.color] or A.COLORS.DEFAULT
                         visibleCount = visibleCount + 1
 
-                        iconFrame:ClearAllPoints()
-                        iconFrame:SetPoint("BOTTOMRIGHT", row.hpBar, "BOTTOMRIGHT",
-                            -(visibleCount - 1) * (DOT_ICON_SZ + 2) - 2, 2)
+                                iconFrame:ClearAllPoints()
+                                if PORTRAIT_SIDE == "left" then
+                                    iconFrame:SetPoint("BOTTOMRIGHT", row.hpBar, "BOTTOMRIGHT",
+                                        -(visibleCount - 1) * (DOT_ICON_SZ + 2) - 2, 2)
+                                else
+                                    -- when portrait on right, keep icons on the right of the bar as well
+                                    iconFrame:SetPoint("BOTTOMRIGHT", row.hpBar, "BOTTOMRIGHT",
+                                        -(visibleCount - 1) * (DOT_ICON_SZ + 2) - 2, 2)
+                                end
 
                         iconFrame.icon:SetDesaturated(false)
                         iconFrame.icon:SetAlpha(1)
                         timerText:SetText(A.FormatTime(rem))
 
                         if rem <= warnThreshold then
-                            iconFrame:SetBackdropBorderColor(
-                                col[1], col[2], col[3], blinkAlpha)
                             timerText:SetTextColor(1, 0.3, 0.3, 1)
                             worstState = "warning"
                             worstColor = {col[1], col[2], col[3], 1}
+                            -- Apply per-mode visual cues
+                            if WARN_MODE == "icon" then
+                                iconFrame.icon:SetAlpha((1 - warnIconAlpha) + warnIconAlpha * blinkAlpha)
+                            else
+                                iconFrame.icon:SetAlpha(1)
+                            end
+                            -- border highlight for all modes (base)
+                            iconFrame:SetBackdropBorderColor(col[1], col[2], col[3], 1)
                         else
                             iconFrame:SetBackdropBorderColor(0.3, 0.3, 0.3, 1)
                             timerText:SetTextColor(1, 1, 1, 1)
+                            iconFrame.icon:SetAlpha(1)
                         end
 
                         iconFrame:Show()
@@ -558,11 +673,41 @@ function A:InitDotTracker()
                 end
 
                 -- Row border blinks when any dot is about to expire
+                -- Row visual feedback depending on WARN_MODE
                 if worstState == "warning" then
-                    row:SetBackdropBorderColor(
-                        worstColor[1], worstColor[2], worstColor[3], blinkAlpha)
+                    if WARN_MODE == "border" then
+                        -- show overlay border on top of the row so HP width remains constant
+                        if row.borderOverlay then
+                            row.borderOverlay:SetBackdrop({ bgFile = "Interface\\BUTTONS\\WHITE8X8", edgeFile = "Interface\\BUTTONS\\WHITE8X8", edgeSize = warnBorderSize })
+                            row.borderOverlay:SetBackdropColor(0, 0, 0, 0)
+                            row.borderOverlay:SetBackdropBorderColor(worstColor[1], worstColor[2], worstColor[3], blinkAlpha)
+                            row.borderOverlay:Show()
+                        else
+                            row:SetBackdropBorderColor(worstColor[1], worstColor[2], worstColor[3], blinkAlpha)
+                        end
+                    elseif WARN_MODE == "bar" then
+                        -- flash the hpBar background with the dot color
+                        if not row.hpBar._flash then
+                            local t = row.hpBar:CreateTexture(nil, "OVERLAY")
+                            t:SetAllPoints(row.hpBar)
+                            row.hpBar._flash = t
+                        end
+                        row.hpBar._flash:SetColorTexture(worstColor[1], worstColor[2], worstColor[3], warnBarAlpha * blinkAlpha)
+                        row.hpBar._flash:Show()
+                        -- keep normal border
+                        row:SetBackdropBorderColor(0, 0, 0, 1)
+                    elseif WARN_MODE == "icon" then
+                        -- keep border normal, icon already animated
+                        row:SetBackdropBorderColor(0, 0, 0, 1)
+                    else
+                        row:SetBackdropBorderColor(0, 0, 0, 1)
+                    end
                 else
+                    -- clear any flash artifacts: hide overlay and restore small backdrop
+                    if row.borderOverlay then row.borderOverlay:Hide() end
+                    row:SetBackdrop({ bgFile = "Interface\\BUTTONS\\WHITE8X8", edgeFile = "Interface\\BUTTONS\\WHITE8X8", edgeSize = 2 })
                     row:SetBackdropBorderColor(0, 0, 0, 1)
+                    if row.hpBar._flash then row.hpBar._flash:Hide() end
                 end
 
                 row:Show()

@@ -14,7 +14,8 @@ local A = SPHelper
 local function MakeHeader(parent, text, yOff)
     local h = parent:CreateFontString(nil, "OVERLAY")
     h:SetFont("Fonts\\FRIZQT__.TTF", 12, "OUTLINE")
-    h:SetPoint("TOPLEFT", parent, "TOPLEFT", 16, yOff)
+    -- Sub-headers sit between section headers and settings
+    h:SetPoint("TOPLEFT", parent, "TOPLEFT", 24, yOff)
     h:SetText("|cffffcc00" .. text .. "|r")
     -- Tooltip on header describing the section
     h:SetScript("OnEnter", function(self)
@@ -49,7 +50,8 @@ end
 local function MakeSubHeader(parent, text, yOff)
     local h = parent:CreateFontString(nil, "OVERLAY")
     h:SetFont("Fonts\\FRIZQT__.TTF", 11, "OUTLINE")
-    h:SetPoint("TOPLEFT", parent, "TOPLEFT", 20, yOff)
+    -- Slightly more indented than MakeHeader
+    h:SetPoint("TOPLEFT", parent, "TOPLEFT", 28, yOff)
     h:SetText("|cffbfbfdf" .. text .. "|r")
     return h
 end
@@ -57,7 +59,8 @@ end
 local function MakeSlider(parent, label, min, max, step, get, set, yOff)
     local container = CreateFrame("Frame", nil, parent)
     container:SetSize(240, 36)
-    container:SetPoint("TOPLEFT", parent, "TOPLEFT", 24, yOff)
+    -- Settings are indented to group under headers
+    container:SetPoint("TOPLEFT", parent, "TOPLEFT", 36, yOff)
 
     local lbl = container:CreateFontString(nil, "OVERLAY")
     lbl:SetFont("Fonts\\FRIZQT__.TTF", 10)
@@ -104,7 +107,8 @@ end
 local function MakeCheckbox(parent, label, get, set, yOff)
     local container = CreateFrame("Frame", nil, parent)
     container:SetSize(240, 22)
-    container:SetPoint("TOPLEFT", parent, "TOPLEFT", 18, yOff)
+    -- Settings are indented to group under headers
+    container:SetPoint("TOPLEFT", parent, "TOPLEFT", 36, yOff)
 
     local cb = CreateFrame("CheckButton", nil, container)
     cb:SetSize(22, 22)
@@ -136,7 +140,8 @@ local function MakeDropdown(parent, label, options, get, set, yOff, labels)
 
     local container = CreateFrame("Frame", nil, parent)
     container:SetSize(300, 40)
-    container:SetPoint("TOPLEFT", parent, "TOPLEFT", 18, yOff)
+    -- Settings are indented to group under headers
+    container:SetPoint("TOPLEFT", parent, "TOPLEFT", 36, yOff)
 
     local lbl = container:CreateFontString(nil, "OVERLAY")
     lbl:SetFont("Fonts\\FRIZQT__.TTF", 10, "OUTLINE")
@@ -194,8 +199,9 @@ end
 
 local function MakeCycleButton(parent, label, options, get, set, yOff, labels)
     local container = CreateFrame("Frame", nil, parent)
-    container:SetSize(300, 22)
-    container:SetPoint("TOPLEFT", parent, "TOPLEFT", 24, yOff)
+    container:SetSize(300, 24)
+    -- Settings are indented to group under headers
+    container:SetPoint("TOPLEFT", parent, "TOPLEFT", 36, yOff)
 
     local lbl = container:CreateFontString(nil, "OVERLAY")
     lbl:SetFont("Fonts\\FRIZQT__.TTF", 10, "OUTLINE")
@@ -204,7 +210,7 @@ local function MakeCycleButton(parent, label, options, get, set, yOff, labels)
     lbl:SetTextColor(1, 0.82, 0, 1)
 
     local btn = CreateFrame("Button", nil, container, "BackdropTemplate")
-    btn:SetSize(100, 22)
+    btn:SetSize(100, 24)
     btn:SetPoint("LEFT", lbl, "RIGHT", 8, 0)
     A.CreateBackdrop(btn, 0.15, 0.15, 0.15, 0.9, 0.4, 0.4, 0.4, 1)
 
@@ -306,6 +312,7 @@ local function BuildControls(panel)
             function(v)
                 A.db.castBar.tickSound = v
                 if v ~= "none" and A.PreviewTickSound then pcall(A.PreviewTickSound, v) end
+                if A.CastBarPreviewOn then pcall(A.CastBarPreviewOn) end
             end, y, soundLabels)
         y = y - 50
     end
@@ -321,9 +328,22 @@ local function BuildControls(panel)
             function(v)
                 A.db.castBar.tickFlash = v
                 if v ~= "none" and A.PreviewTickFlash then pcall(A.PreviewTickFlash, v) end
+                if A.CastBarPreviewOn then pcall(A.CastBarPreviewOn) end
             end, y, flashLabels)
         y = y - 50
     end
+
+    -- Mind Flay tick visuals
+
+    local tickLabels = { all = "All ticks", second = "Second tick only" }
+    MakeCycleButton(content, "Mind Flay tick mode:", { "all", "second" },
+        function() return (A.db.castBar and A.db.castBar.tickMarkers) or "all" end,
+        function(v)
+            if not A.db.castBar then A.db.castBar = {} end
+            A.db.castBar.tickMarkers = v
+            if A.CastBarPreviewOn then pcall(A.CastBarPreviewOn) end
+        end, y, tickLabels)
+    y = y - 30
 
     -- ============ DoT Tracker ============
     -- DoT Tracker visuals moved to Visuals window; keep enable checkbox here
@@ -332,6 +352,8 @@ local function BuildControls(panel)
         function() return A.db.dotTracker.enabled end,
         function(v) A.db.dotTracker.enabled = v end, y)
     y = y - 26
+
+    -- DoT Tracker visuals moved to Visuals window; main panel keeps only the enable checkbox
 
     -- ============ Rotation Advisor ============
     MakeSectionHeader(content, "Rotation Advisor", y); y = y - 22
@@ -723,27 +745,60 @@ function A:InitConfig()
 
             -- Cast bar visuals
             MakeSectionHeader(content, "Cast Bar", yOff); yOff = yOff - 22
-            -- Cast bar color (below Cast Bar header)
+            -- Cast bar color mode + picker
+            local modeCont = MakeCycleButton(content, "Color mode:", { "dynamic", "solid" },
+                function() return (A.db.castBar and A.db.castBar.colorMode) or "dynamic" end,
+                function(v)
+                    if not A.db.castBar then A.db.castBar = {} end
+                    A.db.castBar.colorMode = v
+                    -- update swatch alpha when toggling (swatch is defined below)
+                    if colorSwatch and type(colorSwatch.SetAlpha) == "function" then
+                        colorSwatch:SetAlpha(v == "solid" and 1 or 0.6)
+                    end
+                    if A.CastBarPreviewOn then pcall(A.CastBarPreviewOn) end
+                end, yOff)
+            yOff = yOff - 30
+
             local colorLbl = content:CreateFontString(nil, "OVERLAY")
             colorLbl:SetFont("Fonts\\FRIZQT__.TTF", 10)
-            colorLbl:SetPoint("TOPLEFT", content, "TOPLEFT", 12, yOff)
+            colorLbl:SetPoint("TOPLEFT", content, "TOPLEFT", 38, yOff)
             colorLbl:SetText("Cast bar color:")
             local colorSwatch = CreateFrame("Button", nil, content, "BackdropTemplate")
             colorSwatch:SetSize(28, 18)
             colorSwatch:SetPoint("LEFT", colorLbl, "RIGHT", 8, 0)
             colorSwatch:SetBackdrop({ bgFile = "Interface\\BUTTONS\\WHITE8X8" })
             colorSwatch:GetBackdrop().bgFile = "Interface\\BUTTONS\\WHITE8X8"
-            local r,g,b = unpack(A.COLORS.MF)
-            colorSwatch:SetBackdropColor(r,g,b,1)
+            local cr, cg, cb = unpack((A.db and A.db.castBar and A.db.castBar.color) or A.COLORS.MF)
+            colorSwatch:SetBackdropColor(cr, cg, cb, 1)
+            colorSwatch:SetAlpha(((A.db and A.db.castBar and A.db.castBar.colorMode) or "dynamic") == "solid" and 1 or 0.6)
             colorSwatch:SetScript("OnClick", function()
-                local presets = { {1,0.2,0.2}, {0.9,0.6,0.2}, {0.6,0.1,0.9}, {0.2,0.6,1} }
-                local cur = A.db.castBar.colorIndex or 1
-                cur = (cur % #presets) + 1
-                A.db.castBar.colorIndex = cur
-                local c = presets[cur]
-                A.COLORS.MF = { c[1], c[2], c[3], 1 }
-                colorSwatch:SetBackdropColor(c[1], c[2], c[3], 1)
-                if A.castBarFrame and A.castBarFrame.bar then A.castBarFrame.bar:SetStatusBarColor(c[1], c[2], c[3], 1) end
+                if not (A.db and A.db.castBar and A.db.castBar.colorMode == "solid") then return end
+                local cur = A.db.castBar.color or {0.58, 0.51, 0.79, 1}
+                local prev = { cur[1], cur[2], cur[3] }
+                -- Configure ColorPicker
+                ColorPickerFrame:Hide()
+                ColorPickerFrame.func = function(restore)
+                    if restore then
+                        local rr, rg, rb = unpack(restore)
+                        A.db.castBar.color = { rr, rg, rb, 1 }
+                        colorSwatch:SetBackdropColor(rr, rg, rb, 1)
+                        if A.castBarFrame and A.castBarFrame.bar then A.castBarFrame.bar:SetStatusBarColor(rr, rg, rb, 1) end
+                    else
+                        local nr, ng, nb = ColorPickerFrame:GetColorRGB()
+                        A.db.castBar.color = { nr, ng, nb, 1 }
+                        colorSwatch:SetBackdropColor(nr, ng, nb, 1)
+                        if A.castBarFrame and A.castBarFrame.bar then A.castBarFrame.bar:SetStatusBarColor(nr, ng, nb, 1) end
+                    end
+                end
+                ColorPickerFrame.previousValues = prev
+                ColorPickerFrame.cancelFunc = function()
+                    local rr, rg, rb = unpack(ColorPickerFrame.previousValues or prev)
+                    A.db.castBar.color = { rr, rg, rb, 1 }
+                    colorSwatch:SetBackdropColor(rr, rg, rb, 1)
+                    if A.castBarFrame and A.castBarFrame.bar then A.castBarFrame.bar:SetStatusBarColor(rr, rg, rb, 1) end
+                end
+                ColorPickerFrame:SetColorRGB(prev[1], prev[2], prev[3])
+                ShowUIPanel(ColorPickerFrame)
             end)
             yOff = yOff - 28
             MakeSlider(content, "Width", 100, 500, 10,
@@ -786,6 +841,47 @@ function A:InitConfig()
                 function() return A.db.dotTracker.blinkSpeed or 4 end,
                 function(v) A.db.dotTracker.blinkSpeed = v; if A.DotTrackerResizeLayout then A.DotTrackerResizeLayout() end end, yOff)
             yOff = yOff - 42
+
+            -- DoT Tracker additional visuals: max targets, portrait side, and expiry warning mode
+            MakeSlider(content, "Max targets", 1, 20, 1,
+                function() return (A.db.dotTracker and A.db.dotTracker.maxTargets) or 8 end,
+                function(v) if not A.db.dotTracker then A.db.dotTracker = {} end; A.db.dotTracker.maxTargets = v; if A.DotTrackerResizeLayout then pcall(A.DotTrackerResizeLayout) end end, yOff)
+            yOff = yOff - 42
+
+            MakeCycleButton(content, "Portrait side:", { "left", "right", "none" },
+                function() return (A.db.dotTracker and A.db.dotTracker.portraitSide) or "left" end,
+                function(v) if not A.db.dotTracker then A.db.dotTracker = {} end; A.db.dotTracker.portraitSide = v; if A.DotTrackerResizeLayout then pcall(A.DotTrackerResizeLayout) end end, yOff, { left = "Left", right = "Right", none = "None" })
+            yOff = yOff - 30
+
+            local warnLabels = { border = "Border flash", icon = "Icon flash", bar = "Row flash", none = "None" }
+            MakeDropdown(content, "Expiry warning mode:", { "border", "icon", "bar", "none" },
+                function() return (A.db.dotTracker and A.db.dotTracker.warnMode) or "border" end,
+                function(v) if not A.db.dotTracker then A.db.dotTracker = {} end; A.db.dotTracker.warnMode = v; if A.DotTrackerResizeLayout then pcall(A.DotTrackerResizeLayout) end end, yOff, warnLabels)
+            yOff = yOff - 50
+
+            MakeSlider(content, "Warning border size", 1, 12, 1,
+                function() return A.db.dotTracker.warnBorderSize or 4 end,
+                function(v) A.db.dotTracker.warnBorderSize = v; if A.DotTrackerResizeLayout then pcall(A.DotTrackerResizeLayout) end end, yOff)
+            yOff = yOff - 42
+
+            MakeSlider(content, "Warning bar alpha", 0.05, 1.0, 0.05,
+                function() return A.db.dotTracker.warnBarAlpha or 0.35 end,
+                function(v) A.db.dotTracker.warnBarAlpha = v; if A.DotTrackerResizeLayout then pcall(A.DotTrackerResizeLayout) end end, yOff)
+            yOff = yOff - 42
+
+            MakeSlider(content, "Warning icon alpha", 0.1, 1.0, 0.05,
+                function() return A.db.dotTracker.warnIconAlpha or 0.6 end,
+                function(v) A.db.dotTracker.warnIconAlpha = v; if A.DotTrackerResizeLayout then pcall(A.DotTrackerResizeLayout) end end, yOff)
+            yOff = yOff - 42
+
+            MakeCycleButton(content, "New target position:", { "bottom", "top" },
+                function() return (A.db.dotTracker and A.db.dotTracker.newTargetPosition) or "bottom" end,
+                function(v) if not A.db.dotTracker then A.db.dotTracker = {} end; A.db.dotTracker.newTargetPosition = v; if A.DotTrackerResizeLayout then pcall(A.DotTrackerResizeLayout) end end, yOff, { bottom = "Bottom", top = "Top" })
+            yOff = yOff - 30
+            MakeCycleButton(content, "Anchor position:", { "top", "bottom" },
+                function() return (A.db.dotTracker and A.db.dotTracker.anchorPosition) or "top" end,
+                function(v) if not A.db.dotTracker then A.db.dotTracker = {} end; A.db.dotTracker.anchorPosition = v; if A.DotTrackerResizeLayout then pcall(A.DotTrackerResizeLayout) end end, yOff, { top = "Top", bottom = "Bottom" })
+            yOff = yOff - 30
 
             -- Rotation visuals
             MakeSectionHeader(content, "Rotation", yOff); yOff = yOff - 22

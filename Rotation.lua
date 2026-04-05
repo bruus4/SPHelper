@@ -147,6 +147,19 @@ function A:InitRotation()
         return false
     end
 
+    -- Helper: return current casting/channeling spell name and remaining seconds
+    local function GetPlayerCastInfo()
+        local name, _, _, _, endMS = UnitCastingInfo("player")
+        if name and endMS then
+            return name, math.max(endMS / 1000 - GetTime(), 0)
+        end
+        local cname, _, _, _, cendMS = UnitChannelInfo("player")
+        if cname and cendMS then
+            return cname, math.max(cendMS / 1000 - GetTime(), 0)
+        end
+        return nil, 0
+    end
+
     ----------------------------------------------------------------
     -- Priority engine  (time-aware, rank-agnostic)
     --
@@ -254,22 +267,7 @@ function A:InitRotation()
         end
 
         -- Time remaining on current cast / channel
-        local castRemaining = 0
-        local castingSpell  = nil
-        do
-            local name, _, _, _, endMS = UnitCastingInfo("player")
-            if name and endMS then
-                castingSpell  = name
-                castRemaining = math.max(endMS / 1000 - now, 0)
-            end
-        end
-        if not castingSpell then
-            local name, _, _, _, endMS = UnitChannelInfo("player")
-            if name and endMS then
-                castingSpell  = name
-                castRemaining = math.max(endMS / 1000 - now, 0)
-            end
-        end
+        local castingSpell, castRemaining = GetPlayerCastInfo()
 
         -- Haste-adjusted timings
         local hastePct, hasteMul = 0, 1
@@ -775,7 +773,7 @@ function A:InitRotation()
         -- Filter: if currently casting/channeling a spell, move it out of
         -- position 1 so the display always shows what to cast NEXT.
         do
-            local castName = UnitCastingInfo("player") or UnitChannelInfo("player")
+            local castName = select(1, GetPlayerCastInfo())
             if castName then
                 local castKey = nameToKey[castName]
                 if castKey and prio[1] and prio[1].key == castKey then
@@ -822,7 +820,7 @@ function A:InitRotation()
         -- priority list (e.g. target reached execute while channeling), move SWD
         -- to the front so the primary updates immediately (but only for normal/minus targets).
         do
-            local castName = UnitCastingInfo("player") or UnitChannelInfo("player")
+            local castName = select(1, GetPlayerCastInfo())
             if castName and castName == A.SPELLS.MF.name then
                 for idx = 1, #prio do
                     if prio[idx] and prio[idx].key == "SWD" then

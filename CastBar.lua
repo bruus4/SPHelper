@@ -126,14 +126,17 @@ function A:InitCastBar()
     ----------------------------------------------------------------
     -- Colour helper
     ----------------------------------------------------------------
+    local localColorMap = {
+        [A.SPELLS.MF.name]  = A.COLORS.MF,
+        [A.SPELLS.MB.name]  = A.COLORS.MB,
+        [A.SPELLS.VT.name]  = A.COLORS.VT,
+        [A.SPELLS.SWP.name] = A.COLORS.SWP,
+        [A.SPELLS.SWD.name] = A.COLORS.SWD,
+        [A.SPELLS.DP.name]  = A.COLORS.DP,
+    }
+
     local function BarColorForSpell(name)
-        if name == A.SPELLS.MF.name  then return A.COLORS.MF  end
-        if name == A.SPELLS.MB.name  then return A.COLORS.MB  end
-        if name == A.SPELLS.VT.name  then return A.COLORS.VT  end
-        if name == A.SPELLS.SWP.name then return A.COLORS.SWP end
-        if name == A.SPELLS.SWD.name then return A.COLORS.SWD end
-        if name == A.SPELLS.DP.name  then return A.COLORS.DP  end
-        return A.COLORS.DEFAULT
+        return localColorMap[name] or A.COLORS.DEFAULT
     end
 
     ----------------------------------------------------------------
@@ -151,7 +154,12 @@ function A:InitCastBar()
         f.isMindFlay = (name == A.SPELLS.MF.name) and isChannel
         f.tickCount  = f.isMindFlay and 3 or 0
 
-        local col = BarColorForSpell(name)
+        local col
+        if A.db and A.db.castBar and A.db.castBar.colorMode == "solid" and A.db.castBar.color then
+            col = A.db.castBar.color
+        else
+            col = BarColorForSpell(name)
+        end
         f.bar:SetStatusBarColor(unpack(col))
         f.spellNameText:SetText(name or "")
 
@@ -161,7 +169,13 @@ function A:InitCastBar()
                 t:ClearAllPoints()
                 t:SetPoint("CENTER", bar, "LEFT", BAR_W * frac, 0)
                 t:SetColorTexture(1, 1, 1, 0.7)
-                t:Show()
+                local mode = (A.db and A.db.castBar and A.db.castBar.tickMarkers) or "all"
+                if mode == "all" then
+                    t:Show()
+                else
+                    -- only show the second tick marker when in "second" mode
+                    if i == 2 then t:Show() else t:Hide() end
+                end
             else
                 t:Hide()
             end
@@ -217,7 +231,12 @@ function A:InitCastBar()
         f.tickCount  = 3
         f.ticksDone  = 1
         f.clipSafe   = true
-        local col = BarColorForSpell(A.SPELLS.MF.name)
+        local col
+        if A.db and A.db.castBar and A.db.castBar.colorMode == "solid" and A.db.castBar.color then
+            col = A.db.castBar.color
+        else
+            col = BarColorForSpell(A.SPELLS.MF.name)
+        end
         f.bar:SetStatusBarColor(unpack(col))
         f.spellNameText:SetText(A.SPELLS.MF.name)
         f.tickCounterText:SetText("1/3")
@@ -228,12 +247,27 @@ function A:InitCastBar()
             local frac = (3 - i) / 3
             t:ClearAllPoints()
             t:SetPoint("CENTER", bar, "LEFT", BAR_W * frac, 0)
-            if i <= 1 then
-                t:SetColorTexture(unpack(A.COLORS.SAFE))
+            local mode = (A.db and A.db.castBar and A.db.castBar.tickMarkers) or "all"
+            if mode == "all" then
+                if i <= f.ticksDone then
+                    t:SetColorTexture(unpack(A.COLORS.SAFE))
+                else
+                    t:SetColorTexture(1, 1, 1, 0.7)
+                end
+                t:Show()
             else
-                t:SetColorTexture(1, 1, 1, 0.7)
+                -- only show second tick in "second" mode
+                if i == 2 then
+                    if f.ticksDone >= 2 then
+                        t:SetColorTexture(unpack(A.COLORS.SAFE))
+                    else
+                        t:SetColorTexture(1, 1, 1, 0.7)
+                    end
+                    t:Show()
+                else
+                    t:Hide()
+                end
             end
-            t:Show()
         end
         f.bar:SetValue(0.66)
         f.timerText:SetText("2.0")
@@ -426,13 +460,20 @@ function A:InitCastBar()
                     f.tickMarkers[f.ticksDone]:SetColorTexture(
                         unpack(A.COLORS.SAFE))
                 end
-                -- MF tick feedback (sound first, flash second). Use global handlers.
-                pcall(function()
-                    if A.PlayTickSound then A.PlayTickSound() end
-                end)
-                pcall(function()
-                    if A.DoTickFlash then A.DoTickFlash() end
-                end)
+                -- MF tick feedback (sound first, flash second). Enabled when tickSound or tickFlash not 'none'.
+                local visualsEnabled = false
+                if A.db and A.db.castBar then
+                    local ts = A.db.castBar.tickSound
+                    local tf = A.db.castBar.tickFlash
+                    visualsEnabled = (ts and ts ~= "none") or (tf and tf ~= "none")
+                end
+                if visualsEnabled then
+                    local mode = A.db and A.db.castBar and A.db.castBar.tickMarkers or "all"
+                    if mode == "all" or f.ticksDone == 2 then
+                        pcall(function() if A.PlayTickSound then A.PlayTickSound() end end)
+                        pcall(function() if A.DoTickFlash then A.DoTickFlash() end end)
+                    end
+                end
             end
         end
     end)
