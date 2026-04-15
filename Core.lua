@@ -5,25 +5,307 @@
 ------------------------------------------------------------------------
 SPHelper = SPHelper or {}
 local A = SPHelper
+local unpack = unpack or table.unpack
+
+local function PackValues(...)
+    return { n = select("#", ...), ... }
+end
+
+A._apiCache = A._apiCache or {
+    spellInfo = {},
+    itemInfo  = {},
+    itemIcon  = {},
+}
+
+function A.ClearAPICache()
+    A._apiCache = {
+        spellInfo = {},
+        itemInfo  = {},
+        itemIcon  = {},
+    }
+end
+
+local function NormalizeSpellRef(spellRef)
+    if spellRef == nil then return nil end
+    if type(spellRef) == "table" then
+        return spellRef.id or spellRef.baseId or spellRef.spellId
+    end
+    if type(spellRef) == "string" then
+        local spell = A.SPELLS and A.SPELLS[spellRef]
+        if spell then
+            return spell.id or spell.baseId
+        end
+        local numeric = tonumber(spellRef)
+        if numeric then
+            return numeric
+        end
+    end
+    return spellRef
+end
+
+function A.GetSpellInfoCached(spellRef)
+    spellRef = NormalizeSpellRef(spellRef)
+    if spellRef == nil then return nil end
+    local cache = A._apiCache.spellInfo
+    local cached = cache[spellRef]
+    if not cached then
+        cached = PackValues(GetSpellInfo(spellRef))
+        cache[spellRef] = cached
+    end
+    return unpack(cached, 1, cached.n)
+end
+
+function A.GetSpellIconCached(spellRef)
+    local _, _, icon = A.GetSpellInfoCached(spellRef)
+    return icon
+end
+
+function A.GetItemInfoCached(itemRef)
+    local cache = A._apiCache.itemInfo
+    local cached = cache[itemRef]
+    if cached then
+        return unpack(cached, 1, cached.n)
+    end
+
+    local result = PackValues(GetItemInfo(itemRef))
+    if result[1] ~= nil then
+        cache[itemRef] = result
+    end
+    return unpack(result, 1, result.n)
+end
+
+function A.GetItemIconCached(itemRef)
+    local cache = A._apiCache.itemIcon
+    local cached = cache[itemRef]
+    if cached ~= nil then
+        return cached
+    end
+
+    local icon = GetItemIcon(itemRef)
+    if icon then
+        cache[itemRef] = icon
+    end
+    return icon
+end
+
+A._targetMetrics = A._targetMetrics or {}
+A._spellTravel = A._spellTravel or {
+    byId = {},
+    byName = {},
+    pending = {},
+}
+
+function A.ResetTargetMetrics()
+    wipe(A._targetMetrics)
+end
+
+function A.ClearTargetMetric(guid)
+    if guid then
+        A._targetMetrics[guid] = nil
+    end
+end
+
+function A.UpdateTargetHealthSample(guid, hpPct, now)
+    if not guid or type(hpPct) ~= "number" then return nil end
+
+    now = now or GetTime()
+    if hpPct < 0 then hpPct = 0 end
+    if hpPct > 1 then hpPct = 1 end
+
+    local rec = A._targetMetrics[guid]
+    if not rec then
+        rec = {
+            hpPct = hpPct,
+            lastHP = hpPct,
+            lastTime = now,
+            rate = 0,
+            ttd = nil,
+            alpha = 0.25,
+        }
+        A._targetMetrics[guid] = rec
+        return nil
+    end
+
+    local dt = rec.lastTime and (now - rec.lastTime) or 0
+    if dt > 0.1 then
+        local instantRate = (rec.lastHP - hpPct) / dt
+        rec.rate = (rec.alpha * instantRate) + ((1 - rec.alpha) * (rec.rate or 0))
+        if rec.rate < 0 then
+            rec.rate = 0
+        end
+        rec.lastHP = hpPct
+        rec.lastTime = now
+    end
+
+    rec.hpPct = hpPct
+    if hpPct <= 0 then
+        rec.ttd = 0
+    elseif rec.rate and rec.rate > 0.0001 then
+        rec.ttd = hpPct / rec.rate
+    else
+        rec.ttd = nil
+    end
+    return rec.ttd
+end
+
+function A.GetTargetTimeToDie(guid)
+    local rec = guid and A._targetMetrics[guid]
+    if not rec then return nil end
+    return rec.ttd
+end
+
+function A.GetUnitTimeToDie(unit)
+    if not unit or not UnitExists(unit) then return nil end
+    local guid = UnitGUID(unit)
+    if not guid then return nil end
+
+    local maxHP = UnitHealthMax(unit) or 0
+    if maxHP <= 0 then return nil end
+
+    local hpPct = (UnitHealth(unit) or 0) / maxHP
+    return A.UpdateTargetHealthSample(guid, hpPct)
+end
+
+local function ResolveSpellTravelRef(spellRef)
+    if spellRef == nil then return nil, nil end
+    if type(spellRef) == "number" then
+        return spellRef, A.GetSpellInfoCached(spellRef)
+    end
+    if type(spellRef) == "table" then
+        return spellRef.id, spellRef.name
+    end
+    if type(spellRef) == "string" then
+        local spell = A.SPELLS and A.SPELLS[spellRef]
+        if spell then
+            return spell.id, spell.name
+        end
+        local numeric = tonumber(spellRef)
+        if numeric then
+            return numeric, A.GetSpellInfoCached(numeric)
+        end
+        return nil, spellRef
+    end
+    return nil, nil
+end
+
+local function UpdateTravelRecord(store, key, sample, now)
+    if key == nil then return end
+    local rec = store[key]
+    if not rec then
+        store[key] = {
+            ema = sample,
+            last = sample,
+            samples = 1,
+            updatedAt = now,
+        }
+        return
+    end
+
+    rec.last = sample
+    rec.samples = (rec.samples or 0) + 1
+    rec.ema = ((rec.ema or sample) * 0.75) + (sample * 0.25)
+    rec.updatedAt = now
+end
+
+function A.ClearSpellTravelMetrics()
+    A._spellTravel = {
+        byId = {},
+        byName = {},
+        pending = {},
+    }
+end
+
+function A.RecordSpellTravelSample(spellId, spellName, sample, now)
+    now = now or GetTime()
+    sample = tonumber(sample)
+    if not sample or sample < 0 or sample > 5 then return nil end
+
+    if spellId then
+        UpdateTravelRecord(A._spellTravel.byId, spellId, sample, now)
+    end
+    if spellName and spellName ~= "" then
+        UpdateTravelRecord(A._spellTravel.byName, spellName, sample, now)
+    end
+    return sample
+end
+
+function A.RecordSpellTravelLaunch(spellId, spellName, targetGUID, launchTime)
+    launchTime = launchTime or GetTime()
+    local key = spellId or spellName
+    if not key then return end
+
+    local pending = A._spellTravel.pending[key]
+    if not pending then
+        pending = {}
+        A._spellTravel.pending[key] = pending
+    end
+
+    pending[#pending + 1] = {
+        spellId = spellId,
+        spellName = spellName,
+        targetGUID = targetGUID,
+        launchTime = launchTime,
+    }
+
+    while #pending > 5 do
+        table.remove(pending, 1)
+    end
+end
+
+function A.RecordSpellTravelImpact(spellId, spellName, destGUID, impactTime)
+    impactTime = impactTime or GetTime()
+
+    local pending = A._spellTravel.pending[spellId] or A._spellTravel.pending[spellName]
+    if not pending or #pending == 0 then return nil end
+
+    local matchIndex = nil
+    for i = #pending, 1, -1 do
+        local launch = pending[i]
+        local age = impactTime - (launch.launchTime or impactTime)
+        if age >= 0 and age <= 5 and (not destGUID or not launch.targetGUID or launch.targetGUID == destGUID) then
+            matchIndex = i
+            break
+        end
+    end
+
+    if not matchIndex then
+        for i = #pending, 1, -1 do
+            local launch = pending[i]
+            local age = impactTime - (launch.launchTime or impactTime)
+            if age >= 0 and age <= 5 then
+                matchIndex = i
+                break
+            end
+        end
+    end
+
+    if not matchIndex then return nil end
+
+    local launch = table.remove(pending, matchIndex)
+    if #pending == 0 then
+        if spellId then A._spellTravel.pending[spellId] = nil end
+        if spellName then A._spellTravel.pending[spellName] = nil end
+    end
+
+    local sample = impactTime - (launch.launchTime or impactTime)
+    return A.RecordSpellTravelSample(spellId or launch.spellId, spellName or launch.spellName, sample, impactTime)
+end
+
+function A.GetSpellTravelTime(spellRef)
+    local spellId, spellName = ResolveSpellTravelRef(spellRef)
+    local rec = spellId and A._spellTravel.byId[spellId] or nil
+    if not rec and spellName then
+        rec = A._spellTravel.byName[spellName]
+    end
+    return rec and rec.ema or 0
+end
 
 ------------------------------------------------------------------------
--- Spell data  (TBC 2.5.x spell IDs – base rank names work for all ranks)
+-- Spell data is populated by SpellDatabase.lua.
+-- Each runtime entry uses a stable low-rank `baseId` plus a resolved
+-- `id` when the player knows a higher effective rank.
 ------------------------------------------------------------------------
-A.SPELLS = {
-    VT   = { id = 34914, name = GetSpellInfo(34914) or "Vampiric Touch"   },
-    SWP  = { id = 589,   name = GetSpellInfo(589)   or "Shadow Word: Pain"},
-    MB   = { id = 8092,  name = GetSpellInfo(8092)  or "Mind Blast"       },
-    MF   = { id = 15407, name = GetSpellInfo(15407)  or "Mind Flay"       },
-    SWD  = { id = 32379, name = GetSpellInfo(32379)  or "Shadow Word: Death"},
-    DP   = { id = 2944,  name = GetSpellInfo(2944)   or "Devouring Plague" },
-    SF   = { id = 34433, name = GetSpellInfo(34433)  or "Shadowfiend"      },
-    VE   = { id = 15286, name = GetSpellInfo(15286)  or "Vampiric Embrace"  },
-    SFORM= { id = 15473, name = GetSpellInfo(15473)  or "Shadowform"        },
-    MS   = { id = 453,   name = GetSpellInfo(453)    or "Mind Soothe"       },
-    SU   = { id = 9484,  name = GetSpellInfo(9484)   or "Shackle Undead"    },
-}
--- Inner Focus (suggested for boss spellbatching with Mind Blast/SWD)
-A.SPELLS.IF = { id = 14751, name = GetSpellInfo(14751) or "Inner Focus" }
+A.SPELLS = A.SPELLS or {}
 
 ------------------------------------------------------------------------
 -- Consumable items (for mana suggestions)
@@ -143,6 +425,10 @@ end
 
 -- Remaining cooldown on a spell (0 if ready)
 function A.GetSpellCD(spellId)
+    if A.ResolveSpellID then
+        spellId = A.ResolveSpellID(spellId) or spellId
+    end
+    if type(spellId) ~= "number" then return 0 end
     local start, dur, enabled = GetSpellCooldown(spellId)
     if not start or start == 0 then return 0 end
     local remaining = start + dur - GetTime()
@@ -151,6 +437,10 @@ end
 
 -- Remaining cooldown IGNORING the GCD (treats GCD-only as 0)
 function A.GetSpellCDReal(spellId)
+    if A.ResolveSpellID then
+        spellId = A.ResolveSpellID(spellId) or spellId
+    end
+    if type(spellId) ~= "number" then return 0 end
     local start, dur, enabled = GetSpellCooldown(spellId)
     if not start or start == 0 then return 0 end
     -- If duration <= 1.5, the spell is only on GCD, not its own CD
@@ -230,8 +520,27 @@ function A.FindDebuff(unit, spellName)
 end
 
 -- Check if player knows a spell (has it in spellbook)
-function A.KnowsSpell(spellId)
-    return IsSpellKnown(spellId)
+function A.KnowsSpell(spellRef)
+    if A.ResolveSpellID then
+        spellRef = A.ResolveSpellID(spellRef) or spellRef
+    elseif type(spellRef) == "string" then
+        local spell = A.SPELLS and A.SPELLS[spellRef]
+        spellRef = spell and (spell.id or spell.baseId) or tonumber(spellRef)
+    elseif type(spellRef) == "table" then
+        spellRef = spellRef.id or spellRef.baseId or spellRef.spellId
+    end
+
+    if type(spellRef) ~= "number" then
+        return false
+    end
+
+    if IsSpellKnown(spellRef) then
+        return true
+    end
+    if type(IsPlayerSpell) == "function" then
+        return IsPlayerSpell(spellRef) and true or false
+    end
+    return false
 end
 
 ------------------------------------------------------------------------
@@ -252,6 +561,42 @@ function A.GetTargetHP()
     local pct = 0
     if maxHp > 0 then pct = (hp / maxHp) * 100 end
     return hp, maxHp, pct
+end
+
+------------------------------------------------------------------------
+-- Target classification (boss vs elite-trash vs normal)
+-- Uses ENCOUNTER_START/END when available, falls back to heuristic.
+------------------------------------------------------------------------
+A._activeBossEncounter = false
+
+do
+    local bossEnc = CreateFrame("Frame")
+    -- ENCOUNTER_START / _END may not fire on all TBC Anniversary builds.
+    -- RegisterEvent is wrapped in pcall so missing events are harmless.
+    pcall(function() bossEnc:RegisterEvent("ENCOUNTER_START") end)
+    pcall(function() bossEnc:RegisterEvent("ENCOUNTER_END") end)
+    bossEnc:SetScript("OnEvent", function(_, ev)
+        A._activeBossEncounter = (ev == "ENCOUNTER_START")
+    end)
+end
+
+--- Returns "boss", "elite", "normal", "minus", or "none".
+function A.GetTargetClassification()
+    if not UnitExists("target") then return "none" end
+    local c = UnitClassification("target") or "normal"
+    -- worldboss is always a boss
+    if c == "worldboss" then return "boss" end
+    -- Inside an instance, distinguish boss from trash-elite
+    local _, instType = IsInInstance()
+    if instType == "raid" or instType == "party" then
+        if A._activeBossEncounter then return "boss" end
+        if c == "elite" or c == "rareelite" then return "elite" end
+        return c == "minus" and "minus" or "normal"
+    end
+    -- Open world
+    if c == "elite" or c == "rareelite" then return "elite" end
+    if c == "minus" then return "minus" end
+    return "normal"
 end
 
 ------------------------------------------------------------------------
@@ -301,7 +646,142 @@ end
 -- Debug logging removed for release builds. Provide a stable no-op
 -- implementation so existing call-sites remain safe.
 ------------------------------------------------------------------------
-function A.DebugLog() end
+local function NormalizeDebugModule(module)
+    module = tostring(module or "GEN")
+    module = strtrim(module):upper()
+    if module == "" then module = "GEN" end
+    return module
+end
+
+local function EnsureDebugConfig()
+    if not A.db then return nil end
+    A.db.debug = A.db.debug or {}
+    if type(A.db.debug.modules) ~= "table" or A.db.debug.modules == A.defaults.debug.modules then
+        local copy = {}
+        if type(A.db.debug.modules) == "table" then
+            for key, value in pairs(A.db.debug.modules) do
+                copy[key] = value
+            end
+        end
+        A.db.debug.modules = copy
+    end
+    if A.db.debug.echo == nil then A.db.debug.echo = false end
+    if type(A.db.debug.bufferSize) ~= "number" then A.db.debug.bufferSize = 200 end
+    return A.db.debug
+end
+
+local function SyncDebugEnabled()
+    local enabled = false
+    local debugCfg = EnsureDebugConfig()
+    if debugCfg and debugCfg.modules then
+        for _, value in pairs(debugCfg.modules) do
+            if value then
+                enabled = true
+                break
+            end
+        end
+    end
+    A.debugEnabled = enabled
+end
+
+function A.IsDebugModuleEnabled(module)
+    local debugCfg = EnsureDebugConfig()
+    if not debugCfg or not debugCfg.modules then return false end
+    local key = NormalizeDebugModule(module)
+    return debugCfg.modules.ALL == true or debugCfg.modules[key] == true
+end
+
+function A.SetDebugModuleEnabled(module, enabled)
+    local debugCfg = EnsureDebugConfig()
+    if not debugCfg then return false end
+
+    local key = NormalizeDebugModule(module)
+    if enabled then
+        debugCfg.modules[key] = true
+    else
+        debugCfg.modules[key] = nil
+    end
+    SyncDebugEnabled()
+    return true
+end
+
+function A.GetKnownDebugModules()
+    local modules = {}
+    local seen = {}
+    local function Add(key)
+        if not key or seen[key] then return end
+        seen[key] = true
+        modules[#modules + 1] = key
+    end
+
+    for _, key in ipairs({ "ALL", "CAST", "CORE", "ENGINE", "ERR", "EVT", "ROT" }) do
+        Add(key)
+    end
+    if A._debugSeenModules then
+        for key in pairs(A._debugSeenModules) do
+            Add(key)
+        end
+    end
+    local debugCfg = EnsureDebugConfig()
+    if debugCfg and debugCfg.modules then
+        for key in pairs(debugCfg.modules) do
+            Add(key)
+        end
+    end
+    table.sort(modules)
+    return modules
+end
+
+function A.ClearDebugLog()
+    A._debugBuffer = {}
+end
+
+function A.DebugLog(module, msg)
+    local key = NormalizeDebugModule(module)
+    A._debugSeenModules = A._debugSeenModules or {}
+    A._debugSeenModules[key] = true
+
+    if not A.IsDebugModuleEnabled(key) then return end
+
+    A._debugBuffer = A._debugBuffer or {}
+    local entry = {
+        time = GetTime(),
+        module = key,
+        msg = tostring(msg or ""),
+    }
+    table.insert(A._debugBuffer, 1, entry)
+
+    local debugCfg = EnsureDebugConfig()
+    local limit = (debugCfg and debugCfg.bufferSize) or 200
+    while #A._debugBuffer > limit do
+        table.remove(A._debugBuffer)
+    end
+
+    if debugCfg and debugCfg.echo then
+        pcall(print, string.format("|cff8882d5SPHelper|r [%s] %s", key, entry.msg))
+    end
+end
+
+function A.DumpDebugLog(module)
+    local buffer = A._debugBuffer or {}
+    if #buffer == 0 then
+        print("SPHelper: no debug log entries recorded.")
+        return
+    end
+
+    local filter = module and NormalizeDebugModule(module) or nil
+    local shown = 0
+    print("SPHelper: debug log" .. (filter and (" [" .. filter .. "]") or "") .. ":")
+    for _, entry in ipairs(buffer) do
+        if not filter or entry.module == filter then
+            shown = shown + 1
+            print(string.format("[%02d][%s][%.3f] %s", shown, entry.module or "GEN", entry.time or 0, entry.msg or ""))
+        end
+    end
+    if shown == 0 then
+        print("SPHelper: no debug entries for module " .. filter .. ".")
+    end
+end
 
 -- Maintain a runtime flag for backwards compatibility with existing checks.
 A.debugEnabled = false
@@ -316,30 +796,130 @@ A.defaults = {
     dotTracker  = { enabled = true, width = 300, height = 40, rowHeight = 40,
                     maxTargets = 8, warnSeconds = 3, blinkSpeed = 4, dotIconSize = 18,
                     portraitSide = "left", warnMode = "border",
-                    warnBorderSize = 4, warnBarAlpha = 0.35, warnIconAlpha = 0.6, newTargetPosition = "bottom", anchorPosition = "top" },
-    rotation    = { enabled = true, iconSize = 40, primaryIconSize = 40,
-                    ifInsert = { enabled = true, onlyForBoss = true, before = "MB" } },
-    -- Selected consumables to track (item IDs). Use "none" to disable.
+                    warnBorderSize = 4, warnBarAlpha = 0.35, warnIconAlpha = 0.6, newTargetPosition = "bottom", anchorPosition = "top", sortMode = "addOrder" },
+    rotation    = { enabled = true, iconSize = 40, primaryIconSize = 40 },
+    debug       = { echo = false, bufferSize = 200, modules = {} },
+    -- Per-spec settings namespace (populated by migration and SpecManager)
+    specs       = {},
+    -- Legacy flat keys kept for backward compatibility during migration.
+    -- Phase 2 will update all readers to use A.SpecVal(); these can be
+    -- removed after Phase 2 is complete.
     selectedPotionItem = 22832,
     selectedRuneItem   = 20520,
     swdMode     = "always",
     swdWorld    = "always",
     swdDungeon  = "always",
     swdRaid     = "execute",
-    -- Safety margin (%) applied to SW:D execute check. 0 = exact, 10 = require 10% extra damage.
     swdSafetyPct = 10,
     sfManaThreshold      = 35,
     suggestPot           = true,
     potManaThreshold     = 70,
     suggestRune          = true,
     runeManaThreshold    = 40,
-    -- If true, use mana potion before Shadowfiend (early potting)
     potEarly             = false,
-    -- Which potion/rune to track: "auto" = detect in bags, "none" = disabled,
-    -- or set to an itemId string (e.g. "22832") to track a specific item.
     potionTrack = "auto",
     runeTrack   = "auto",
 }
+
+------------------------------------------------------------------------
+-- Spec-specific defaults (Shadow Priest).
+-- These are the canonical defaults for the shadow_priest spec.
+-- They live here temporarily; Phase 1b moves them into the spec file.
+------------------------------------------------------------------------
+A.SPEC_DEFAULTS = {
+    shadow_priest = {
+        selectedPotionItem = 22832,
+        selectedRuneItem   = 20520,
+        swdMode     = "always",
+        swdWorld    = "always",
+        swdDungeon  = "always",
+        swdRaid     = "execute",
+        swdSafetyPct = 10,
+        sfManaThreshold      = 35,
+        suggestPot           = true,
+        potManaThreshold     = 70,
+        suggestRune          = true,
+        runeManaThreshold    = 40,
+        potEarly             = false,
+        potionTrack = "auto",
+        runeTrack   = "auto",
+        -- Per-spell rotation toggles (only for optional/situational spells)
+        use_DP               = true,
+        use_SWD              = true,
+        use_SF               = true,
+        -- ifInsert intentionally NOT in SPEC_DEFAULTS: Config panel owns
+        -- A.db.rotation.ifInsert and GetSpecTable("ifInsert") falls through to it.
+    },
+}
+
+------------------------------------------------------------------------
+-- Spec-aware DB accessors
+-- A.SpecVal(key [, default])  — read from active spec namespace, fallback to flat A.db, then default
+-- A.SetSpecVal(key, value)    — write to active spec namespace
+------------------------------------------------------------------------
+A._activeSpecID = nil  -- set by SpecManager when a matching spec is activated
+
+function A.SpecVal(key, default)
+    local specID = A._activeSpecID
+    local sdb = A.db and A.db.specs and A.db.specs[specID]
+    if sdb and sdb[key] ~= nil then return sdb[key] end
+    -- Backward compat: fall through to flat A.db
+    if A.db and A.db[key] ~= nil then return A.db[key] end
+    -- Fall through to SPEC_DEFAULTS
+    local sd = A.SPEC_DEFAULTS and A.SPEC_DEFAULTS[specID]
+    if sd and sd[key] ~= nil then return sd[key] end
+    -- Fall through to active spec's uiOptions defaults
+    if A.SpecManager and A.SpecManager.GetSpecByID then
+        local spec = A.SpecManager:GetSpecByID(specID)
+        if spec then
+            if spec.uiOptions then
+                for _, opt in ipairs(spec.uiOptions) do
+                    if opt.key == key and opt.default ~= nil then
+                        return opt.default
+                    end
+                end
+            end
+            -- Also check castBarOptions defaults
+            if spec.castBarOptions then
+                for _, opt in ipairs(spec.castBarOptions) do
+                    if opt.key == key and opt.default ~= nil then
+                        return opt.default
+                    end
+                end
+            end
+        end
+    end
+    -- Also check customOptions in DB
+    if sdb and sdb.customOptions then
+        for _, opt in ipairs(sdb.customOptions) do
+            if opt.key == key and opt.default ~= nil then
+                return opt.default
+            end
+        end
+    end
+    return default
+end
+
+function A.SetSpecVal(key, value)
+    local specID = A._activeSpecID
+    if not A.db.specs then A.db.specs = {} end
+    if not A.db.specs[specID] then A.db.specs[specID] = {} end
+    A.db.specs[specID][key] = value
+end
+
+-- Return the spec settings sub-table directly (for ifInsert and other nested reads)
+function A.GetSpecTable(key)
+    local specID = A._activeSpecID
+    local sdb = A.db and A.db.specs and A.db.specs[specID]
+    if sdb and sdb[key] ~= nil then return sdb[key] end
+    -- Backward compat: check A.db.rotation for ifInsert
+    if key == "ifInsert" and A.db and A.db.rotation and A.db.rotation.ifInsert then
+        return A.db.rotation.ifInsert
+    end
+    local sd = A.SPEC_DEFAULTS and A.SPEC_DEFAULTS[specID]
+    if sd and sd[key] ~= nil then return sd[key] end
+    return nil
+end
 
 function A.InitDB()
     if not SPHelperDB then SPHelperDB = {} end
@@ -360,6 +940,9 @@ function A.InitDB()
         end
     end
     A.db = SPHelperDB
+
+    EnsureDebugConfig()
+    SyncDebugEnabled()
 
     -- Migrate old boolean tickSound/tickFlash to string keys
     if A.db.castBar then
@@ -390,6 +973,47 @@ function A.InitDB()
     end
 
     -- Debug logging removed; no runtime toggle to sync.
+
+    --------------------------------------------------------------------
+    -- Phase 0 migration: copy spec-specific flat keys into
+    -- A.db.specs["shadow_priest"] if they exist at the top level.
+    -- This runs every load but only copies when the spec namespace
+    -- is missing a key that the flat table has.  The flat keys are
+    -- NOT deleted so backward-compatible readers still work.
+    --------------------------------------------------------------------
+    do
+        if not A.db.specs then A.db.specs = {} end
+        local specID = "shadow_priest"
+        if not A.db.specs[specID] then A.db.specs[specID] = {} end
+        local sdb = A.db.specs[specID]
+        local MIGRATE_KEYS = {
+            "selectedPotionItem", "selectedRuneItem",
+            "swdMode", "swdWorld", "swdDungeon", "swdRaid", "swdSafetyPct",
+            "sfManaThreshold", "suggestPot", "potManaThreshold",
+            "suggestRune", "runeManaThreshold", "potEarly",
+            "potionTrack", "runeTrack",
+        }
+        for _, k in ipairs(MIGRATE_KEYS) do
+            if sdb[k] == nil and A.db[k] ~= nil then
+                sdb[k] = A.db[k]
+            end
+        end
+        -- Remove stale sdb.ifInsert if it exists (previously migrated in error).
+        -- Config panel owns A.db.rotation.ifInsert; removing from spec namespace
+        -- prevents GetSpecTable from returning a stale/diverged copy.
+        sdb.ifInsert = nil
+
+        -- Migrate ifInsert from A.db.rotation.ifInsert → specs.shadow_priest.ifInsert
+        -- INTENTIONALLY SKIPPED: Config panel writes to A.db.rotation.ifInsert and
+        -- GetSpecTable("ifInsert") falls through to that path when sdb.ifInsert is nil.
+        -- Copying here would create a divergent copy after every /reload.
+        --[[ if sdb.ifInsert == nil and A.db.rotation and A.db.rotation.ifInsert then
+            sdb.ifInsert = {}
+            for k2, v2 in pairs(A.db.rotation.ifInsert) do
+                sdb.ifInsert[k2] = v2
+            end
+        end --]]
+    end
 end
 
 -- Play a tick sound (shared helper used by both the cast bar and tick manager)
@@ -563,6 +1187,46 @@ function A.InitTickManager()
     end)
 end
 
+function A.InitSpellTravelTracker()
+    if A._spellTravelInited then return end
+    A._spellTravelInited = true
+
+    local frame = CreateFrame("Frame")
+    frame:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
+    frame:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
+    frame:SetScript("OnEvent", function(_, event, ...)
+        if event == "UNIT_SPELLCAST_SUCCEEDED" then
+            local unit, _, spellId = ...
+            if unit ~= "player" or not spellId then return end
+
+            local spellName = A.GetSpellInfoCached(spellId)
+            if not spellName then return end
+
+            local targetGUID = nil
+            if UnitExists("target") and UnitCanAttack("player", "target") then
+                targetGUID = UnitGUID("target")
+            end
+            A.RecordSpellTravelLaunch(spellId, spellName, targetGUID, GetTime())
+            return
+        end
+
+        local _, subEvent, _, sourceGUID, _, _, _, destGUID, _, _, _, spellId, spellName = CombatLogGetCurrentEventInfo()
+        if sourceGUID ~= UnitGUID("player") then return end
+
+        if subEvent == "SPELL_DAMAGE"
+            or subEvent == "SPELL_MISSED"
+            or subEvent == "SPELL_AURA_APPLIED"
+            or subEvent == "SPELL_AURA_REFRESH"
+            or subEvent == "SPELL_AURA_APPLIED_DOSE"
+            or subEvent == "SPELL_HEAL"
+        then
+            A.RecordSpellTravelImpact(spellId, spellName, destGUID, GetTime())
+        end
+    end)
+
+    A._spellTravelFrame = frame
+end
+
 -- Error forwarding: capture Lua errors and forward relevant SPHelper errors to chat+print.
 do
     local prevHandler = geterrorhandler()
@@ -666,19 +1330,9 @@ loader:SetScript("OnEvent", function(self, event, addon)
     if addon ~= "SPHelper" then return end
     A.InitDB()
 
-    -- Class gate: only load for Priests
-    local _, class = UnitClass("player")
-    if class ~= "PRIEST" then
-        self:UnregisterEvent("ADDON_LOADED")
-        return
-    end
-
-    -- Fire module inits (always init so frames exist, visibility handled separately)
-    if A.InitCastBar    then A:InitCastBar()    end
-    if A.InitDotTracker then A:InitDotTracker() end
-    if A.InitRotation   then A:InitRotation()   end
-    if A.InitConfig     then A:InitConfig()     end
+    -- TickManager is global (not spec-specific) — always init
     if A.InitTickManager then A.InitTickManager() end
+    if A.InitSpellTravelTracker then A.InitSpellTravelTracker() end
 
     -- Attempt to join a diagnostics channel for error forwarding
     A._sphelperChannelID = nil
@@ -694,17 +1348,26 @@ loader:SetScript("OnEvent", function(self, event, addon)
             A._sphelperChannelID = chanID
         end
     end
-    -- Try immediately once
     pcall(A.EnsureSphelperChannel)
 
-    -- Check shadow spec and set visibility (delay for talent data)
+    -- Ensure config (slash commands / options panel) is initialized even
+    -- if no spec becomes active. This makes `/sph` available for all classes.
+    if A.InitConfig then pcall(A.InitConfig, A) end
+
+    -- Delay spec evaluation so talent data is ready
     C_Timer.After(1, function()
-        local isShadow = A.IsShadowPriest()
-        A.SetAllVisible(isShadow)
-        if not isShadow then
-            print("|cff8882d5SPHelper|r: Waiting for Shadowform talent (hidden).")
-        else
+        if A.SpecManager then
+            A.SpecManager:ReEvaluate()
+        end
+        -- Informational message
+        local hasActive = false
+        if A.SpecManager then
+            for _ in pairs(A.SpecManager:GetActiveSpecs()) do hasActive = true; break end
+        end
+        if hasActive then
             print("|cff8882d5SPHelper|r loaded.  /sph to configure.")
+        else
+            print("|cff8882d5SPHelper|r loaded (no matching spec active).  /sph to configure.")
         end
     end)
 
@@ -713,15 +1376,13 @@ loader:SetScript("OnEvent", function(self, event, addon)
     specWatcher:RegisterEvent("PLAYER_TALENT_UPDATE")
     specWatcher:RegisterEvent("ACTIVE_TALENT_GROUP_CHANGED")
     specWatcher:RegisterEvent("SPELLS_CHANGED")
-    specWatcher:SetScript("OnEvent", function()
+    specWatcher:SetScript("OnEvent", function(_, ev)
+        if ev == "SPELLS_CHANGED" and A.ClearAPICache then
+            A.ClearAPICache()
+        end
         C_Timer.After(0.5, function()
-            local wasShadow = A._visible
-            local isShadow = A.IsShadowPriest()
-            A.SetAllVisible(isShadow)
-            if isShadow and not wasShadow then
-                print("|cff8882d5SPHelper|r: Shadow spec detected — enabled.")
-            elseif not isShadow and wasShadow then
-                print("|cff8882d5SPHelper|r: Non-shadow spec — hidden.")
+            if A.SpecManager then
+                A.SpecManager:ReEvaluate()
             end
         end)
     end)

@@ -2,11 +2,31 @@
 ## Title: SPHelper - Shadow Priest HUD
 ## Notes: Cast bar with Mind Flay clip, multi-target DoT tracker, and rotation advisor for TBC Shadow Priests.
 ## Author: Copilot
-## Version: 1.1.0
+## Version: 2.0.0
 ## SavedVariables: SPHelperDB
 
+# Core must load first
 Core.lua
+SpellDatabase.lua
+
+# Spec system (manager then validator, before helpers and specs)
+SpecManager.lua
+SpecValidator.lua
+
+# Helper modules (register themselves with SpecManager)
 CastBar.lua
 DotTracker.lua
 Rotation.lua
+RotationEngine.lua
+ChannelHelper.lua
+SpellData.lua
+SpecUI.lua
 Config.lua
+
+# Spec files (register themselves with SpecManager at load time)
+# To add a new spec:  create specs/ClassName_SpecName.lua, call
+# SPHelper.SpecManager:RegisterSpec(spec), then list the file here.
+# Load order: Core → SpecManager → SpecValidator → Helpers → SpecUI/Config → Specs
+specs\Shadow_Priest.lua
+specs\Druid_Balance.lua
+specs\Feral_Druid.lua

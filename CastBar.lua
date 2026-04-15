@@ -1,8 +1,8 @@
 ------------------------------------------------------------------------
 -- SPHelper  –  CastBar.lua
--- Player cast / channel bar with Mind Flay tick markers & clip indicator.
+-- Player cast / channel bar with tick markers & clip indicator.
 -- Handles spell pushback via UNIT_SPELLCAST_DELAYED / CHANNEL_UPDATE.
--- CLIP only shows when there's something worth clipping for.
+-- CLIP shows when the ChannelHelper clip window is open.
 ------------------------------------------------------------------------
 local A = SPHelper
 
@@ -43,7 +43,7 @@ function A:InitCastBar()
     bar:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
     bar:SetMinMaxValues(0, 1)
     bar:SetValue(0)
-    bar:SetStatusBarColor(unpack(A.COLORS.MF))
+    bar:SetStatusBarColor(unpack(A.COLORS.DEFAULT or A.COLORS.MF or {0.5, 0.5, 1, 1}))
     f.bar = bar
 
     local spark = bar:CreateTexture(nil, "OVERLAY")
@@ -74,10 +74,11 @@ function A:InitCastBar()
     f.timerText = timer
 
     ----------------------------------------------------------------
-    -- Tick markers (3 vertical lines for Mind Flay)
+    -- Tick markers (created dynamically per channel spell tick count)
     ----------------------------------------------------------------
     f.tickMarkers = {}
-    for i = 1, 3 do
+    local MAX_TICK_MARKERS = 10
+    for i = 1, MAX_TICK_MARKERS do
         local t = bar:CreateTexture(nil, "OVERLAY")
         t:SetColorTexture(1, 1, 1, 0.7)
         t:SetSize(2, BAR_H)
@@ -93,7 +94,10 @@ function A:InitCastBar()
     clipText:SetFont("Fonts\\FRIZQT__.TTF", 14, "OUTLINE")
     clipText:SetPoint("TOP", f, "BOTTOM", 0, -2)
     clipText:SetTextColor(unpack(A.COLORS.SAFE))
-    clipText:SetText("CLIP")
+    -- Do not show literal "CLIP" text; keep string empty so only the
+    -- overlay/visual cue is used. The preview used to force this text,
+    -- but users requested removing the label.
+    clipText:SetText("")
     clipText:Hide()
     f.clipText = clipText
 
@@ -124,16 +128,28 @@ function A:InitCastBar()
     f._preview    = false
 
     ----------------------------------------------------------------
-    -- Colour helper
+    -- Colour helper — built from spec's channelSpells color keys, or falls
+    -- back to A.COLORS.DEFAULT for any spell not explicitly mapped.
     ----------------------------------------------------------------
-    local localColorMap = {
-        [A.SPELLS.MF.name]  = A.COLORS.MF,
-        [A.SPELLS.MB.name]  = A.COLORS.MB,
-        [A.SPELLS.VT.name]  = A.COLORS.VT,
-        [A.SPELLS.SWP.name] = A.COLORS.SWP,
-        [A.SPELLS.SWD.name] = A.COLORS.SWD,
-        [A.SPELLS.DP.name]  = A.COLORS.DP,
-    }
+    local function BuildColorMap()
+        local map = {}
+        local CH = A.ChannelHelper
+        if CH and CH.KNOWN_CHANNELS then
+            for spellName, info in pairs(CH.KNOWN_CHANNELS) do
+                if info.spellKey and A.COLORS[info.spellKey] then
+                    map[spellName] = A.COLORS[info.spellKey]
+                end
+            end
+        end
+        -- Also map any A.SPELLS entry that has a matching color key
+        for key, spell in pairs(A.SPELLS) do
+            if spell.name and A.COLORS[key] then
+                map[spell.name] = A.COLORS[key]
+            end
+        end
+        return map
+    end
+    local localColorMap = BuildColorMap()
 
     local function BarColorForSpell(name)
         return localColorMap[name] or A.COLORS.DEFAULT
@@ -151,8 +167,15 @@ function A:InitCastBar()
         f.ticksDone  = 0
         f.clipSafe   = false
 
-        f.isMindFlay = (name == A.SPELLS.MF.name) and isChannel
-        f.tickCount  = f.isMindFlay and 3 or 0
+        f.isMindFlay = false  -- kept for backward compat; use f.isTrackedChannel instead
+
+        -- Check if this is any tracked channel spell (data-driven)
+        local CH = A.ChannelHelper
+        local channelInfo = isChannel and CH and CH.KNOWN_CHANNELS and CH.KNOWN_CHANNELS[name]
+        f.isTrackedChannel = channelInfo ~= nil
+        f.channelInfo      = channelInfo
+        f.tickCount  = channelInfo and channelInfo.ticks or (f.isMindFlay and 3 or 0)
+        f._earlyTickFired = {}  -- reset early tick feedback tracker
 
         local col
         if A.db and A.db.castBar and A.db.castBar.colorMode == "solid" and A.db.castBar.color then
@@ -164,17 +187,30 @@ function A:InitCastBar()
         f.spellNameText:SetText(name or "")
 
         for i, t in ipairs(f.tickMarkers) do
-            if f.isMindFlay then
-                local frac = (3 - i) / 3
+            local showMarkers = f.isTrackedChannel and (not f.channelInfo or f.channelInfo.tickMarkers ~= false)
+            if showMarkers and i <= f.tickCount then
+                local frac = (f.tickCount - i) / f.tickCount
                 t:ClearAllPoints()
                 t:SetPoint("CENTER", bar, "LEFT", BAR_W * frac, 0)
                 t:SetColorTexture(1, 1, 1, 0.7)
-                local mode = (A.db and A.db.castBar and A.db.castBar.tickMarkers) or "all"
+                -- Per-spell tick marker mode (falls back to global setting)
+                local mode = f.channelInfo and f.channelInfo.tickMarkerMode
+                if not mode or mode == "" then
+                    mode = A.SpecVal and A.SpecVal("tickMarkers", "all") or "all"
+                end
                 if mode == "all" then
                     t:Show()
+                elseif mode == "remaining" then
+                    t:Show()  -- will be hidden via OnUpdate as ticks complete
+                elseif mode == "specific" then
+                    local ticks = f.channelInfo and f.channelInfo.tickMarkerTicks or {}
+                    local show = false
+                    for _, tn in ipairs(ticks) do
+                        if tonumber(tn) == i then show = true; break end
+                    end
+                    if show then t:Show() else t:Hide() end
                 else
-                    -- only show the second tick marker when in "second" mode
-                    if i == 2 then t:Show() else t:Hide() end
+                    t:Hide()
                 end
             else
                 t:Hide()
@@ -183,8 +219,8 @@ function A:InitCastBar()
 
         f.clipText:Hide()
         f.tickCounterText:Hide()
-        if f.isMindFlay then
-            f.tickCounterText:SetText("0/3")
+        if f.isTrackedChannel then
+            f.tickCounterText:SetText("0/" .. f.tickCount)
             f.tickCounterText:Show()
         end
 
@@ -195,6 +231,8 @@ function A:InitCastBar()
         f.casting    = false
         f.channeling = false
         f.isMindFlay = false
+        f.isTrackedChannel = false
+        f.channelInfo = nil
         f.clipSafe   = false
         f._preview   = false
         f.clipText:Hide()
@@ -212,7 +250,7 @@ function A:InitCastBar()
         BAR_H = db.height
         f:SetSize(BAR_W + 2, BAR_H + 2)
         f.spark:SetSize(16, BAR_H + 8)
-        for i = 1, 3 do
+        for i = 1, #f.tickMarkers do
             f.tickMarkers[i]:SetSize(2, BAR_H)
         end
     end
@@ -222,33 +260,48 @@ function A:InitCastBar()
     ----------------------------------------------------------------
     A.CastBarPreviewOn = function()
         f._preview = true
-        f.spellName = A.SPELLS.MF.name
+        -- Find a tracked channel spell for the preview
+        local previewName = nil
+        local previewTicks = 3
+        local CH = A.ChannelHelper
+        if CH and CH.KNOWN_CHANNELS then
+            for name, info in pairs(CH.KNOWN_CHANNELS) do
+                previewName = name
+                previewTicks = info.ticks or 3
+                break
+            end
+        end
+        if not previewName then
+            previewName = "Channel"
+        end
+        f.spellName = previewName
         f.startTime = GetTime()
-        f.endTime   = GetTime() + 3
+        f.endTime   = GetTime() + (previewTicks * 1.0)
         f.casting   = false
         f.channeling = true
-        f.isMindFlay = true
-        f.tickCount  = 3
+        f.isMindFlay = false
+        f.isTrackedChannel = true
+        f.channelInfo = CH and CH.KNOWN_CHANNELS and CH.KNOWN_CHANNELS[previewName]
+        f.tickCount  = previewTicks
         f.ticksDone  = 1
         f.clipSafe   = true
         local col
         if A.db and A.db.castBar and A.db.castBar.colorMode == "solid" and A.db.castBar.color then
             col = A.db.castBar.color
         else
-            col = BarColorForSpell(A.SPELLS.MF.name)
+            col = BarColorForSpell(previewName)
         end
         f.bar:SetStatusBarColor(unpack(col))
-        f.spellNameText:SetText(A.SPELLS.MF.name)
-        f.tickCounterText:SetText("1/3")
+        f.spellNameText:SetText(previewName)
+        f.tickCounterText:SetText("1/" .. previewTicks)
         f.tickCounterText:Show()
-        f.clipText:SetText("CLIP")
-        f.clipText:Show()
+        -- Intentionally do not show textual "CLIP" label in preview.
         for i, t in ipairs(f.tickMarkers) do
-            local frac = (3 - i) / 3
+            local frac = (previewTicks - i) / previewTicks
             t:ClearAllPoints()
             t:SetPoint("CENTER", bar, "LEFT", BAR_W * frac, 0)
             local mode = (A.db and A.db.castBar and A.db.castBar.tickMarkers) or "all"
-            if mode == "all" then
+            if mode == "all" and i <= previewTicks then
                 if i <= f.ticksDone then
                     t:SetColorTexture(unpack(A.COLORS.SAFE))
                 else
@@ -256,17 +309,7 @@ function A:InitCastBar()
                 end
                 t:Show()
             else
-                -- only show second tick in "second" mode
-                if i == 2 then
-                    if f.ticksDone >= 2 then
-                        t:SetColorTexture(unpack(A.COLORS.SAFE))
-                    else
-                        t:SetColorTexture(1, 1, 1, 0.7)
-                    end
-                    t:Show()
-                else
-                    t:Hide()
-                end
+                t:Hide()
             end
         end
         f.bar:SetValue(0.66)
@@ -279,50 +322,25 @@ function A:InitCastBar()
     end
 
     ----------------------------------------------------------------
-    -- Mind Flay clip logic (research-based)
-    -- Only show CLIP when there's something worth clipping for:
-    -- MB off CD, VT expiring, SWP expiring, or SWD off CD (after 2 ticks)
+    -- Channel clip logic
+    -- Show CLIP whenever a tracked channel has hit at least 1 tick AND
+    -- the ChannelHelper clip window is open (or no CH available — always show).
     ----------------------------------------------------------------
     local function ShouldClip()
-        if not f.isMindFlay or f.ticksDone < 1 then return false end
-
-        local lat = A.GetLatency()
-        local now = GetTime()
-
-        -- Check dot emergencies: clip for expiring VT or SWP
-        if UnitExists("target") then
-            local _, _, _, _, _, vtExp = A.FindPlayerDebuff("target", A.SPELLS.VT.name)
-            if vtExp then
-                local vtRem = vtExp - now
-                if vtRem > 0 and vtRem < (1.5 + lat + 0.3) then
-                    return true  -- VT about to fall off, clip to recast
-                end
-            elseif A.KnowsSpell(A.SPELLS.VT.id) then
-                return true  -- VT not up at all, clip to apply
-            end
-
-            local _, _, _, _, _, swpExp = A.FindPlayerDebuff("target", A.SPELLS.SWP.name)
-            if swpExp then
-                local swpRem = swpExp - now
-                if swpRem > 0 and swpRem < (1.5 + lat) then
-                    return true  -- SWP about to fall off
-                end
-            else
-                return true  -- SWP not up, clip to apply
-            end
+        if not f.isTrackedChannel or f.ticksDone < 1 then return false end
+        local CH = A.ChannelHelper
+        if CH and CH._state and CH._state.active then
+            local now = GetTime()
+            return now >= CH._state.clipWindowStart
         end
-
-        -- MB is highest priority nuke — clip for MB
-        local mbCD = A.GetSpellCDReal(A.SPELLS.MB.id)
-        if f.ticksDone >= 1 and mbCD <= lat then
-            return true  -- MB literally ready
-        end
-        if f.ticksDone >= 2 and mbCD <= (lat + 0.5) then
-            return true  -- MB ready very soon, clip after 2nd tick
-        end
-
-        return false  -- nothing to clip for, let MF finish
+        -- Fallback: show CLIP after first tick when CH is unavailable
+        return true
     end
+
+    ----------------------------------------------------------------
+    -- Tick feedback offset state (for early sound/flash firing)
+    ----------------------------------------------------------------
+    f._earlyTickFired = {}  -- tracks which ticks had early feedback fired
 
     ----------------------------------------------------------------
     -- OnUpdate — animate the bar
@@ -356,7 +374,38 @@ function A:InitCastBar()
             f.spark:SetPoint("CENTER", bar, "LEFT", BAR_W * progress, 0)
             f.spark:Show()
 
-            if f.isMindFlay then
+            -- Early tick feedback (offset-based)
+            if f.isTrackedChannel and f.tickCount > 0 then
+                local offsetMs = A.SpecVal and A.SpecVal("tickFeedbackOffsetMs", 0) or 0
+                if offsetMs > 0 then
+                    local offsetSec = offsetMs / 1000
+                    local interval = (f.endTime - f.startTime) / f.tickCount
+                    for tickNum = (f.ticksDone + 1), f.tickCount do
+                        if not f._earlyTickFired[tickNum] then
+                            local predictedTickTime = f.startTime + (tickNum * interval)
+                            if now >= (predictedTickTime - offsetSec) then
+                                f._earlyTickFired[tickNum] = true
+                                -- Fire early feedback
+                                local activeInfo = f.channelInfo
+                                local doSound = not activeInfo or activeInfo.tickSound ~= false
+                                local doFlash = not activeInfo or activeInfo.tickFlash ~= false
+                                local ts = doSound and (A.SpecVal and A.SpecVal("tickSound", nil) or nil) or "none"
+                                if not ts and A.db and A.db.castBar then ts = A.db.castBar.tickSound end
+                                ts = ts or "click"
+                                local tf = doFlash and (A.SpecVal and A.SpecVal("tickFlash", nil) or nil) or "none"
+                                if not tf and A.db and A.db.castBar then tf = A.db.castBar.tickFlash end
+                                tf = tf or "green"
+                                if (ts and ts ~= "none") or (tf and tf ~= "none") then
+                                    pcall(function() if A.PlayTickSound then A.PlayTickSound(ts) end end)
+                                    pcall(function() if A.DoTickFlash then A.DoTickFlash(tf) end end)
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+
+            if f.isTrackedChannel then
                 local clip = ShouldClip()
                 f.clipSafe = clip
                 if clip then
@@ -452,26 +501,48 @@ function A:InitCastBar()
                 = CombatLogGetCurrentEventInfo()
             if sourceGUID ~= UnitGUID("player") then return end
             if subEvent == "SPELL_PERIODIC_DAMAGE"
-               and f.isMindFlay
-               and cleuSpellName == A.SPELLS.MF.name then
+               and f.isTrackedChannel then
+                -- Check if this CLEU spell matches the active channel
+                local activeInfo = f.channelInfo
+                local matchesChannel = false
+                if activeInfo and activeInfo.spellKey and A.SPELLS[activeInfo.spellKey] then
+                    matchesChannel = cleuSpellName == A.SPELLS[activeInfo.spellKey].name
+                end
+                -- Fallback: match by f.spellName (for spells not in KNOWN_CHANNELS by spellKey)
+                if not matchesChannel and f.spellName and cleuSpellName == f.spellName then
+                    matchesChannel = true
+                end
+                if not matchesChannel then return end
+
+                -- Tick occurred: update state and markers
                 f.ticksDone = f.ticksDone + 1
-                f.tickCounterText:SetText(f.ticksDone .. "/3")
+                f.tickCounterText:SetText(f.ticksDone .. "/" .. f.tickCount)
+                -- Update tick marker appearance for completed tick
+                local markerMode = activeInfo and activeInfo.tickMarkerMode
+                if not markerMode or markerMode == "" then
+                    markerMode = A.SpecVal and A.SpecVal("tickMarkers", "all") or "all"
+                end
                 if f.tickMarkers[f.ticksDone] then
-                    f.tickMarkers[f.ticksDone]:SetColorTexture(
-                        unpack(A.COLORS.SAFE))
+                    if markerMode == "remaining" then
+                        f.tickMarkers[f.ticksDone]:Hide()
+                    else
+                        f.tickMarkers[f.ticksDone]:SetColorTexture(
+                            unpack(A.COLORS.SAFE))
+                    end
                 end
-                -- MF tick feedback (sound first, flash second). Enabled when tickSound or tickFlash not 'none'.
-                local visualsEnabled = false
-                if A.db and A.db.castBar then
-                    local ts = A.db.castBar.tickSound
-                    local tf = A.db.castBar.tickFlash
-                    visualsEnabled = (ts and ts ~= "none") or (tf and tf ~= "none")
-                end
-                if visualsEnabled then
-                    local mode = A.db and A.db.castBar and A.db.castBar.tickMarkers or "all"
-                    if mode == "all" or f.ticksDone == 2 then
-                        pcall(function() if A.PlayTickSound then A.PlayTickSound() end end)
-                        pcall(function() if A.DoTickFlash then A.DoTickFlash() end end)
+                -- Tick feedback — check per-spell settings; skip if early offset already fired
+                if not f._earlyTickFired[f.ticksDone] then
+                    local doSound = not activeInfo or activeInfo.tickSound ~= false
+                    local doFlash = not activeInfo or activeInfo.tickFlash ~= false
+                    local ts = doSound and (A.SpecVal and A.SpecVal("tickSound", nil) or nil) or "none"
+                    if not ts and A.db and A.db.castBar then ts = A.db.castBar.tickSound end
+                    ts = ts or "click"
+                    local tf = doFlash and (A.SpecVal and A.SpecVal("tickFlash", nil) or nil) or "none"
+                    if not tf and A.db and A.db.castBar then tf = A.db.castBar.tickFlash end
+                    tf = tf or "green"
+                    if (ts and ts ~= "none") or (tf and tf ~= "none") then
+                        pcall(function() if A.PlayTickSound then A.PlayTickSound(ts) end end)
+                        pcall(function() if A.DoTickFlash then A.DoTickFlash(tf) end end)
                     end
                 end
             end
@@ -479,4 +550,25 @@ function A:InitCastBar()
     end)
 
     f:Hide()
+end
+
+------------------------------------------------------------------------
+-- Register as SpecManager helper
+------------------------------------------------------------------------
+if SPHelper.SpecManager then
+    SPHelper.SpecManager:RegisterHelper("CastBar", {
+        _initialized = false,
+        OnSpecActivate = function(self, spec)
+            if self._initialized then return end
+            self._initialized = true
+            if SPHelper.InitCastBar then SPHelper:InitCastBar() end
+        end,
+        OnSpecDeactivate = function(self, spec)
+            self._initialized = false
+            if SPHelper.castBarFrame then
+                SPHelper.castBarFrame:UnregisterAllEvents()
+                SPHelper.castBarFrame:Hide()
+            end
+        end,
+    })
 end

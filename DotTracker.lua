@@ -1,7 +1,7 @@
 ------------------------------------------------------------------------
 -- SPHelper  –  DotTracker.lua
--- Tracks SW:P, VT, Mind Soothe, and Shackle Undead on multiple targets.
--- Only tracks creatures during combat (via CLEU).
+-- Tracks debuffs on multiple targets during combat (via CLEU).
+-- Reads trackedDebuffs from the active spec; falls back to DEFAULT_TRACKED_DEBUFFS.
 -- Applied DoT icons overlaid on bottom-right of the health bar.
 -- Borders blink when an applied DoT is about to expire.
 -- Portrait is cached when the mob is targeted/focused so it persists.
@@ -10,13 +10,47 @@
 ------------------------------------------------------------------------
 local A = SPHelper
 
--- Tracked debuff definitions
-local TRACKED_DEBUFFS = {
-    { key = "swp", spell = function() return A.SPELLS.SWP end, dur = 18, color = "SWP" },
-    { key = "vt",  spell = function() return A.SPELLS.VT  end, dur = 15, color = "VT"  },
-    { key = "ms",  spell = function() return A.SPELLS.MS  end, dur = 15, color = "MS"  },
-    { key = "su",  spell = function() return A.SPELLS.SU  end, dur = 50, color = "SU"  },
-}
+-- Default tracked debuff definitions (empty — specs should provide their own via trackedDebuffs).
+-- Kept as an empty fallback so DotTracker initializes safely for any spec.
+local DEFAULT_TRACKED_DEBUFFS = {}
+
+--- Build TRACKED_DEBUFFS from spec.trackedDebuffs or fall back to defaults.
+local function BuildTrackedDebuffs()
+    -- Check active spec for trackedDebuffs
+    local specID = A._activeSpecID
+    local spec = specID and A.SpecManager and A.SpecManager:GetSpecByID(specID)
+    if spec and spec.trackedDebuffs then
+        local result = {}
+        for _, def in ipairs(spec.trackedDebuffs) do
+            local spellData = A.SPELLS[def.spellKey]
+            result[#result + 1] = {
+                key   = def.key,
+                spell = function() return spellData end,
+                dur   = def.duration or 15,
+                color = def.color or def.key:upper(),
+            }
+        end
+        if #result > 0 then return result end
+    end
+    -- Also check DB overrides
+    if A.db and A.db.specs and specID and A.db.specs[specID] and A.db.specs[specID].trackedDebuffs then
+        local dbDefs = A.db.specs[specID].trackedDebuffs
+        local result = {}
+        for _, def in ipairs(dbDefs) do
+            local spellData = A.SPELLS[def.spellKey]
+            result[#result + 1] = {
+                key   = def.key,
+                spell = function() return spellData end,
+                dur   = def.duration or 15,
+                color = def.color or def.key:upper(),
+            }
+        end
+        if #result > 0 then return result end
+    end
+    return DEFAULT_TRACKED_DEBUFFS
+end
+
+local TRACKED_DEBUFFS = BuildTrackedDebuffs()
 
 -- Raid target icon textures (indices 1-8)
 local RAID_ICONS = {
@@ -64,7 +98,7 @@ function A:InitDotTracker()
         if sp and sp.name then
             nameToKey[sp.name] = def.key
             nameToDur[sp.name] = def.dur
-            local _, _, ic = GetSpellInfo(sp.id)
+            local ic = A.GetSpellIconCached and A.GetSpellIconCached(sp.id) or select(3, GetSpellInfo(sp.id))
             spellIconCache[def.key] = ic
         end
     end
@@ -107,7 +141,30 @@ function A:InitDotTracker()
     local tombstoneNames = {}
     -- recentNames marks names currently/just-active to disambiguate same-name spawns
     local recentNames = {}
+    -- Tab-order history: guid -> rank (lower rank = tabbed earlier in the cycle)
+    -- Reset each combat. Updated on PLAYER_TARGET_CHANGED.
+    local tabHistory     = {}
+    local tabRankCounter = 0
     A.dotTargets  = targets
+
+    local function SetTrackedTargetHP(guid, hpPct)
+        if not guid or not targets[guid] then return false end
+        hpPct = tonumber(hpPct) or 0
+        if hpPct < 0 then hpPct = 0 end
+        if hpPct > 1 then hpPct = 1 end
+        targets[guid].hpPct = hpPct
+        if A.UpdateTargetHealthSample then
+            A.UpdateTargetHealthSample(guid, hpPct)
+        end
+        return true
+    end
+
+    local function SetTrackedTargetHPFromUnit(guid, unit)
+        if not guid or not unit or not UnitExists(unit) then return false end
+        local max = UnitHealthMax(unit) or 1
+        local hpPct = (max > 0) and (UnitHealth(unit) / max) or 1
+        return SetTrackedTargetHP(guid, hpPct)
+    end
 
     ----------------------------------------------------------------
     -- Preview / dummy data support
@@ -120,6 +177,11 @@ function A:InitDotTracker()
         wipe(targets)
         local now = GetTime()
         local sampleNames = { "Fel Reaver", "Void Reaver", "Shade of Aran", "Hydross the Unstable", "Doomwalker", "Warbringer" }
+        -- Collect debuff keys and durations from the active tracked debuffs
+        local dotKeys = {}
+        for _, def in ipairs(TRACKED_DEBUFFS) do
+            dotKeys[#dotKeys + 1] = { key = def.key, dur = def.dur }
+        end
         for i = 1, MAX do
             local guid = "preview-" .. i
             local name = sampleNames[((i - 1) % #sampleNames) + 1] or ("Dummy " .. i)
@@ -130,22 +192,18 @@ function A:InitDotTracker()
                 _addedAt = now - (i * 2),
                 _inCombat = true,
                 _preview  = true,
-                hpPct = hp,
                 raidIcon = ((i - 1) % #RAID_ICONS) + 1,
                 _addOrder = addCounter,
             }
-            -- Stagger debuffs so preview timers don't all line up
-            if (i % 3) == 1 then
-                targets[guid].swp_exp = now + 6 + i
-                targets[guid].swp_dur = 18
-            elseif (i % 3) == 2 then
-                targets[guid].vt_exp = now + 4 + i
-                targets[guid].vt_dur = 15
-            else
-                targets[guid].swp_exp = now + 8 + i
-                targets[guid].swp_dur = 18
-                targets[guid].vt_exp  = now + 3 + i
-                targets[guid].vt_dur  = 15
+            SetTrackedTargetHP(guid, hp)
+            -- Stagger debuffs across tracked dot keys for visual variety
+            for dotIdx, dotDef in ipairs(dotKeys) do
+                local bucket = ((i + dotIdx - 2) % 3)
+                if bucket < 2 then
+                    local t = targets[guid]
+                    t[dotDef.key .. "_exp"] = now + (dotDef.dur * 0.3) + i + dotIdx
+                    t[dotDef.key .. "_dur"] = dotDef.dur
+                end
             end
         end
         previewActive = true
@@ -157,7 +215,10 @@ function A:InitDotTracker()
     local function ClearDummyData()
         if not previewActive then return end
         for guid in pairs(targets) do
-            if targets[guid]._preview then targets[guid] = nil end
+            if targets[guid]._preview then
+                targets[guid] = nil
+                if A.ClearTargetMetric then A.ClearTargetMetric(guid) end
+            end
         end
         previewActive = false
         A.dotTrackerPreviewActive = false
@@ -430,8 +491,7 @@ function A:InitDotTracker()
                             _addedAt = now,
                             _inCombat = UnitAffectingCombat(unit) or UnitAffectingCombat("player"),
                         }
-                        local max = UnitHealthMax(unit) or 1
-                        targets[guid].hpPct = (max > 0) and (UnitHealth(unit) / max) or 1
+                        SetTrackedTargetHPFromUnit(guid, unit)
                         recentNames[targets[guid].name] = now
                         addCounter = addCounter + 1
                         targets[guid]._addOrder = addCounter
@@ -442,15 +502,16 @@ function A:InitDotTracker()
             end
 
             if not added then
-                -- Also add if the unit is hostile and in combat (chain-pull case)
-                if UnitAffectingCombat(unit) and UnitCanAttack("player", unit) then
+                -- Add if this unit is our target/focus, or we have threat on it
+                local isMyTarget = UnitIsUnit(unit, "target") or UnitIsUnit(unit, "focus")
+                local hasThreat = UnitThreatSituation("player", unit)
+                if UnitCanAttack("player", unit) and (isMyTarget or (hasThreat and hasThreat > 0)) then
                     targets[guid] = {
                         name = unitName or "Unknown",
                         _addedAt = now,
                         _inCombat = true,
                     }
-                    local max = UnitHealthMax(unit) or 1
-                    targets[guid].hpPct = (max > 0) and (UnitHealth(unit) / max) or 1
+                    SetTrackedTargetHPFromUnit(guid, unit)
                     recentNames[targets[guid].name] = now
                     addCounter = addCounter + 1
                     targets[guid]._addOrder = addCounter
@@ -477,9 +538,7 @@ function A:InitDotTracker()
         end
 
         targets[guid].raidIcon = GetRaidTargetIndex(unit)
-        local hp  = UnitHealth(unit) or 0
-        local max = UnitHealthMax(unit) or 1
-        targets[guid].hpPct = (max > 0) and (hp / max) or 1
+        SetTrackedTargetHPFromUnit(guid, unit)
     end
 
     ----------------------------------------------------------------
@@ -523,6 +582,7 @@ function A:InitDotTracker()
                     if (now - data._deadAt) >= 3 then
                         local nm = data.name
                         targets[guid] = nil
+                        if A.ClearTargetMetric then A.ClearTargetMetric(guid) end
                         tombstones[guid] = now
                         if nm and nm ~= "" then tombstoneNames[nm] = now end
                     end
@@ -553,8 +613,16 @@ function A:InitDotTracker()
             end
         end
 
-        -- Sort by insertion order for stable positions (respect newTargetPosition)
+        -- Sort: addOrder (default), tabOrder (tab-cycle order)
+        local sortMode = A.db and A.db.dotTracker and A.db.dotTracker.sortMode or "addOrder"
         table.sort(sorted, function(a, b)
+            if sortMode == "tabOrder" then
+                -- Targets tabbed earlier appear first (lower rank = row 1).
+                -- Fall back to addOrder for targets not yet tabbed to.
+                local ra = tabHistory[a] or 999999
+                local rb = tabHistory[b] or 999999
+                if ra ~= rb then return ra < rb end
+            end
             local ta, tb = targets[a], targets[b]
             local pa = (ta and ta._addOrder) or 0
             local pb = (tb and tb._addOrder) or 0
@@ -742,9 +810,7 @@ function A:InitDotTracker()
                 if UnitExists(np) then
                     local guid = UnitGUID(np)
                     if guid and targets[guid] then
-                        local max = UnitHealthMax(np)
-                        targets[guid].hpPct = (max > 0)
-                            and (UnitHealth(np) / max) or 1
+                        SetTrackedTargetHPFromUnit(guid, np)
                     end
                 else
                     break
@@ -774,9 +840,12 @@ function A:InitDotTracker()
             UpdatePortraitForUnit("target")
             local tGUID = UnitGUID("target")
             if tGUID and targets[tGUID] then
-                local max = UnitHealthMax("target")
-                targets[tGUID].hpPct = (max > 0)
-                    and (UnitHealth("target") / max) or 1
+                SetTrackedTargetHPFromUnit(tGUID, "target")
+                -- Record tab order: only register the first time this GUID is tabbed to.
+                if not tabHistory[tGUID] then
+                    tabRankCounter = tabRankCounter + 1
+                    tabHistory[tGUID] = tabRankCounter
+                end
             end
             return
         end
@@ -792,9 +861,7 @@ function A:InitDotTracker()
             if arg1 and UnitExists(arg1) then
                 local guid = UnitGUID(arg1)
                 if guid and targets[guid] then
-                    local max = UnitHealthMax(arg1)
-                    targets[guid].hpPct = (max > 0)
-                        and (UnitHealth(arg1) / max) or 1
+                    SetTrackedTargetHPFromUnit(guid, arg1)
                     UpdatePortraitForUnit(arg1)
                     ScanUnit(arg1)
                 end
@@ -810,9 +877,7 @@ function A:InitDotTracker()
             if arg1 and UnitExists(arg1) then
                 local guid = UnitGUID(arg1)
                 if guid and targets[guid] then
-                    local max = UnitHealthMax(arg1)
-                    targets[guid].hpPct = (max > 0)
-                        and (UnitHealth(arg1) / max) or 1
+                    SetTrackedTargetHPFromUnit(guid, arg1)
                 end
             end
             return
@@ -821,6 +886,9 @@ function A:InitDotTracker()
         if event == "PLAYER_REGEN_ENABLED" then
             playerInCombat = false
             wipe(targets)
+            if A.ResetTargetMetrics then A.ResetTargetMetrics() end
+            wipe(tabHistory)
+            tabRankCounter = 0
             previewActive = false
             if anchor then anchor:Hide() end
             return
@@ -828,6 +896,9 @@ function A:InitDotTracker()
 
         if event == "PLAYER_REGEN_DISABLED" then
             playerInCombat = true
+            -- Reset tab history each combat so stale tab order doesn't carry over
+            wipe(tabHistory)
+            tabRankCounter = 0
             -- Only show if addon-level visibility isn't disabled
             if A._visible ~= false and anchor then anchor:Show() end
             return
@@ -856,6 +927,7 @@ function A:InitDotTracker()
                             deadName = targets[destGUID].name
                         end
                         targets[destGUID] = nil
+                        if A.ClearTargetMetric then A.ClearTargetMetric(destGUID) end
                         tombstones[destGUID] = GetTime()
                         if deadName and deadName ~= "" then tombstoneNames[deadName] = GetTime() end
                     end
@@ -904,10 +976,7 @@ function A:InitDotTracker()
                         local now = GetTime()
                         local function tryAssignHP(unit)
                             if UnitExists(unit) and UnitGUID(unit) == destGUID then
-                                local hp = UnitHealth(unit) or 0
-                                local max = UnitHealthMax(unit) or 1
-                                targets[destGUID].hpPct = (max > 0) and (hp / max) or 1
-                                return true
+                                return SetTrackedTargetHPFromUnit(destGUID, unit)
                             end
                             return false
                         end
@@ -915,7 +984,7 @@ function A:InitDotTracker()
                             -- If we had a recent tombstone, mark as dead so it won't show full HP
                             local t = tombstones[destGUID]
                             if t and (GetTime() - t) < TOMB_LIFE then
-                                targets[destGUID].hpPct = 0
+                                SetTrackedTargetHP(destGUID, 0)
                                 targets[destGUID]._deadAt = now
                             end
                         end
@@ -955,13 +1024,15 @@ function A:InitDotTracker()
             return
         end
 
-        -- Something attacking the player: track source as combat mob
+        -- Something attacking the player directly: track source as combat mob
+        -- Only add mobs that are directly hitting us (we're on their threat table)
         if destGUID == playerGUID and sourceGUID
            and sourceGUID ~= playerGUID then
             if sourceFlags
                and (bit.band(sourceFlags, COMBATLOG_OBJECT_REACTION_HOSTILE) > 0
                     or bit.band(sourceFlags, COMBATLOG_OBJECT_REACTION_NEUTRAL) > 0)
                and sourceName and sourceName ~= ""
+               and not (bit.band(sourceFlags, COMBATLOG_OBJECT_CONTROL_PLAYER) > 0)
             then
                 if not targets[sourceGUID] then
                     targets[sourceGUID] = {
@@ -976,4 +1047,30 @@ function A:InitDotTracker()
             end
         end
     end)
+end
+
+------------------------------------------------------------------------
+-- Register as SpecManager helper
+------------------------------------------------------------------------
+if SPHelper.SpecManager then
+    SPHelper.SpecManager:RegisterHelper("DotTracker", {
+        _initialized = false,
+        OnSpecActivate = function(self, spec)
+            if self._initialized then return end
+            self._initialized = true
+            -- Rebuild tracked debuffs from spec before init
+            TRACKED_DEBUFFS = BuildTrackedDebuffs()
+            if SPHelper.InitDotTracker then SPHelper:InitDotTracker() end
+        end,
+        OnSpecDeactivate = function(self, spec)
+            self._initialized = false
+            if SPHelper.dotAnchor then
+                SPHelper.dotAnchor:Hide()
+            end
+            -- Unregister the CLEU handler frame if it exists
+            if SPHelper._dotTrackerCLEU then
+                SPHelper._dotTrackerCLEU:UnregisterAllEvents()
+            end
+        end,
+    })
 end

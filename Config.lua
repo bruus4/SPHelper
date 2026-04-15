@@ -170,7 +170,7 @@ local function MakeDropdown(parent, label, options, get, set, yOff, labels)
                 local info = UIDropDownMenu_CreateInfo()
                 -- show icons for item-based options when available
                 if type(opt) == "number" then
-                    local ico = GetItemIcon(opt)
+                    local ico = (A.GetItemIconCached and A.GetItemIconCached(opt)) or GetItemIcon(opt)
                     if ico then info.icon = ico end
                 end
                 info.text     = DisplayText(opt)
@@ -256,277 +256,124 @@ end
 -- Build controls inside a scrollable content frame
 -- ====================================================================
 local function BuildControls(panel)
-    local scrollFrame = CreateFrame("ScrollFrame", nil, panel, "UIPanelScrollFrameTemplate")
-    scrollFrame:SetPoint("TOPLEFT", panel, "TOPLEFT", 0, -4)
-    scrollFrame:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -26, 4)
-
-    local content = CreateFrame("Frame", nil, scrollFrame)
-    content:SetWidth(scrollFrame:GetWidth() or 500)
-    scrollFrame:SetScrollChild(content)
-
-    scrollFrame:SetScript("OnSizeChanged", function(self, w, h)
-        content:SetWidth(w)
-    end)
+    local content = CreateFrame("Frame", nil, panel)
+    content:SetAllPoints(panel)
 
     local y = -16
 
     local t = content:CreateFontString(nil, "OVERLAY")
     t:SetFont("Fonts\\FRIZQT__.TTF", 14, "OUTLINE")
     t:SetPoint("TOPLEFT", content, "TOPLEFT", 16, y)
-    t:SetText("|cff8882d5SPHelper|r Settings")
-    y = y - 28
+    t:SetText("|cff8882d5SPHelper|r — Shadow Priest HUD")
+    y = y - 26
 
-    -- Quick visuals window launcher
-    local visBtn = MakeButton(content, "Visual Options", 180, 22, function()
-        if A.OpenVisualsWindow then A.OpenVisualsWindow() end
+    local desc = content:CreateFontString(nil, "OVERLAY")
+    desc:SetFont("Fonts\\FRIZQT__.TTF", 10)
+    desc:SetPoint("TOPLEFT", content, "TOPLEFT", 16, y)
+    desc:SetTextColor(0.8, 0.8, 0.8, 1)
+    desc:SetText("Use the commands below to configure SPHelper.\nAll spec settings are managed via the spec editor.")
+    y = y - 36
+
+    MakeSectionHeader(content, "Commands", y); y = y - 24
+
+    local commands = {
+        { cmd = "/sph",             desc = "Open this panel" },
+        { cmd = "/sph spec",        desc = "Open spec & rotation editor (all spec settings)" },
+        { cmd = "/sph visuals",     desc = "Open visual layout options (sizes, colors)" },
+        { cmd = "/sph debug",       desc = "List or toggle module debug logging" },
+        { cmd = "/sph lock",        desc = "Lock all frame positions" },
+        { cmd = "/sph unlock",      desc = "Unlock frames for dragging" },
+        { cmd = "/sph scale N",     desc = "Set global UI scale (0.5-3.0)" },
+        { cmd = "/sph macros",      desc = "Print Fake Queue macro templates" },
+        { cmd = "/sph reset",       desc = "Reset all settings to defaults" },
+    }
+
+    for _, entry in ipairs(commands) do
+        local cmdStr = content:CreateFontString(nil, "OVERLAY")
+        cmdStr:SetFont("Fonts\\FRIZQT__.TTF", 11, "OUTLINE")
+        cmdStr:SetPoint("TOPLEFT", content, "TOPLEFT", 24, y)
+        cmdStr:SetTextColor(1, 0.85, 0.4, 1)
+        cmdStr:SetText(entry.cmd)
+
+        local descStr = content:CreateFontString(nil, "OVERLAY")
+        descStr:SetFont("Fonts\\FRIZQT__.TTF", 10)
+        descStr:SetPoint("TOPLEFT", content, "TOPLEFT", 180, y)
+        descStr:SetTextColor(0.85, 0.85, 0.85, 1)
+        descStr:SetText(entry.desc)
+        y = y - 20
+    end
+
+    y = y - 14
+
+    -- Quick-open buttons
+    MakeButton(content, "Open Spec Editor", 160, 24, function()
+        if A.SpecUI and A.SpecUI.Open then A.SpecUI:Open() end
     end, y)
+    -- Create New Spec: explicit button so users can create specs regardless
+    -- of current class/spec state. Placed to the right of the Spec Editor
+    -- button so it's discoverable by users looking for spec management.
+    local createBtn = CreateFrame("Button", nil, content, "BackdropTemplate")
+    createBtn:SetSize(140, 24)
+    createBtn:SetPoint("TOPLEFT", content, "TOPLEFT", 200, y)
+    A.CreateBackdrop(createBtn, 0.15, 0.15, 0.15, 0.95, 0.3, 0.3, 0.3, 1)
+    local ctxt = createBtn:CreateFontString(nil, "OVERLAY")
+    ctxt:SetFont("Fonts\\FRIZQT__.TTF", 10, "OUTLINE")
+    ctxt:SetPoint("CENTER")
+    ctxt:SetText("Create New Spec")
+    createBtn:SetScript("OnClick", function()
+        if A.SpecUI and A.SpecUI.OpenNewSpecDialog then
+            A.SpecUI.OpenNewSpecDialog()
+        elseif A.SpecUI and A.SpecUI.Open then
+            -- Fallback: open Spec UI with nil to trigger dialog when no active spec
+            pcall(function() A.SpecUI:Open(nil) end)
+        else
+            print("|cff8882d5SPHelper|r: Spec UI not available.")
+        end
+    end)
     y = y - 30
 
-    -- ============ General ============
-    MakeHeader(content, "General", y); y = y - 22
+    MakeButton(content, "Open Visuals", 160, 24, function()
+        if A.OpenVisualsWindow then A.OpenVisualsWindow() end
+    end, y)
+    y = y - 36
 
-    -- Scale moved to Visuals window
+    -- Enable/disable toggles (require reload)
+    MakeSectionHeader(content, "Module toggles  (reload required)", y); y = y - 24
 
-    MakeCheckbox(content, "Lock frame positions",
-        function() return A.db.locked end,
-        function(v) A.db.locked = v end, y)
-    y = y - 28
-
-    -- Mind Flay Tick visuals moved to Visuals window; keep enable checkbox here
-    MakeSectionHeader(content, "Mind Flay Tick", y); y = y - 22
-    local castContainer, castCB = MakeCheckbox(content, "Enable cast bar  (reload)",
+    MakeCheckbox(content, "Enable cast bar",
         function() return A.db.castBar.enabled end,
         function(v) A.db.castBar.enabled = v end, y)
     y = y - 26
 
-    -- Tick sound / flash moved out of Visuals into main settings
-    do
-        local soundKeys = {}
-        local soundLabels = {}
-        for _, s in ipairs(A.TICK_SOUNDS) do
-            soundKeys[#soundKeys + 1] = s.key
-            soundLabels[s.key] = s.label
-        end
-        MakeDropdown(content, "Tick sound:", soundKeys,
-            function() return A.db.castBar.tickSound or "click" end,
-            function(v)
-                A.db.castBar.tickSound = v
-                if v ~= "none" and A.PreviewTickSound then pcall(A.PreviewTickSound, v) end
-                if A.CastBarPreviewOn then pcall(A.CastBarPreviewOn) end
-            end, y, soundLabels)
-        y = y - 50
-    end
-    do
-        local flashKeys = {}
-        local flashLabels = {}
-        for _, e in ipairs(A.TICK_FLASH_EFFECTS) do
-            flashKeys[#flashKeys + 1] = e.key
-            flashLabels[e.key] = e.label
-        end
-        MakeDropdown(content, "Tick flash:", flashKeys,
-            function() return A.db.castBar.tickFlash or "green" end,
-            function(v)
-                A.db.castBar.tickFlash = v
-                if v ~= "none" and A.PreviewTickFlash then pcall(A.PreviewTickFlash, v) end
-                if A.CastBarPreviewOn then pcall(A.CastBarPreviewOn) end
-            end, y, flashLabels)
-        y = y - 50
-    end
-
-    -- Mind Flay tick visuals
-
-    local tickLabels = { all = "All ticks", second = "Second tick only" }
-    MakeCycleButton(content, "Mind Flay tick mode:", { "all", "second" },
-        function() return (A.db.castBar and A.db.castBar.tickMarkers) or "all" end,
-        function(v)
-            if not A.db.castBar then A.db.castBar = {} end
-            A.db.castBar.tickMarkers = v
-            if A.CastBarPreviewOn then pcall(A.CastBarPreviewOn) end
-        end, y, tickLabels)
-    y = y - 30
-
-    -- ============ DoT Tracker ============
-    -- DoT Tracker visuals moved to Visuals window; keep enable checkbox here
-    MakeSectionHeader(content, "DoT Tracker", y); y = y - 22
-    local dotContainer, dotCB = MakeCheckbox(content, "Enable DoT tracker  (reload)",
+    MakeCheckbox(content, "Enable DoT tracker",
         function() return A.db.dotTracker.enabled end,
         function(v) A.db.dotTracker.enabled = v end, y)
     y = y - 26
 
-    -- DoT Tracker visuals moved to Visuals window; main panel keeps only the enable checkbox
-
-    -- ============ Rotation Advisor ============
-    MakeSectionHeader(content, "Rotation Advisor", y); y = y - 22
-
-    local rotContainer, rotCB = MakeCheckbox(content, "Enable rotation advisor  (reload)",
+    MakeCheckbox(content, "Enable rotation advisor",
         function() return A.db.rotation.enabled end,
         function(v) A.db.rotation.enabled = v end, y)
     y = y - 26
 
-    -- Inner Focus
-    MakeHeader(content, "Inner Focus", y); y = y - 22
-    MakeCheckbox(content, "Enable Inner Focus suggestion",
-        function() return (A.db.rotation and A.db.rotation.ifInsert and A.db.rotation.ifInsert.enabled) end,
-        function(v) if not A.db.rotation then A.db.rotation = {} end; if not A.db.rotation.ifInsert then A.db.rotation.ifInsert = {} end; A.db.rotation.ifInsert.enabled = v end, y)
-    y = y - 26
-    -- Suggest before dropdown (MB / SWP / DP when available)
-    do
-        local opts = { "MB", "SWP" }
-        if A.KnowsSpell and A.KnowsSpell(A.SPELLS.DP.id) then opts[#opts + 1] = "DP" end
-        local labels = {}
-        labels["MB"] = A.SPELLS.MB.name or "Mind Blast"
-        labels["SWP"] = A.SPELLS.SWP.name or "Shadow Word: Pain"
-        labels["DP"] = A.SPELLS.DP.name or "Devouring Plague"
-        MakeDropdown(content, "Suggest before:", opts,
-            function() return (A.db.rotation and A.db.rotation.ifInsert and A.db.rotation.ifInsert.before) or "MB" end,
-            function(v) if not A.db.rotation then A.db.rotation = {} end; if not A.db.rotation.ifInsert then A.db.rotation.ifInsert = {} end; A.db.rotation.ifInsert.before = v end, y, labels)
-        y = y - 50
-    end
-    MakeCheckbox(content, "Only for boss targets",
-        function() return (A.db.rotation and A.db.rotation.ifInsert and A.db.rotation.ifInsert.onlyForBoss) end,
-        function(v) if not A.db.rotation then A.db.rotation = {} end; if not A.db.rotation.ifInsert then A.db.rotation.ifInsert = {} end; A.db.rotation.ifInsert.onlyForBoss = v end, y)
-    y = y - 28
-
-    -- ============ Shadowfiend ============
-    MakeHeader(content, "Shadowfiend", y); y = y - 22
-
-    MakeSlider(content, "Suggest below mana %", 10, 80, 5,
-        function() return A.db.sfManaThreshold or 35 end,
-        function(v) A.db.sfManaThreshold = v end, y)
-    y = y - 42
-
-    -- ============ Mana Potion ============
-    MakeHeader(content, "Mana Potion", y); y = y - 22
-
-    local potContainer, potCB = MakeCheckbox(content, "Suggest Mana Potion",
-        function() return A.db.suggestPot end,
-        function(v) A.db.suggestPot = v end, y)
-    y = y - 26
-
-    local potThresh = MakeSlider(content, "Pot below mana %", 10, 90, 5,
-        function() return A.db.potManaThreshold or 70 end,
-        function(v) A.db.potManaThreshold = v end, y)
-    y = y - 42
-
-    local potEarlyCont, potEarlyCB = MakeCheckbox(content, "Allow early pot (prioritise before Shadowfiend)",
-        function() return A.db.potEarly end,
-        function(v) A.db.potEarly = v end, y)
-    y = y - 28
-
-    -- Potion selection dropdown (show counts)
-    local potDropdown
-    do
-        local potOptions = { "none" }
-        for _, id in ipairs(A.POTION_IDS or {}) do potOptions[#potOptions + 1] = id end
-        local function potLabelFunc(opt)
-            if opt == "none" then return "None" end
-            local name = GetItemInfo(opt) or ("Item " .. opt)
-            local cnt = GetItemCount(opt) or 0
-            return (name or ("Item " .. opt)) .. " (" .. cnt .. ")"
-        end
-        potDropdown = MakeDropdown(content, "Track potion:", potOptions,
-            function() return A.db.selectedPotionItem or "none" end,
-            function(v) A.db.selectedPotionItem = v end, y, potLabelFunc)
-        y = y - 50
-    end
-
-    do
-        local potControls = { potThresh, potEarlyCont, potDropdown }
-        local function UpdatePotGroup(enabled)
-            for _, c in ipairs(potControls) do
-                if c and c.SetAlpha then c:SetAlpha(enabled and 1 or 0.5) end
-                if c and c.GetNumChildren and c.GetChildren then
-                    local n = c:GetNumChildren()
-                    if n and n > 0 then
-                        for i = 1, n do
-                            local child = select(i, c:GetChildren())
-                            if child and type(child.EnableMouse) == "function" then child:EnableMouse(enabled) end
-                        end
-                    end
-                end
-            end
-        end
-        if potCB then
-            potCB:SetScript("OnClick", function(self)
-                A.db.suggestPot = self:GetChecked()
-                UpdatePotGroup(self:GetChecked())
-            end)
-        end
-        UpdatePotGroup(A.db.suggestPot)
-    end
-
-    -- ============ Dark / Demonic Rune ============
-    MakeHeader(content, "Dark / Demonic Rune", y); y = y - 22
-
-    MakeCheckbox(content, "Suggest Dark / Demonic Rune",
-        function() return A.db.suggestRune end,
-        function(v) A.db.suggestRune = v end, y)
-    y = y - 26
-
-    MakeSlider(content, "Rune below mana %", 10, 80, 5,
-        function() return A.db.runeManaThreshold or 40 end,
-        function(v) A.db.runeManaThreshold = v end, y)
-    y = y - 42
-
-    -- Rune selection dropdown (show counts)
-    do
-        local runeOptions = { "none", 20520, 12662 }
-        local function runeLabelFunc(opt)
-            if opt == "none" then return "None" end
-            local name = GetItemInfo(opt) or ("Item " .. opt)
-            local cnt = GetItemCount(opt) or 0
-            return (name or ("Item " .. opt)) .. " (" .. cnt .. ")"
-        end
-        MakeDropdown(content, "Track rune:", runeOptions,
-            function() return A.db.selectedRuneItem or "none" end,
-            function(v) A.db.selectedRuneItem = v end, y, runeLabelFunc)
-        y = y - 50
-    end
-
-    -- ============ Shadow Word: Death ============
-    MakeHeader(content, "Shadow Word: Death", y); y = y - 22
-
-    MakeCycleButton(content, "Open World:", { "always", "execute", "never" },
-        function() return A.db.swdWorld or "always" end,
-        function(v) A.db.swdWorld = v end, y)
+    MakeCheckbox(content, "Lock frame positions",
+        function() return A.db.locked end,
+        function(v) A.db.locked = v end, y)
     y = y - 30
-
-    MakeCycleButton(content, "Dungeon:", { "always", "execute", "never" },
-        function() return A.db.swdDungeon or "always" end,
-        function(v) A.db.swdDungeon = v end, y)
-    y = y - 30
-
-    MakeCycleButton(content, "Raid:", { "always", "execute", "never" },
-        function() return A.db.swdRaid or "execute" end,
-        function(v) A.db.swdRaid = v end, y)
-    y = y - 30
-
-    -- SW:D safety margin: require predicted SW:D hit >= target HP * (1 + safetyPct/100)
-    MakeSlider(content, "SW:D safety margin (%)", 0, 50, 1,
-        function() return A.db.swdSafetyPct or 10 end,
-        function(v) A.db.swdSafetyPct = v end, y)
-    y = y - 42
-    local swdNote = content:CreateFontString(nil, "OVERLAY")
-    swdNote:SetFont("Fonts\\FRIZQT__.TTF", 9)
-    swdNote:SetPoint("TOPLEFT", content, "TOPLEFT", 16, y)
-    swdNote:SetTextColor(0.7, 0.7, 0.7, 1)
-    swdNote:SetText("Safety margin ensures SW:D is only suggested if predicted damage\nexceeds target HP by this percent (accounts for estimation error).")
-    y = y - 36
 
     local note = content:CreateFontString(nil, "OVERLAY")
     note:SetFont("Fonts\\FRIZQT__.TTF", 9)
     note:SetPoint("TOPLEFT", content, "TOPLEFT", 16, y)
     note:SetTextColor(0.6, 0.6, 0.6, 1)
-    note:SetText("Items marked (reload) require /reload to take effect.")
+    note:SetText("Module toggles require /reload to take effect.")
     y = y - 20
-
-    content:SetHeight(math.abs(y) + 20)
 end
 
 -- ====================================================================
 -- Init
 -- ====================================================================
 function A:InitConfig()
+    -- Guard: Settings system calls this via Refresh; only register once.
+    if A.optionsPanel then return end
 
     ----------------------------------------------------------------
     -- Register panel using whichever API is available
@@ -878,6 +725,11 @@ function A:InitConfig()
                 function() return (A.db.dotTracker and A.db.dotTracker.newTargetPosition) or "bottom" end,
                 function(v) if not A.db.dotTracker then A.db.dotTracker = {} end; A.db.dotTracker.newTargetPosition = v; if A.DotTrackerResizeLayout then pcall(A.DotTrackerResizeLayout) end end, yOff, { bottom = "Bottom", top = "Top" })
             yOff = yOff - 30
+            MakeCycleButton(content, "Sort order:", { "addOrder", "tabOrder" },
+                function() return (A.db.dotTracker and A.db.dotTracker.sortMode) or "addOrder" end,
+                function(v) if not A.db.dotTracker then A.db.dotTracker = {} end; A.db.dotTracker.sortMode = v end, yOff,
+                { addOrder = "Add order", tabOrder = "Tab order" })
+            yOff = yOff - 30
             MakeCycleButton(content, "Anchor position:", { "top", "bottom" },
                 function() return (A.db.dotTracker and A.db.dotTracker.anchorPosition) or "top" end,
                 function(v) if not A.db.dotTracker then A.db.dotTracker = {} end; A.db.dotTracker.anchorPosition = v; if A.DotTrackerResizeLayout then pcall(A.DotTrackerResizeLayout) end end, yOff, { top = "Top", bottom = "Bottom" })
@@ -990,14 +842,120 @@ function A:InitConfig()
 
         
 
+        elseif msg == "visuals" then
+            if A.OpenVisualsWindow then
+                A.OpenVisualsWindow()
+            else
+                print("|cff8882d5SPHelper|r: Visuals window not available.")
+            end
+
+        elseif msg == "spec" then
+            if A.SpecUI and A.SpecUI.Open then
+                A.SpecUI:Open()
+            else
+                print("|cff8882d5SPHelper|r: SpecUI not loaded.")
+            end
+
+        elseif msg == "debug" or msg:find("^debug%s+") then
+            local args = {}
+            for token in msg:gmatch("%S+") do
+                args[#args + 1] = token
+            end
+
+            local function PrintDebugHelp()
+                print("|cff8882d5SPHelper|r debug commands:")
+                print("  /sph debug                 — List debug modules and states")
+                print("  /sph debug MODULE on|off   — Enable or disable one module")
+                print("  /sph debug dump [MODULE]   — Print recent debug entries")
+                print("  /sph debug clear           — Clear the runtime debug buffer")
+                print("  /sph debug echo on|off     — Mirror enabled debug entries to chat")
+            end
+
+            if #args == 1 or args[2] == "list" then
+                local modules = (A.GetKnownDebugModules and A.GetKnownDebugModules()) or {}
+                print("|cff8882d5SPHelper|r debug modules:")
+                for _, module in ipairs(modules) do
+                    local enabled = A.IsDebugModuleEnabled and A.IsDebugModuleEnabled(module)
+                    print(string.format("  %s = %s", module, enabled and "on" or "off"))
+                end
+                PrintDebugHelp()
+            elseif args[2] == "clear" then
+                if A.ClearDebugLog then
+                    A.ClearDebugLog()
+                end
+                print("|cff8882d5SPHelper|r: Debug log cleared.")
+            elseif args[2] == "dump" then
+                if A.DumpDebugLog then
+                    A.DumpDebugLog(args[3])
+                else
+                    print("|cff8882d5SPHelper|r: Debug logging is unavailable.")
+                end
+            elseif args[2] == "echo" then
+                local state = args[3]
+                if state == "on" or state == "off" then
+                    A.db.debug = A.db.debug or {}
+                    A.db.debug.echo = (state == "on")
+                    print("|cff8882d5SPHelper|r: Debug echo -> " .. state)
+                else
+                    print("|cff8882d5SPHelper|r: Usage: /sph debug echo on|off")
+                end
+            else
+                local module = args[2]
+                local state = args[3]
+                if module and (state == "on" or state == "off") and A.SetDebugModuleEnabled then
+                    A.SetDebugModuleEnabled(module, state == "on")
+                    print(string.format("|cff8882d5SPHelper|r: Debug %s -> %s", tostring(module):upper(), state))
+                else
+                    PrintDebugHelp()
+                end
+            end
+
+        elseif msg == "macros" then
+            if A.ChannelHelper and A.ChannelHelper.PrintMacros then
+                A.ChannelHelper:PrintMacros()
+                print("|cff8882d5SPHelper|r: Use |cffffcc00/sph createmacros|r to auto-create these macros.")
+            else
+                print("|cff8882d5SPHelper|r: ChannelHelper not loaded.")
+            end
+
+        elseif msg == "createmacros" then
+            if A.ChannelHelper and A.ChannelHelper.CreateMacros then
+                A.ChannelHelper:CreateMacros()
+            else
+                print("|cff8882d5SPHelper|r: ChannelHelper not loaded.")
+            end
+
         else
             print("|cff8882d5SPHelper|r commands:")
             print("  /sph            — Open settings")
+            print("  /sph spec       — Open spec & rotation editor")
+            print("  /sph visuals    — Open visual layout options")
+            print("  /sph debug      — List or toggle module debug logging")
             print("  /sph lock       — Lock all frames")
             print("  /sph unlock     — Unlock frames for dragging")
             print("  /sph scale N    — Set UI scale (0.5-3.0)")
             print("  /sph swd MODE   — SW:D mode: always / execute / never")
+            print("  /sph macros     — Print fake-queue macro templates")
+            print("  /sph createmacros — Auto-create FQ macros for active spec")
             print("  /sph reset      — Reset all settings")
         end
     end
+end
+
+------------------------------------------------------------------------
+-- Register as SpecManager helper
+------------------------------------------------------------------------
+if SPHelper.SpecManager then
+    SPHelper.SpecManager:RegisterHelper("Config", {
+        _initialized = false,
+        OnSpecActivate = function(self, spec)
+            if self._initialized then return end
+            self._initialized = true
+            if SPHelper.InitConfig then SPHelper:InitConfig() end
+        end,
+        OnSpecDeactivate = function(self, spec)
+            self._initialized = false
+            -- Config panel is not destroyed; just stays dormant
+        end,
+    })
 end

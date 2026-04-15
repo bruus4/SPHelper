@@ -1,10 +1,105 @@
 ------------------------------------------------------------------------
 -- SPHelper  –  Rotation.lua
--- "What to cast next" advisor for TBC Shadow Priest.
--- Priority accounts for expiring dots, per-content SWD mode,
--- configurable SF mana threshold, and consumable suggestions.
+-- "What to cast next" advisor. Delegates to RotationEngine for all
+-- spec-specific logic. Consumables/potions/runes handled as generic items.
 ------------------------------------------------------------------------
 local A = SPHelper
+
+local LIVE_FADE_PROFILE = {
+    primaryOutStart = 0.00,
+    primaryOutEnd = 0.75,
+    secondaryInStart = 0.25,
+    secondaryInEnd = 0.95,
+    curve = "smooth",
+}
+
+local LIVE_FADE_SPEED = 1.5
+
+local function ResolveTestSpell(spellKey)
+    local spell = A.SPELLS and A.SPELLS[spellKey] or nil
+    if spell then
+        local spellId = spell.id or spell.baseId
+        local icon = spell.icon or ((A.GetSpellIconCached and spellId) and A.GetSpellIconCached(spellId)) or (spellId and select(3, GetSpellInfo(spellId)))
+        if icon then
+            return icon, spell.label or spell.name or spellKey
+        end
+    end
+    return "Interface\\Icons\\INV_Misc_QuestionMark", spellKey
+end
+
+local function ConfigureDualTexture(tex, icon, alpha)
+    if not tex then return end
+
+    tex:SetTexture(icon)
+    tex:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    tex:SetBlendMode("BLEND")
+    tex:SetAlpha(alpha or 1)
+end
+
+local function SetBadgePosition(tex, content, corner, size)
+    tex:ClearAllPoints()
+    tex:SetSize(size, size)
+    if corner == "TR" then
+        tex:SetPoint("TOPRIGHT", content, "TOPRIGHT", 3, -3)
+    elseif corner == "BR" then
+        tex:SetPoint("BOTTOMRIGHT", content, "BOTTOMRIGHT", 3, 3)
+    elseif corner == "TL" then
+        tex:SetPoint("TOPLEFT", content, "TOPLEFT", -3, -3)
+    else
+        tex:SetPoint("BOTTOMLEFT", content, "BOTTOMLEFT", -3, 3)
+    end
+end
+
+local function Clamp01(value)
+    if value < 0 then
+        return 0
+    elseif value > 1 then
+        return 1
+    end
+    return value
+end
+
+local function SmoothStep(value)
+    value = Clamp01(value)
+    return value * value * (3 - 2 * value)
+end
+
+local function SmootherStep(value)
+    value = Clamp01(value)
+    return value * value * value * (value * (value * 6 - 15) + 10)
+end
+
+local function ApplyFadeCurve(value, curve)
+    if curve == "smooth" then
+        return SmoothStep(value)
+    elseif curve == "smoother" then
+        return SmootherStep(value)
+    end
+    return value
+end
+
+local function FadeRamp(phase, startPhase, endPhase, curve)
+    if endPhase <= startPhase then
+        return phase >= endPhase and 1 or 0
+    end
+
+    local value = (phase - startPhase) / (endPhase - startPhase)
+    value = Clamp01(value)
+    return ApplyFadeCurve(value, curve)
+end
+
+local function GetFadeAlphas(cfg, cycle)
+    local firstHalf = cycle < 1
+    local phase = firstHalf and cycle or (cycle - 1)
+    f:SetScript("OnHide", function(self)
+        self.fadeSpeed = self.fadeSpeed or 1
+    end)
+
+    A._splitIconTestFrame = f
+    UpdateFadeTestFrame(f, GetTime())
+    f:Show()
+    return f
+end
 
 function A:InitRotation()
     local db = A.db.rotation
@@ -58,13 +153,150 @@ function A:InitRotation()
         cdText:SetText("")
         frame.cdText = cdText
 
+        -- GCD / cooldown sweep overlay (CooldownFrameTemplate)
+        local cdOverlay = CreateFrame("Cooldown", nil, frame, "CooldownFrameTemplate")
+        cdOverlay:SetAllPoints(frame)
+        cdOverlay:SetDrawSwipe(true)
+        cdOverlay:SetDrawBling(false)
+        cdOverlay:SetDrawEdge(true)
+        pcall(function() cdOverlay:SetHideCountdownNumbers(true) end)
+        frame.cdOverlay = cdOverlay
+
         return frame
+    end
+
+    local BASE_ICON_LEFT = 0.08
+    local BASE_ICON_RIGHT = 0.92
+    local BASE_ICON_TOP = 0.08
+    local BASE_ICON_BOTTOM = 0.92
+
+    local function SetTextureColor(tex, live, inRange)
+        if not tex then return end
+        if live and live > 0 then
+            if not inRange then
+                tex:SetVertexColor(0.7, 0.2, 0.2)
+            else
+                tex:SetVertexColor(0.6, 0.6, 0.6)
+            end
+        else
+            if not inRange then
+                tex:SetVertexColor(0.8, 0.2, 0.2)
+            else
+                tex:SetVertexColor(1, 1, 1)
+            end
+        end
+    end
+
+    local function HideFadeVisual(frame)
+        if frame.fadePrimaryTex then frame.fadePrimaryTex:Hide() end
+        if frame.fadeSecondaryTex then frame.fadeSecondaryTex:Hide() end
+    end
+
+    local function ResetPrimaryVisual(frame)
+        HideFadeVisual(frame)
+        frame.icon:Show()
+        frame.icon:SetTexture(nil)
+        frame.icon:SetVertexColor(1, 1, 1)
+        frame.fadeStart = nil
+        frame.fadeKey1 = nil
+        frame.fadeKey2 = nil
+    end
+
+    local function UseFadePrimary(spec, firstRec, secondRec)
+        if not spec or not firstRec or not secondRec then return false end
+        if not A.SpecVal then return false end
+
+        local enabled = A.SpecVal("fade_primary_icon", nil)
+        if enabled == nil then
+            enabled = A.SpecVal("split_primary_icon", false)
+        end
+        if not enabled then return false end
+
+        local key1 = type(firstRec) == "table" and firstRec.key or firstRec
+        local key2 = type(secondRec) == "table" and secondRec.key or secondRec
+        if not key1 or not key2 then return false end
+
+        if type(firstRec) == "table" and type(secondRec) == "table" then
+            local bucket1 = firstRec.priorityBucket
+            local bucket2 = secondRec.priorityBucket
+            return bucket1 ~= nil
+                and bucket2 ~= nil
+                and (firstRec.eta or 0) <= 0
+                and (secondRec.eta or 0) <= 0
+                and tostring(bucket1) == tostring(bucket2)
+        end
+        return false
+    end
+
+    local function UpdatePrimaryVisual(frame, key1, key2, fadeActive, getDisplayIcon, state1, state2, now)
+        if not fadeActive then
+            HideFadeVisual(frame)
+            frame.icon:Show()
+            frame.icon:SetTexture(getDisplayIcon(key1 or ""))
+            frame.icon:SetTexCoord(BASE_ICON_LEFT, BASE_ICON_RIGHT, BASE_ICON_TOP, BASE_ICON_BOTTOM)
+            SetTextureColor(frame.icon, state1 and state1.live, state1 and state1.inRange)
+            frame.fadeStart = nil
+            frame.fadeKey1 = nil
+            frame.fadeKey2 = nil
+            return false
+        end
+
+        local icon1 = getDisplayIcon(key1 or "")
+        local icon2 = getDisplayIcon(key2 or "")
+        if not icon1 or not icon2 or not frame.fadePrimaryTex or not frame.fadeSecondaryTex then
+            HideFadeVisual(frame)
+            frame.icon:Show()
+            frame.icon:SetTexture(icon1 or icon2)
+            frame.icon:SetTexCoord(BASE_ICON_LEFT, BASE_ICON_RIGHT, BASE_ICON_TOP, BASE_ICON_BOTTOM)
+            SetTextureColor(frame.icon, state1 and state1.live, state1 and state1.inRange)
+            frame.fadeStart = nil
+            frame.fadeKey1 = nil
+            frame.fadeKey2 = nil
+            return false
+        end
+
+        now = now or GetTime()
+        if frame.fadeKey1 ~= key1 or frame.fadeKey2 ~= key2 or not frame.fadeStart then
+            frame.fadeStart = now
+            frame.fadeKey1 = key1
+            frame.fadeKey2 = key2
+        end
+
+        local cycle = ((now - frame.fadeStart) * LIVE_FADE_SPEED) % 2
+        local primaryAlpha, secondaryAlpha = GetFadeAlphas(LIVE_FADE_PROFILE, cycle)
+
+        frame.icon:Hide()
+        frame.fadePrimaryTex:SetTexture(icon1)
+        frame.fadeSecondaryTex:SetTexture(icon2)
+        frame.fadePrimaryTex:ClearAllPoints()
+        frame.fadePrimaryTex:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, 0)
+        frame.fadePrimaryTex:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 0, 0)
+        frame.fadeSecondaryTex:ClearAllPoints()
+        frame.fadeSecondaryTex:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, 0)
+        frame.fadeSecondaryTex:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 0, 0)
+        frame.fadePrimaryTex:SetTexCoord(BASE_ICON_LEFT, BASE_ICON_RIGHT, BASE_ICON_TOP, BASE_ICON_BOTTOM)
+        frame.fadeSecondaryTex:SetTexCoord(BASE_ICON_LEFT, BASE_ICON_RIGHT, BASE_ICON_TOP, BASE_ICON_BOTTOM)
+        frame.fadePrimaryTex:SetAlpha(primaryAlpha)
+        frame.fadeSecondaryTex:SetAlpha(secondaryAlpha)
+        frame.fadePrimaryTex:Show()
+        frame.fadeSecondaryTex:Show()
+        SetTextureColor(frame.fadePrimaryTex, state1 and state1.live, state1 and state1.inRange)
+        SetTextureColor(frame.fadeSecondaryTex, state2 and state2.live, state2 and state2.inRange)
+        return true
     end
 
     ----------------------------------------------------------------
     -- Primary (big) icon
     ----------------------------------------------------------------
     local primary = MakeIcon(f, ICON, nil, 0, 0)
+    primary.fadePrimaryTex = primary:CreateTexture(nil, "ARTWORK")
+    primary.fadePrimaryTex:SetPoint("TOPLEFT", primary, "TOPLEFT", 0, 0)
+    primary.fadePrimaryTex:SetPoint("BOTTOMRIGHT", primary, "BOTTOMRIGHT", 0, 0)
+    primary.fadePrimaryTex:Hide()
+    primary.fadeSecondaryTex = primary:CreateTexture(nil, "ARTWORK")
+    primary.fadeSecondaryTex:SetPoint("TOPLEFT", primary, "TOPLEFT", 0, 0)
+    primary.fadeSecondaryTex:SetPoint("BOTTOMRIGHT", primary, "BOTTOMRIGHT", 0, 0)
+    primary.fadeSecondaryTex:Hide()
 
     f.primary = primary
 
@@ -84,48 +316,39 @@ function A:InitRotation()
     -- Spell icon cache
     ----------------------------------------------------------------
     local spellIcons = {}
-    for key, spell in pairs(A.SPELLS) do
-        local _, _, ic = GetSpellInfo(spell.id)
-        spellIcons[key] = ic
+    local function GetCachedSpellIcon(key)
+        local spell = key and A.SPELLS and A.SPELLS[key]
+        if spell then
+            local currentId = spell.id or spell.baseId
+            local currentIcon = spell.icon or ((A.GetSpellIconCached and currentId) and A.GetSpellIconCached(currentId)) or (currentId and select(3, GetSpellInfo(currentId)))
+            if currentIcon then
+                spellIcons[key] = currentIcon
+                return currentIcon
+            end
+        end
+
+        local cached = key and spellIcons[key] or nil
+        if cached then return cached end
+
+        local baseKey = type(key) == "string" and key:match("^([A-Z]+)") or nil
+        if baseKey and baseKey ~= key then
+            return GetCachedSpellIcon(baseKey)
+        end
+        return nil
+    end
+
+    for key in pairs(A.SPELLS) do
+        GetCachedSpellIcon(key)
     end
     -- Consumable icons
-    spellIcons["POTION"] = GetItemIcon(22832) or "Interface\\Icons\\INV_Potion_76"
-    spellIcons["RUNE"]   = GetItemIcon(20520) or "Interface\\Icons\\INV_Misc_Rune_04"
-
-    ----------------------------------------------------------------
-    -- SW:D eligibility (per-content type)
-    ----------------------------------------------------------------
-    local function SWDAllowed()
-        local contentType = A.GetContentType()
-        local mode
-        if contentType == "raid" then
-            mode = A.db.swdRaid or "execute"
-        elseif contentType == "dungeon" then
-            mode = A.db.swdDungeon or "always"
-        else
-            mode = A.db.swdWorld or "always"
-        end
-        if mode == "never" then return false end
-        if mode == "execute" then
-            -- Use absolute damage calculation: compare predicted SWD non-crit hit to target HP
-            local thp, tmax, tpct = A.GetTargetHP()
-            if not UnitExists("target") or tmax == 0 then
-                return false
-            end
-            local sp = (A.GetSpellPower and A.GetSpellPower()) or 0
-            local swdHit = math.floor(sp * 1.55 + 0.5)
-            local safety = (A.db and A.db.swdSafetyPct) and (A.db.swdSafetyPct) or 0
-            local required = thp * (1 + (safety or 0) / 100)
-            -- If predicted non-crit SWD hit can kill the target with safety margin, allow SWD execute
-            return thp > 0 and (swdHit >= required)
-        end
-        return true
-    end
+    spellIcons["POTION"] = (A.GetItemIconCached and A.GetItemIconCached(22832)) or GetItemIcon(22832) or "Interface\\Icons\\INV_Potion_76"
+    spellIcons["RUNE"]   = (A.GetItemIconCached and A.GetItemIconCached(20520)) or GetItemIcon(20520) or "Interface\\Icons\\INV_Misc_Rune_04"
 
     ----------------------------------------------------------------
     -- Recently-cast tracking (prevents re-suggesting mid-travel spells)
     ----------------------------------------------------------------
     local recentCast = {}  -- key = spellName, value = GetTime()
+    A._rotRecentCast = recentCast  -- expose for RotationEngine
     local RECENT_WINDOW = 1.0  -- seconds to suppress after cast finishes
 
     local recentEv = CreateFrame("Frame")
@@ -133,7 +356,7 @@ function A:InitRotation()
     recentEv:SetScript("OnEvent", function(self, event, unit, _, spellId)
         if unit ~= "player" then return end
         if spellId then
-            local name = GetSpellInfo(spellId)
+            local name = (A.GetSpellInfoCached and A.GetSpellInfoCached(spellId)) or GetSpellInfo(spellId)
             if name then
                 recentCast[name] = GetTime()
                 A.DebugLog("CAST", "succeeded: " .. name .. " (id=" .. spellId .. ")")
@@ -171,494 +394,29 @@ function A:InitRotation()
     -- (time until current cast / channel finishes) so the list
     -- always answers "what should I cast NEXT?"
     ----------------------------------------------------------------
-    local VT_CAST_TIME = 1.5   -- VT cast time (fixed in TBC shadow)
-    local SAFETY       = 0.5   -- margin for latency spikes / travel time
-    local MF_CAST_TIME = 3.0   -- Mind Flay cast time (TBC)
-    local MIN_MF_DURATION = 1.0 -- Minimum time MF must be cast for advisor to allow it when clipping
+    local function GetActiveRotationSpec()
+        if not A.SpecManager then return nil end
+        local activeSpecs = A.SpecManager:GetActiveSpecs()
+        for _, spec in pairs(activeSpecs) do
+            if spec.rotation then
+                return spec
+            end
+        end
+        return nil
+    end
 
     local function GetPriority()
-        local now = GetTime()
-        local inCombatNow = UnitAffectingCombat("player")
-
-        -- Target validation
-        local hasTarget = UnitExists("target")
-                          and not UnitIsDead("target")
-                          and UnitCanAttack("player", "target")
-        if not hasTarget then
-            A.DebugLog("ROT", "no valid target — checking consumables only")
-            -- Allow consumable / SF suggestions even without a target
-            local result = {}
-            local seen = {}
-            local function Add(key, eta)
-                if seen[key] then return end
-                result[#result + 1] = { key = key, eta = eta or 0 }
-                seen[key] = true
-            end
-
-            local now = GetTime()
-            -- Project cooldowns for spells we may suggest (SF depends only on cooldown)
-            local sfCD  = A.KnowsSpell(A.SPELLS.SF.id)
-                          and math.max(A.GetSpellCDReal(A.SPELLS.SF.id) - 0, 0) or 999
-
-            -- Resources
-            local manaPct = (UnitPower("player", 0) or 0) /
-                            math.max(UnitPowerMax("player", 0) or 1, 1)
-
-            -- Shadowfiend (mana emergency)
-            local sfThresh = (A.db.sfManaThreshold or 35) / 100
-            if inCombatNow and manaPct < sfThresh and A.KnowsSpell(A.SPELLS.SF.id) and sfCD == 0 then
-                Add("SF")
-            end
-
-            -- Consumables (pots and runes)
-            if A.db.suggestPot then
-                local potThresh = (A.db.potManaThreshold or 70) / 100
-                if manaPct < potThresh then
-                    local potId = A.db.selectedPotionItem
-                    if type(potId) == "string" then local n = tonumber(potId); if n then potId = n end end
-                    if potId and potId ~= "none" then
-                        local potStart, potDur = A.GetItemCooldownSafe(potId)
-                        local potReady = (not potStart or not potDur or potStart == 0 or (potStart + potDur - now) <= 0)
-                        if potReady and (GetItemCount(potId) or 0) > 0 then Add("POTION") end
-                    end
-                end
-            end
-            if A.db.suggestRune then
-                local runeThresh = (A.db.runeManaThreshold or 40) / 100
-                if manaPct < runeThresh then
-                    local runeId = A.db.selectedRuneItem
-                    if type(runeId) == "string" then local n = tonumber(runeId); if n then runeId = n end end
-                    if runeId and runeId ~= "none" then
-                        local start, dur = A.GetItemCooldownSafe(runeId)
-                        local ready = (not start or not dur or start == 0 or (start + dur - now) <= 0)
-                        if ready and (GetItemCount(runeId) or 0) > 0 then Add("RUNE") end
-                    else
-                        for _, id in ipairs(A.RUNE_IDS or {}) do
-                            if (GetItemCount(id) or 0) > 0 then
-                                local start, dur = A.GetItemCooldownSafe(id)
-                                local ready = (not start or not dur or start == 0 or (start + dur - now) <= 0)
-                                if ready then Add("RUNE"); break end
-                            end
-                        end
-                    end
-                end
-            end
-
-            -- If nothing else to suggest:
-            -- - In combat: show MF filler so the advisor remains useful.
-            -- - Out of combat: return nil so the display clears (no target/no combat).
-            if #result == 0 then
-                if inCombatNow then
-                    Add("MF")
-                else
-                    return nil
-                end
-            end
-
-            if A.debugEnabled then
-                local parts = {}
-                for i, r in ipairs(result) do
-                    parts[i] = r.key .. (r.eta > 0 and ("(" .. string.format("%.1f", r.eta) .. ")") or "")
-                end
-                A.DebugLog("ROT", "prio(no-target)=[" .. table.concat(parts, ",") .. "]")
-            end
-
-            return result
+        -- Delegate to RotationEngine for all spec-specific logic.
+        local spec = GetActiveRotationSpec()
+        if A.RotationEngine and spec then
+            local ok, result = pcall(A.RotationEngine.Evaluate, A.RotationEngine, spec)
+            if ok and result then return result, spec end
+            -- Spec has a rotation but engine returned nil — no match found.
+            if ok then return {}, spec end
         end
 
-        -- Time remaining on current cast / channel
-        local castingSpell, castRemaining = GetPlayerCastInfo()
-
-        -- Haste-adjusted timings
-        local hastePct, hasteMul = 0, 1
-        if A.GetHaste then
-            local ok, hp, hm = pcall(A.GetHaste)
-            if ok and hp and hm then hastePct, hasteMul = hp, hm end
-        end
-        local gcd = math.max(1.0, 1.5 / hasteMul)
-        local lat = A.GetLatency()
-
-        ---- DoT timers on current target (name-based, rank-agnostic) ----
-        local vtRem, swpRem = 0, 0
-        do
-            local n, _, _, _, _, exp = A.FindPlayerDebuff("target", A.SPELLS.VT.name)
-            if n and exp then vtRem = math.max(exp - now, 0) end
-        end
-        do
-            local n, _, _, _, _, exp = A.FindPlayerDebuff("target", A.SPELLS.SWP.name)
-            if n and exp then swpRem = math.max(exp - now, 0) end
-        end
-
-        -- In-flight / recently-cast: debuff may not be scan-able yet
-        if vtRem == 0 then
-            if (castingSpell and castingSpell == A.SPELLS.VT.name)
-               or WasRecentlyCast(A.SPELLS.VT.name) then
-                vtRem = 15
-            end
-        end
-        if swpRem == 0 then
-            if WasRecentlyCast(A.SPELLS.SWP.name) then
-                swpRem = 18
-            end
-        end
-
-        -- Project to the moment the current cast finishes
-        local vtAfter  = math.max(vtRem  - castRemaining, 0)
-        local swpAfter = math.max(swpRem - castRemaining, 0)
-
-        -- Project cooldowns (only for known spells)
-        local mbCD  = A.KnowsSpell(A.SPELLS.MB.id)
-                      and math.max(A.GetSpellCDReal(A.SPELLS.MB.id) - castRemaining, 0) or 999
-        local swdCD = A.KnowsSpell(A.SPELLS.SWD.id)
-                      and math.max(A.GetSpellCDReal(A.SPELLS.SWD.id) - castRemaining, 0) or 999
-        local sfCD  = A.KnowsSpell(A.SPELLS.SF.id)
-                      and math.max(A.GetSpellCDReal(A.SPELLS.SF.id) - castRemaining, 0) or 999
-        local dpCD  = A.KnowsSpell(A.SPELLS.DP.id)
-                      and math.max(A.GetSpellCDReal(A.SPELLS.DP.id) - castRemaining, 0) or 999
-
-        -- Resources
-        local manaPct = (UnitPower("player", 0) or 0) /
-                        math.max(UnitPowerMax("player", 0) or 1, 1)
-        local hpPct   = (UnitHealth("player") or 1) /
-                        math.max(UnitHealthMax("player") or 1, 1)
-
-        ----------------------------------------------------------------
-        -- Urgency thresholds
-        --   VT:  will it fall off before we can re-cast it?
-        --        Need VT_CAST_TIME + lat + SAFETY after current cast.
-        --   SWP: instant, just needs one GCD + lat + SAFETY.
-        ----------------------------------------------------------------
-        local vtCastEff = VT_CAST_TIME / hasteMul
-        local mfCastEff = MF_CAST_TIME / hasteMul
-        local minMfEff  = MIN_MF_DURATION / hasteMul
-
-        local vtUrgent  = A.KnowsSpell(A.SPELLS.VT.id)
-                  and (vtAfter < vtCastEff + lat + SAFETY)
-        local swpUrgent = (swpAfter < gcd + lat + SAFETY)
-
-        ----------------------------------------------------------------
-        -- Build ordered result
-        ----------------------------------------------------------------
-        local result = {}
-        local seen   = {}
-
-        local function Add(key, eta, clip)
-            if seen[key] then return end
-            local entry = { key = key, eta = eta or 0 }
-            if clip then entry.clip = true end
-            result[#result + 1] = entry
-            seen[key] = true
-        end
-
-        -- Priority: if SW:D can outright kill the target, force it to primary
-        local swdCanKill = false
-        if A.KnowsSpell(A.SPELLS.SWD.id) then
-            local sp = (A.GetSpellPower and A.GetSpellPower()) or 0
-            local swdHit = math.floor(sp * 1.55 + 0.5)
-            local thp = 0
-            do
-                local hp, maxhp = A.GetTargetHP()
-                thp = hp or 0
-            end
-            local safety = (A.db and A.db.swdSafetyPct) and (A.db.swdSafetyPct) or 0
-            local required = thp * (1 + (safety or 0) / 100)
-            if thp > 0 and swdHit > 0 and swdHit >= required then swdCanKill = true end
-        end
-        if swdCanKill and swdCD == 0 then
-            Add("SWD")
-        end
-
-        -- 1) VT urgent (must maintain — raid mana return)
-        if not swdCanKill and vtUrgent then Add("VT") end
-
-        -- 2) SWP urgent
-        if swpUrgent then Add("SWP") end
-
-        -- 3) MB ready
-        if mbCD == 0 then
-            Add("MB")
-        else
-            -- If we're currently casting Mind Flay, prefer casting another MF
-            -- unless MB/SWD/dots are so close that MF couldn't be cast for at
-            -- least `MIN_MF_DURATION`. If MB/SWD/dot will come off during MF
-            -- we still allow MF but mark it as a clip candidate.
-            local isCastingMF = (castingSpell and castingSpell == A.SPELLS.MF.name)
-            if isCastingMF then
-                -- Prefer MF unless MB/SWD/dots are within MF_CAST_TIME (i.e. will be ready
-                -- or expire within the next MF cast). If they are within that window but
-                -- still leave at least MIN_MF_DURATION of MF, we suggest MF with a clip flag.
-                local mbTooClose = (mbCD > 0 and mbCD <= mfCastEff)
-                local swdTooClose = (swdCD > 0 and swdCD <= mfCastEff)
-                local vtTooClose = (vtAfter > 0 and vtAfter <= mfCastEff)
-                local swpTooClose = (swpAfter > 0 and swpAfter <= mfCastEff)
-
-                -- If none are too close, safe to continue MF without clipping
-                if not (mbTooClose or swdTooClose or vtTooClose or swpTooClose) then
-                    Add("MF", 0, false)
-                else
-                    -- They are close; only allow MF if there's at least MIN_MF_DURATION before the event
-                    local willAllow = false
-                    local clip = false
-                    if (mbCD > 0 and mbCD >= minMfEff) then
-                        willAllow = true
-                        if mbCD < mfCastEff then clip = true end
-                    end
-                    if (swdCD > 0 and swdCD >= minMfEff) then
-                        willAllow = true
-                        if swdCD < mfCastEff then clip = true end
-                    end
-                    if (vtAfter > 0 and vtAfter >= minMfEff) then
-                        willAllow = true
-                        if vtAfter < mfCastEff then clip = true end
-                    end
-                    if (swpAfter > 0 and swpAfter >= minMfEff) then
-                        willAllow = true
-                        if swpAfter < mfCastEff then clip = true end
-                    end
-                    if willAllow then Add("MF", 0, clip) end
-                end
-            end
-        end
-
-        -- 3a) Early potion option: if enabled, suggest potion before Shadowfiend
-        if A.db.potEarly and A.db.suggestPot and inCombatNow then
-            local ok, err = pcall(function()
-                local potThresh = (A.db.potManaThreshold or 70) / 100
-                if manaPct < potThresh then
-                    local potId = A.db.selectedPotionItem
-                    if type(potId) == "string" then local n = tonumber(potId); if n then potId = n end end
-                    if potId and potId ~= "none" then
-                        local potStart, potDur = A.GetItemCooldownSafe(potId)
-                        local potReady = (not potStart or not potDur or potStart == 0 or (potStart + potDur - now) <= 0)
-                        local potCount = (GetItemCount(potId) or 0)
-                        if A.debugEnabled then
-                            A.DebugLog("POT", string.format("early pot check potId=%s count=%d ready=%s manaPct=%.2f thresh=%.2f", tostring(potId), potCount, tostring(potReady), manaPct, potThresh))
-                        end
-                        if potReady and potCount > 0 then Add("POTION") end
-                    end
-                end
-            end)
-            if not ok then A.DebugLog("ERR", "Early potion check failed: " .. tostring(err)) end
-        end
-
-        -- 4) Shadowfiend (mana emergency)
-        local sfThresh = (A.db.sfManaThreshold or 35) / 100
-        if manaPct < sfThresh and A.KnowsSpell(A.SPELLS.SF.id) and sfCD == 0 then
-            Add("SF")
-        end
-
-        -- 5) SW:D (per-content mode)
-        if A.KnowsSpell(A.SPELLS.SWD.id) and SWDAllowed()
-           and hpPct > 0.20 and swdCD == 0 then
-            -- If mode == "always", require player's absolute HP > 3000
-            local contentType = A.GetContentType()
-            local mode
-            if contentType == "raid" then
-                mode = A.db.swdRaid or "execute"
-            elseif contentType == "dungeon" then
-                mode = A.db.swdDungeon or "always"
-            else
-                mode = A.db.swdWorld or "always"
-            end
-            if mode == "always" then
-                -- Dynamic threshold based on player's spell power.
-                -- Use heuristic: SW:D hit ~= 1.55 * spellPower; crit multiplier 1.5
-                local sp = (A.GetSpellPower and A.GetSpellPower()) or 0
-                local swdHit = math.floor(sp * 1.55 + 0.5)
-                local swdCrit = math.floor(swdHit * 1.5 + 0.5)
-                local playerHP = (UnitHealth("player") or 0)
-                if A.debugEnabled then
-                    A.DebugLog("SWD", string.format("sp=%d swdHit=%d swdCrit=%d playerHP=%d", sp, swdHit, swdCrit, playerHP))
-                end
-                if playerHP > swdCrit then
-                    Add("SWD")
-                end
-            else
-                Add("SWD")
-            end
-        end
-
-        -- 6) Devouring Plague (if not on target)
-        if A.KnowsSpell(A.SPELLS.DP.id) then
-            local dpUp = A.FindPlayerDebuff("target", A.SPELLS.DP.name)
-            if not dpUp and dpCD == 0 then Add("DP") end
-        end
-
-        -- 7) Consumables — respect user selection and inventory
-        -- If `potEarly` is enabled, potion already handled above.
-        if A.db.suggestPot and not A.db.potEarly and inCombatNow then
-            local ok, err = pcall(function()
-                local potThresh = (A.db.potManaThreshold or 70) / 100
-                if manaPct < potThresh then
-                    local potId = A.db.selectedPotionItem
-                    if type(potId) == "string" then
-                        local n = tonumber(potId)
-                        if n then potId = n end
-                    end
-                    if potId and potId ~= "none" then
-                        local potStart, potDur = A.GetItemCooldownSafe(potId)
-                        local potReady = (not potStart or not potDur
-                            or potStart == 0
-                            or (potStart + potDur - now) <= 0)
-                        local potCount = (GetItemCount(potId) or 0)
-                        if A.debugEnabled then
-                            A.DebugLog("POT", string.format("potId=%s count=%d potReady=%s manaPct=%.2f thresh=%.2f", tostring(potId), potCount, tostring(potReady), manaPct, potThresh))
-                        end
-                        if potReady and potCount > 0 then
-                            Add("POTION")
-                        end
-                    end
-                end
-            end)
-            if not ok then A.DebugLog("ERR", "Potion check failed: " .. tostring(err)) end
-        end
-        if A.db.suggestRune then
-            local ok, err = pcall(function()
-                local runeThresh = (A.db.runeManaThreshold or 40) / 100
-                if manaPct < runeThresh then
-                    local runeId = A.db.selectedRuneItem
-                    if type(runeId) == "string" then
-                        local n = tonumber(runeId)
-                        if n then runeId = n end
-                    end
-                    if runeId and runeId ~= "none" then
-                        local start, dur = A.GetItemCooldownSafe(runeId)
-                        local ready = (not start or not dur or start == 0 or (start + dur - now) <= 0)
-                        local runeCount = (GetItemCount(runeId) or 0)
-                        if A.debugEnabled then
-                            A.DebugLog("RUNE", string.format("runeId=%s count=%d ready=%s manaPct=%.2f thresh=%.2f", tostring(runeId), runeCount, tostring(ready), manaPct, runeThresh))
-                        end
-                        if ready and runeCount > 0 then Add("RUNE") end
-                    else
-                        -- auto-detect: check any rune in the known list
-                        for _, id in ipairs(A.RUNE_IDS or {}) do
-                            local cnt = (GetItemCount(id) or 0)
-                            if cnt > 0 then
-                                local start, dur = A.GetItemCooldownSafe(id)
-                                local ready = (not start or not dur or start == 0 or (start + dur - now) <= 0)
-                                if A.debugEnabled then
-                                    A.DebugLog("RUNE", string.format("auto id=%s count=%d ready=%s manaPct=%.2f thresh=%.2f", tostring(id), cnt, tostring(ready), manaPct, runeThresh))
-                                end
-                                if ready then Add("RUNE"); break end
-                            end
-                        end
-                    end
-                end
-            end)
-            if not ok then A.DebugLog("ERR", "Rune check failed: " .. tostring(err)) end
-        end
-
-        -- 8) MF filler (always available) — but prefer MF when it can be clipped
-        do
-            local clip = false
-            -- Clip because MB will come off during MF cast
-            if mbCD > 0 and mbCD < mfCastEff and mbCD >= minMfEff then
-                clip = true
-            end
-            -- Clip because a DOT will expire during MF cast
-            if (vtAfter > 0 and vtAfter < mfCastEff and vtAfter >= minMfEff)
-               or (swpAfter > 0 and swpAfter < mfCastEff and swpAfter >= minMfEff) then
-                clip = true
-            end
-            Add("MF", 0, clip)
-        end
-
-        -- Append upcoming (not-yet-ready) spells for queue display
-        local upcoming = {}
-        if not vtUrgent and A.KnowsSpell(A.SPELLS.VT.id) then
-            local vtNow = vtRem
-            local vtProj = math.max(vtAfter - vtCastEff - lat - SAFETY, 0)
-            upcoming[#upcoming + 1] = { key = "VT", eta = vtProj, displayEta = vtNow }
-        end
-        if not swpUrgent then
-            local swpNow = swpRem
-            local swpProj = math.max(swpAfter - gcd - lat - SAFETY, 0)
-            upcoming[#upcoming + 1] = { key = "SWP", eta = swpProj, displayEta = swpNow }
-        end
-        if mbCD > 0 then
-            local mbNow = math.max(A.GetSpellCDReal(A.SPELLS.MB.id), 0)
-            upcoming[#upcoming + 1] = { key = "MB", eta = mbCD, displayEta = mbNow }
-        end
-        if A.KnowsSpell(A.SPELLS.SWD.id) and SWDAllowed()
-           and hpPct > 0.20 and swdCD > 0 then
-            local swdNow = math.max(A.GetSpellCDReal(A.SPELLS.SWD.id), 0)
-            upcoming[#upcoming + 1] = { key = "SWD", eta = swdCD, displayEta = swdNow }
-        end
-
-        table.sort(upcoming, function(a, b) return a.eta < b.eta end)
-        for _, v in ipairs(upcoming) do Add(v.key, v.eta) end
-
-        -- Debug log / Inner Focus insertion (tunable via DB)
-        do
-            local db = A.db.rotation or {}
-            local ifCfg = db.ifInsert or { enabled = true, onlyForBoss = true, before = "MB" }
-            if ifCfg.enabled and A.KnowsSpell(A.SPELLS.IF.id) then
-                local class = UnitClassification("target") or ""
-                local isBoss = (class == "worldboss" or class == "elite" or class == "rareelite")
-                if (not ifCfg.onlyForBoss) or isBoss then
-                    local ifCD = math.max(A.GetSpellCDReal(A.SPELLS.IF.id), 0)
-                    local function PlayerHasBuff(buffName)
-                        if not buffName then return false end
-                        for i = 1, 40 do
-                            local name = UnitBuff("player", i)
-                            if not name then break end
-                            if name == buffName then return true end
-                        end
-                        return false
-                    end
-                    if ifCD == 0 and not PlayerHasBuff(A.SPELLS.IF.name) then
-                        local beforeKey = ifCfg.before or "MB"
-                        -- find the requested target spell in the result
-                        local idx = nil
-                        for i = 1, #result do if result[i] and result[i].key == beforeKey then idx = i; break end end
-                        -- allow insertion if the target spell will be available soon
-                        local IF_WINDOW = 4.0 -- seconds window to consider "soon"
-                        local allowInsert = false
-                        if idx then
-                            local ent = result[idx]
-                            local eta = (ent and ent.eta) or 0
-                            if beforeKey == "MB" then
-                                -- Mind Blast: allow if MB is ready now or will be ready within IF_WINDOW
-                                if mbCD == 0 or eta <= IF_WINDOW then allowInsert = true end
-                            elseif beforeKey == "SWP" then
-                                -- SWP: urgent or will be ready soon
-                                if swpUrgent or eta <= IF_WINDOW then allowInsert = true end
-                            elseif beforeKey == "DP" then
-                                -- DP: allow if DP off cooldown or will be ready soon
-                                if dpCD == 0 or eta <= IF_WINDOW then allowInsert = true end
-                            else
-                                if eta <= IF_WINDOW then allowInsert = true end
-                            end
-                        end
-
-                        if allowInsert and idx then
-                            -- remove any existing IF entries
-                            for i = #result, 1, -1 do if result[i] and result[i].key == "IF" then table.remove(result, i) end end
-                            table.insert(result, idx, { key = "IF", eta = 0 })
-                            A.DebugLog("IF", "Inserted Inner Focus before " .. tostring(beforeKey) .. " (eta=" .. tostring((result[idx] and result[idx].eta) or 0) .. ")")
-                            lastPriKey = nil
-                        end
-                    end
-                end
-            end
-        end
-        if A.debugEnabled then
-            local parts = {}
-            for i, r in ipairs(result) do
-                parts[i] = r.key .. (r.eta > 0
-                    and ("(" .. string.format("%.1f", r.eta) .. ")") or "")
-            end
-            A.DebugLog("ROT", "prio=[" .. table.concat(parts, ",") .. "]"
-                .. " vtR=" .. string.format("%.1f", vtRem)
-                .. " vtA=" .. string.format("%.1f", vtAfter)
-                .. " swpR=" .. string.format("%.1f", swpRem)
-                .. " swpA=" .. string.format("%.1f", swpAfter)
-                .. " castRem=" .. string.format("%.1f", castRemaining)
-                .. " cast=" .. tostring(castingSpell)
-                .. " mbCD=" .. string.format("%.1f", mbCD))
-        end
-
-        return result
+        -- No active spec with a rotation — nothing to display.
+        return nil, spec
     end
 
     ----------------------------------------------------------------
@@ -694,15 +452,51 @@ function A:InitRotation()
 
     A.RotationPreviewOn = function()
         previewActive = true
-        primary.icon:SetTexture(spellIcons["VT"])
+        -- Build a preview from the active spec's rotation keys, or fall back to
+        -- any known spells in A.SPELLS.
+        local previewEntries = {}
+        local activeSpec = GetActiveRotationSpec()
+        if A.SpecManager then
+            local activeSpecs = A.SpecManager:GetActiveSpecs()
+            for _, spec in pairs(activeSpecs) do
+                if spec.rotation then
+                    for _, entry in ipairs(spec.rotation) do
+                        if entry.key and spellIcons[entry.key] then
+                            previewEntries[#previewEntries + 1] = {
+                                key = entry.key,
+                                priorityBucket = entry.priorityGroup or entry.explicitPriority or entry.priority,
+                            }
+                        end
+                        if #previewEntries >= 4 then break end
+                    end
+                end
+                if #previewEntries >= 4 then break end
+            end
+        end
+        -- Fallback: use first 4 keys from A.SPELLS that have icons
+        if #previewEntries == 0 then
+            for k, _ in pairs(A.SPELLS) do
+                if spellIcons[k] then
+                    previewEntries[#previewEntries + 1] = { key = k }
+                    if #previewEntries >= 4 then break end
+                end
+            end
+        end
+        local previewFade = UseFadePrimary(activeSpec, previewEntries[1], previewEntries[2])
+        UpdatePrimaryVisual(primary, previewEntries[1] and previewEntries[1].key, previewEntries[2] and previewEntries[2].key, previewFade, function(key)
+            return GetCachedSpellIcon(key)
+        end, { live = 0, inRange = true }, { live = 0, inRange = true })
         primary.cdText:SetText("")
+        if primary.cdOverlay then
+            pcall(CooldownFrame_Set, primary.cdOverlay, 0, 0, 0)
+        end
         A.CreateBackdrop(primary, 0, 0, 0, 0.85, 1, 0.85, 0, 1)
         f:Show()
-
-        local dummyQueue = { "MB", "SWP", "MF" }
+        local queueOffset = previewFade and 3 or 2
         for i = 1, 3 do
             local q = f.queue[i]
-            q.icon:SetTexture(spellIcons[dummyQueue[i]])
+            local previewEntry = previewEntries[i + queueOffset - 1]
+            q.icon:SetTexture(GetCachedSpellIcon(previewEntry and previewEntry.key or ""))
             if i == 1 then
                 q.cdText:SetText("2.1")
             else
@@ -715,6 +509,8 @@ function A:InitRotation()
     A.RotationPreviewOff = function()
         if previewActive then
             previewActive = false
+            ResetPrimaryVisual(primary)
+            primary.cdText:SetText("")
             A.CreateBackdrop(primary, 0, 0, 0, 0.85)
             f:Hide()
         end
@@ -731,15 +527,141 @@ function A:InitRotation()
     ----------------------------------------------------------------
     -- Refresh display
     ----------------------------------------------------------------
-    local lastPriKey    = nil
+    local lastPriSignature = nil
     local inCombat      = UnitAffectingCombat("player")
     local noTargetSince = nil   -- GetTime() when we first saw nil prio in combat
+    local HYSTERESIS_WINDOW = 0.20
+    local HYSTERESIS_ETA_LEEWAY = 0.15
+    local hysteresisState = {
+        signature = nil,
+        shownAt = 0,
+        firstKey = nil,
+        secondKey = nil,
+        targetGUID = nil,
+    }
+
+    local function ResetRecommendationHysteresis()
+        hysteresisState.signature = nil
+        hysteresisState.shownAt = 0
+        hysteresisState.firstKey = nil
+        hysteresisState.secondKey = nil
+        hysteresisState.targetGUID = nil
+    end
+
+    local function FindRecommendationByKey(prio, key)
+        if not key then return nil, nil end
+        for idx, ent in ipairs(prio or {}) do
+            if ent and ent.key == key then
+                return idx, ent
+            end
+        end
+        return nil, nil
+    end
+
+    local function PromoteRecommendationsForDisplay(prio, firstKey, secondKey)
+        if not prio or not firstKey then return prio end
+
+        local reordered = {}
+        local consumed = {}
+
+        local function Take(key)
+            if not key or consumed[key] then return end
+            for _, ent in ipairs(prio) do
+                if ent and ent.key == key then
+                    reordered[#reordered + 1] = ent
+                    consumed[key] = true
+                    return
+                end
+            end
+        end
+
+        Take(firstKey)
+        Take(secondKey)
+
+        for _, ent in ipairs(prio) do
+            if ent and not consumed[ent.key] then
+                reordered[#reordered + 1] = ent
+            end
+        end
+
+        return reordered
+    end
+
+    local function BuildDisplayCandidate(prio, spec)
+        local first = prio and prio[1] or nil
+        local second = prio and prio[2] or nil
+        local paired = UseFadePrimary(spec, first, second)
+        local signature = tostring(first and first.key or "nil")
+        if paired and second then
+            signature = signature .. "|" .. tostring(second.key)
+        end
+        return {
+            first = first,
+            second = paired and second or nil,
+            paired = paired,
+            signature = signature,
+        }
+    end
+
+    local function CommitDisplayCandidate(candidate, now)
+        if not candidate or not candidate.first then
+            ResetRecommendationHysteresis()
+            return
+        end
+
+        if hysteresisState.signature ~= candidate.signature then
+            hysteresisState.shownAt = now
+        end
+        hysteresisState.signature = candidate.signature
+        hysteresisState.firstKey = candidate.first and candidate.first.key or nil
+        hysteresisState.secondKey = candidate.second and candidate.second.key or nil
+        hysteresisState.targetGUID = UnitGUID("target")
+    end
+
+    local function ApplyRecommendationHysteresis(prio, spec)
+        if not prio or #prio == 0 then return prio end
+
+        local now = GetTime()
+        local candidate = BuildDisplayCandidate(prio, spec)
+        if not candidate.first then return prio end
+
+        if candidate.paired and candidate.second and (candidate.first.key ~= hysteresisState.firstKey or candidate.second.key ~= hysteresisState.secondKey) then
+            prio = PromoteRecommendationsForDisplay(prio, hysteresisState.firstKey, hysteresisState.secondKey)
+            candidate = BuildDisplayCandidate(prio, spec)
+        end
+
+        local withinWindow = hysteresisState.signature
+            and hysteresisState.signature ~= candidate.signature
+            and hysteresisState.targetGUID == UnitGUID("target")
+            and (now - (hysteresisState.shownAt or 0)) < HYSTERESIS_WINDOW
+
+        if withinWindow then
+            local _, heldFirst = FindRecommendationByKey(prio, hysteresisState.firstKey)
+            if heldFirst then
+                local keepHeld = (heldFirst.eta or 0) <= ((candidate.first.eta or 0) + HYSTERESIS_ETA_LEEWAY)
+                if keepHeld and hysteresisState.secondKey then
+                    local _, heldSecond = FindRecommendationByKey(prio, hysteresisState.secondKey)
+                    keepHeld = heldSecond ~= nil
+                        and (heldSecond.eta or 0) <= HYSTERESIS_ETA_LEEWAY
+                        and UseFadePrimary(spec, heldFirst, heldSecond)
+                end
+                if keepHeld then
+                    prio = PromoteRecommendationsForDisplay(prio, hysteresisState.firstKey, hysteresisState.secondKey)
+                    candidate = BuildDisplayCandidate(prio, spec)
+                end
+            end
+        end
+
+        CommitDisplayCandidate(candidate, now)
+        return prio
+    end
 
     local function ClearDisplay()
-        primary.icon:SetTexture(nil)
+        ResetPrimaryVisual(primary)
         primary.cdText:SetText("")
         A.CreateBackdrop(primary, 0, 0, 0, 0.85)
-        lastPriKey = nil
+        lastPriSignature = nil
+        ResetRecommendationHysteresis()
         for _, q in ipairs(f.queue) do q:Hide() end
         f:Hide()
     end
@@ -747,7 +669,7 @@ function A:InitRotation()
     local function Refresh()
         if previewActive then return end
 
-        local prio = GetPriority()
+        local prio, activeSpec = GetPriority()
 
         -- nil = no valid target
         if prio == nil then
@@ -765,9 +687,12 @@ function A:InitRotation()
         end
         noTargetSince = nil   -- valid target, reset timer
 
-        -- Empty prio (target exists but nothing to cast) — show MF filler
+        -- Empty prio — Evaluate already handled filler/nil internally.
+        -- If we still get an empty list here it means the engine returned {}
+        -- (no combat, no target) so clear the display.
         if #prio == 0 then
-            prio = {{ key = "MF", eta = 0 }}
+            ClearDisplay()
+            return
         end
 
         -- Filter: if currently casting/channeling a spell, move it out of
@@ -777,65 +702,48 @@ function A:InitRotation()
             if castName then
                 local castKey = nameToKey[castName]
                 if castKey and prio[1] and prio[1].key == castKey then
-                    -- When channeling Mind Flay, don't remove the MF entry: the advisor's
-                    -- priorities are projected to the moment the current cast finishes,
-                    -- so an MF entry while channeling MF represents the NEXT MF and
-                    -- should be displayed. For other spells, remove the currently
-                    -- casting spell so the display shows the actual NEXT cast.
-                    if castKey ~= "MF" then
+                    -- For channel spells (e.g. Mind Flay) keep the entry: the advisor
+                    -- projects to the moment the current cast finishes, so the same spell
+                    -- in slot 1 represents the NEXT cast. For other spells remove so the
+                    -- display shows the actual NEXT cast.
+                    local isChannelKey = A.ChannelHelper and A.ChannelHelper.KNOWN_CHANNELS
+                        and (function()
+                            for _, info in pairs(A.ChannelHelper.KNOWN_CHANNELS) do
+                                if info.spellKey == castKey then return true end
+                            end
+                            -- also check by spell name
+                            local spell = A.SPELLS[castKey]
+                            if spell and spell.name and A.ChannelHelper.KNOWN_CHANNELS[spell.name] then return true end
+                            return false
+                        end)()
+                    if not isChannelKey then
                         A.DebugLog("ROT", "filter: casting " .. castKey .. ", removing from pos 1")
                         table.remove(prio, 1)
-                        if #prio == 0 then
-                            prio = {{ key = "MF", eta = 0 }}
-                        end
                     else
-                        -- If channeling MF, normally keep the next-MF suggestion. However,
-                        -- if the target reaches execute range for SW:D and the target is a
-                        -- normal mob (not elite/boss), prefer SW:D even mid-channel.
-                        local swdIndex = nil
-                        for idx,entry in ipairs(prio) do
-                            if entry.key == "SWD" then swdIndex = idx; break end
-                        end
-                        if swdIndex and swdIndex > 1 then
-                            local class = UnitClassification("target") or ""
-                            if class == "normal" or class == "minus" then
-                                A.DebugLog("ROT", "filter: casting MF but SWD present and target normal; switching to SWD")
-                                -- remove the current MF entry so SWD becomes primary
-                                table.remove(prio, 1)
-                                if #prio == 0 then
-                                    prio = {{ key = "MF", eta = 0 }}
+                        -- Channeling this spell — check if a high-priority instant is available
+                        -- (e.g. execute-range SWD on a normal mob). If so, promote it.
+                        for idx = 2, #prio do
+                            local ent = prio[idx]
+                            if ent and ent.eta == 0 then
+                                local class = UnitClassification("target") or ""
+                                if class == "normal" or class == "minus" then
+                                    A.DebugLog("ROT", "filter: mid-channel promote " .. ent.key)
+                                    table.remove(prio, idx)
+                                    table.insert(prio, 1, ent)
+                                    lastPriSignature = nil
                                 end
-                            else
-                                A.DebugLog("ROT", "filter: casting MF — target not normal (" .. tostring(class) .. ") keep MF")
+                                break
                             end
-                        else
-                            A.DebugLog("ROT", "filter: casting MF — keep next-MF suggestion")
                         end
+                        A.DebugLog("ROT", "filter: channeling " .. castKey .. " — keep suggestion")
                     end
                 end
             end
         end
 
-        -- Additional handling: if channeling MF and SWD becomes available in the
-        -- priority list (e.g. target reached execute while channeling), move SWD
-        -- to the front so the primary updates immediately (but only for normal/minus targets).
-        do
-            local castName = select(1, GetPlayerCastInfo())
-            if castName and castName == A.SPELLS.MF.name then
-                for idx = 1, #prio do
-                    if prio[idx] and prio[idx].key == "SWD" then
-                        local class = UnitClassification("target") or ""
-                        if class == "normal" or class == "minus" then
-                            local swdent = table.remove(prio, idx)
-                            table.insert(prio, 1, swdent)
-                            A.DebugLog("ROT", "mid-channel: moved SWD to primary (target normal)")
-                            lastPriKey = nil
-                        end
-                        break
-                    end
-                end
-            end
-        end
+        prio = ApplyRecommendationHysteresis(prio, activeSpec)
+
+
 
         f:Show()
 
@@ -846,7 +754,7 @@ function A:InitRotation()
                 local potId = A.db.selectedPotionItem
                 if type(potId) == "string" then potId = tonumber(potId) end
                 if potId and potId ~= "none" then
-                    local icon = GetItemIcon(potId)
+                    local icon = (A.GetItemIconCached and A.GetItemIconCached(potId)) or GetItemIcon(potId)
                     if icon then return icon end
                 end
                 return spellIcons["POTION"]
@@ -854,12 +762,12 @@ function A:InitRotation()
                 local runeId = A.db.selectedRuneItem
                 if type(runeId) == "string" then runeId = tonumber(runeId) end
                 if runeId and runeId ~= "none" then
-                    local icon = GetItemIcon(runeId)
+                    local icon = (A.GetItemIconCached and A.GetItemIconCached(runeId)) or GetItemIcon(runeId)
                     if icon then return icon end
                 end
                 return spellIcons["RUNE"]
             else
-                return spellIcons[key]
+                return GetCachedSpellIcon(key)
             end
         end
 
@@ -881,23 +789,7 @@ function A:InitRotation()
         -- Recompute live remaining times for keys so primary can display live CD and dimming
         local function GetRemainingNowForKey(key)
             local now = GetTime()
-            if key == "MB" then
-                return math.max(A.GetSpellCDReal(A.SPELLS.MB.id), 0)
-            elseif key == "SWD" then
-                return math.max(A.GetSpellCDReal(A.SPELLS.SWD.id), 0)
-            elseif key == "SF" then
-                return math.max(A.GetSpellCDReal(A.SPELLS.SF.id), 0)
-            elseif key == "DP" then
-                return math.max(A.GetSpellCDReal(A.SPELLS.DP.id), 0)
-            elseif key == "VT" then
-                local n,_,_,_,_,exp = A.FindPlayerDebuff("target", A.SPELLS.VT.name)
-                if exp then return math.max(exp - now, 0) end
-                return 0
-            elseif key == "SWP" then
-                local n,_,_,_,_,exp = A.FindPlayerDebuff("target", A.SPELLS.SWP.name)
-                if exp then return math.max(exp - now, 0) end
-                return 0
-            elseif key == "POTION" then
+            if key == "POTION" then
                 local potId = A.db.selectedPotionItem
                 if type(potId) == "string" then potId = tonumber(potId) end
                 if potId and potId ~= "none" then
@@ -914,21 +806,84 @@ function A:InitRotation()
                 end
                 return 0
             end
+            -- Generic: try cooldown lookup via A.SPELLS[key]
+            local spell = A.SPELLS[key]
+            if spell then
+                if spell.id then
+                    local cd = A.GetSpellCDReal and A.GetSpellCDReal(spell.id)
+                    if cd and cd > 0 then return math.max(cd, 0) end
+                end
+                -- Dot debuff: check remaining uptime on target
+                if spell.name and UnitExists("target") and A.FindPlayerDebuff then
+                    local spec = nil
+                    if A.SpecManager then
+                        local activeSpecs = A.SpecManager:GetActiveSpecs()
+                        for _, s in pairs(activeSpecs) do spec = s; break end
+                    end
+                    local isDot = spec and spec.rotation and (function()
+                        for _, e in ipairs(spec.rotation) do
+                            if e.key == key then
+                                for _, c in ipairs(e.conditions or {}) do
+                                    if c.type == "dot_missing" then return true end
+                                end
+                            end
+                        end
+                    end)()
+                    if isDot then
+                        local _,_,_,_,_,exp = A.FindPlayerDebuff("target", spell.name)
+                        if exp then return math.max(exp - now, 0) end
+                        return 0
+                    end
+                end
+            end
             return 0
         end
 
         local p = prio[1]
-        primary.icon:SetTexture(GetDisplayIcon(p.key))
-        -- Show live remaining cooldown on primary when present; otherwise show Clip
-        local primaryLive = (p and GetRemainingNowForKey and GetRemainingNowForKey(p.key)) or 0
+        local p2 = prio[2]
+        local primaryFade = UseFadePrimary(activeSpec, p, p2)
+
+        -- Use eta from the rotation engine: this is "time until cast window opens" for all
+        -- spell types (DoT hold time, cooldown remaining, 0 = ready now). This avoids
+        -- showing the full DoT remaining time (e.g. 5s) when what matters is "wait 2s more".
+        local primaryLive = (p and p.eta and p.eta > 0) and p.eta or 0
         local inRangePrimary = p and IsKeyInRange(p.key)
+        local secondaryLive = (p2 and p2.eta and p2.eta > 0) and p2.eta or 0
+        local inRangeSecondary = p2 and IsKeyInRange(p2.key)
+
+        local primaryShown = UpdatePrimaryVisual(primary, p and p.key, p2 and p2.key, primaryFade, GetDisplayIcon, {
+            live = primaryLive,
+            inRange = inRangePrimary,
+        }, {
+            live = secondaryLive,
+            inRange = inRangeSecondary,
+        }, now)
+
+        local primarySignature = tostring(p and p.key or "nil")
+        if primaryShown and p2 then
+            primarySignature = primarySignature .. "|" .. tostring(p2.key)
+        end
+
+        -- GCD / spell cooldown sweep on primary icon
+        if primary.cdOverlay then
+            local spell = p and A.SPELLS[p.key]
+            if spell then
+                local start, dur = GetSpellCooldown(spell.id)
+                if start and dur and dur > 0 then
+                    pcall(CooldownFrame_Set, primary.cdOverlay, start, dur, 1)
+                else
+                    pcall(CooldownFrame_Set, primary.cdOverlay, 0, 0, 0)
+                end
+            else
+                pcall(CooldownFrame_Set, primary.cdOverlay, 0, 0, 0)
+            end
+        end
+
         if primaryLive and primaryLive > 0 then
             primary.cdText:SetText(A.FormatTime(primaryLive))
             -- Dim the icon while it's still on cooldown; if out of range tint red
             if not inRangePrimary then
-                primary.icon:SetVertexColor(0.7, 0.2, 0.2)
-            else
-                primary.icon:SetVertexColor(0.6, 0.6, 0.6)
+                if not primarySplit then primary.icon:SetVertexColor(0.7, 0.2, 0.2) end
             end
         else
             if p.clip then
@@ -937,22 +892,22 @@ function A:InitRotation()
                 primary.cdText:SetText("")
             end
             if not inRangePrimary then
-                primary.icon:SetVertexColor(0.8, 0.2, 0.2)
-            else
-                primary.icon:SetVertexColor(1, 1, 1)
+                if not primarySplit then primary.icon:SetVertexColor(0.8, 0.2, 0.2) end
             end
         end
-        if lastPriKey ~= p.key then
-            A.DebugLog("ROT", "display: " .. (lastPriKey or "nil") .. " -> " .. p.key)
+        if lastPriSignature ~= primarySignature then
+            A.DebugLog("ROT", "display: " .. (lastPriSignature or "nil") .. " -> " .. primarySignature)
             A.CreateBackdrop(primary, 0, 0, 0, 0.85, 1, 0.85, 0, 1)
-            lastPriKey = p.key
+            lastPriSignature = primarySignature
         end
 
         -- GetRemainingNowForKey moved above so primary can use it
 
+        local queueStart = primaryShown and 3 or 2
+
         for i = 1, 3 do
             local q   = f.queue[i]
-            local ent = prio[i + 1]
+            local ent = prio[i + queueStart - 1]
             if ent then
                 q.icon:SetTexture(GetDisplayIcon(ent.key))
                 if ent.clip then
@@ -960,7 +915,7 @@ function A:InitRotation()
                     q.icon:SetVertexColor(1, 1, 1)
                 else
                     -- Recompute a live remaining time so countdowns tick during casts
-                    local live = GetRemainingNowForKey(ent.key)
+                    local live = (ent.eta and ent.eta > 0) and ent.eta or 0
                     local inRangeQ = IsKeyInRange(ent.key)
                     if live and live > 0 then
                         q.cdText:SetText(A.FormatTime(live))
@@ -1023,6 +978,9 @@ function A:InitRotation()
             A.DebugLog("EVT", "combat END")
             -- Clear recently-cast table on combat end
             wipe(recentCast)
+            ResetRecommendationHysteresis()
+        elseif event == "PLAYER_TARGET_CHANGED" then
+            ResetRecommendationHysteresis()
         end
         if event == "UNIT_SPELLCAST_SUCCEEDED"
            or event == "UNIT_SPELLCAST_CHANNEL_START"
@@ -1039,4 +997,24 @@ function A:InitRotation()
             A.DebugLog("ERR", "Refresh(event=" .. event .. "): " .. tostring(err))
         end
     end)
+end
+
+------------------------------------------------------------------------
+-- Register as SpecManager helper
+------------------------------------------------------------------------
+if SPHelper.SpecManager then
+    SPHelper.SpecManager:RegisterHelper("Rotation", {
+        _initialized = false,
+        OnSpecActivate = function(self, spec)
+            if self._initialized then return end
+            self._initialized = true
+            if SPHelper.InitRotation then SPHelper:InitRotation() end
+        end,
+        OnSpecDeactivate = function(self, spec)
+            self._initialized = false
+            if SPHelper.rotFrame then
+                SPHelper.rotFrame:Hide()
+            end
+        end,
+    })
 end
