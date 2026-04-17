@@ -35,17 +35,13 @@ local spec = {
     },
 
     constants = {
-        VT_CAST_TIME     = 1.5,
-        MF_CAST_TIME     = 3.0,
         MIN_MF_DURATION  = 1.0,
         SAFETY           = 0.5,
-        SWP_BASE_DURATION = 18,  -- base; +3 with Improved SWP (rank 2)
-        VT_DURATION       = 15,
         timing = {
             globalWaitThresholdMs   = 400,
             defaultDelayToleranceMs = 600,
             dotSafeWindowSec        = 1.5,
-            fakeQueueMaxMs          = 189,
+          fakeQueueMaxMs          = 150,
             clipMarginMs            = 50,
             fqFireOffsetMs          = 30,  -- safety buffer on top of baked-in lat compensation
         },
@@ -53,10 +49,10 @@ local spec = {
 
     -- Debuffs tracked by the DotTracker module
     trackedDebuffs = {
-        { key = "swp", spellKey = "SWP", duration = 18, color = "SWP", isDot = true },
-        { key = "vt",  spellKey = "VT",  duration = 15, color = "VT",  isDot = true },
-        { key = "ms",  spellKey = "MS",  duration = 15, color = "MS",  isDot = false },
-        { key = "su",  spellKey = "SU",  duration = 50, color = "SU",  isDot = false },
+        { key = "swp", spellKey = "SWP", color = "SWP", isDot = true },
+        { key = "vt",  spellKey = "VT",  color = "VT",  isDot = true },
+        { key = "ms",  spellKey = "MS",  duration = 15, color = "MS",  isDot = false },  -- no DB duration (Mind Soothe is not a standard aura)
+        { key = "su",  spellKey = "SU",  color = "SU",  isDot = false },
     },
 
     uiOptions = {
@@ -119,7 +115,7 @@ local spec = {
         {
             spellKey    = "MF",
             spellName   = "Mind Flay",
-            ticks       = 3,
+            -- ticks read from SpellDatabase (MF.ticks = 3)
             fakeQueue   = true,   -- enable FQ for this spell
             clipOverlay = true,   -- show green clip zone
             tickSound   = true,   -- tick sound feedback
@@ -137,8 +133,8 @@ local spec = {
     castBarOptions = {
         { key = "channelFakeQueue",     type = "checkbox", label = "Enable Fake Queue (clip assist)", default = true,
           tooltip = "Hold spell input until the last channeled tick completes. Requires FQ macros." },
-        { key = "fakeQueueMaxMs",       type = "slider",   label = "FQ max hold (ms)",     default = 189, min = 50, max = 400, step = 1,
-          tooltip = "Maximum milliseconds FQ will busy-wait. Lower = less frame freeze, higher = safer tick capture." },
+        { key = "fakeQueueMaxMs",       type = "slider",   label = "FQ max hold (ms)",     default = 150, min = 50, max = 150, step = 1,
+          tooltip = "Maximum milliseconds FQ will busy-wait inside a macro. SPHelper caps this at 150ms because longer /run holds can hit the Anniversary client script limit and break action buttons until /reload." },
         { key = "fqFireOffsetMs",       type = "slider",   label = "FQ safety buffer (ms)", default = 30, min = -150, max = 150, step = 5,
           tooltip = "Extra milliseconds added after latency compensation before releasing the cast.\nNegative values pre-compensate latency (release earlier); this is risky and may cause clipping.\n0 = release exactly when cast would arrive at server tick (boundary, may clip on jitter).\n30 = release 30ms later than necessary, cast arrives 30ms after tick (recommended).\nAuto-tune will adjust this automatically when enabled." },
         { key = "fqAllowNegative",       type = "checkbox", label = "Allow negative FQ offset", default = false,
@@ -155,8 +151,6 @@ local spec = {
         { key = "tickFlash",            type = "dropdown", label = "Tick flash effect",    default = "green",
           values = {"none","green","purple","shadow","white","red","green_top","purple_top","shadow_top","white_top","red_top","green_sides","purple_sides","shadow_sides","white_sides","red_sides"},
           tooltip = "Screen flash effect on channel ticks. Helps visually confirm ticks." },
-        { key = "tickMarkers",          type = "dropdown", label = "Tick markers on bar",  default = "all", values = {"all","remaining","none","specific"},
-          tooltip = "Show tick position markers on the cast bar. 'remaining' hides past ticks. 'specific' shows only selected ticks (set per spell)." },
         { key = "tickFeedbackOffsetMs", type = "slider",   label = "Tick feedback offset (ms)", default = 0, min = 0, max = 300, step = 10,
           tooltip = "Fire tick sound/flash this many ms BEFORE the predicted tick. 0 = on actual tick. Higher values give earlier audio/visual cue." },
     },

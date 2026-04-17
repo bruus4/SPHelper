@@ -320,6 +320,79 @@ local function SUIButton(parent, text, w, h, onClick, x, y)
     return btn
 end
 
+local function TickSelectionContains(selection, tickNum)
+    if type(selection) ~= "table" or #selection == 0 then return false end
+    for _, value in ipairs(selection) do
+        if tonumber(value) == tickNum then
+            return true
+        end
+    end
+    return false
+end
+
+local function TickSelectionChecked(selection, tickNum, defaultAll)
+    if type(selection) ~= "table" or #selection == 0 then
+        return defaultAll ~= false
+    end
+    return TickSelectionContains(selection, tickNum)
+end
+
+local function BuildTickSelector(parent, label, x, y, tickCount, getSelection, setSelection, defaultAll)
+    local row = CreateFrame("Frame", nil, parent)
+    row:SetSize(360, 22)
+    row:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y)
+
+    local lbl = row:CreateFontString(nil, "OVERLAY")
+    lbl:SetFont(FONT, 9, "OUTLINE")
+    lbl:SetPoint("LEFT", row, "LEFT", 0, 0)
+    lbl:SetText(label)
+    lbl:SetTextColor(1, 0.82, 0, 1)
+
+    row._tickBoxes = {}
+    local startX = 118
+    local function ReadSelection()
+        local selected = {}
+        for i, cb in ipairs(row._tickBoxes) do
+            if cb:GetChecked() then
+                selected[#selected + 1] = i
+            end
+        end
+        if defaultAll and #selected == tickCount then
+            return {}
+        end
+        return selected
+    end
+
+    for i = 1, tickCount do
+        local cb = CreateFrame("CheckButton", nil, row)
+        cb:SetSize(18, 18)
+        cb:SetPoint("LEFT", row, "LEFT", startX + (i - 1) * 40, 0)
+        cb:SetNormalTexture("Interface\\Buttons\\UI-CheckBox-Up")
+        cb:SetPushedTexture("Interface\\Buttons\\UI-CheckBox-Down")
+        cb:SetHighlightTexture("Interface\\Buttons\\UI-CheckBox-Highlight", "ADD")
+        cb:SetCheckedTexture("Interface\\Buttons\\UI-CheckBox-Check")
+        cb:SetChecked(TickSelectionChecked(getSelection() or {}, i, defaultAll))
+
+        local num = row:CreateFontString(nil, "OVERLAY")
+        num:SetFont(FONT, 8, "OUTLINE")
+        num:SetPoint("LEFT", cb, "RIGHT", 2, 0)
+        num:SetText(tostring(i))
+
+        cb:SetScript("OnClick", function()
+            setSelection(ReadSelection())
+        end)
+        row._tickBoxes[i] = cb
+    end
+
+    row.Refresh = function()
+        local selection = getSelection() or {}
+        for i, cb in ipairs(row._tickBoxes) do
+            cb:SetChecked(TickSelectionChecked(selection, i, defaultAll))
+        end
+    end
+    return row, 22
+end
+
 ------------------------------------------------------------------------
 -- Tab system
 ------------------------------------------------------------------------
@@ -2511,6 +2584,23 @@ end
 local function BuildCastBarTab(container, spec)
     local y = -8
     local specID = spec.meta.id
+    local function RefreshCastBarTab()
+        if A.SpecUI and A.SpecUI.RefreshCurrentTab then
+            A.SpecUI:RefreshCurrentTab()
+        elseif A.SpecUI and A.SpecUI.SwitchTab then
+            A.SpecUI:SwitchTab(4, spec, true)
+        end
+    end
+
+    local function GetChannelSpellList()
+        if A.ChannelHelper and A.ChannelHelper.GetChannelSpellDefinitions then
+            local defs = A.ChannelHelper:GetChannelSpellDefinitions(spec)
+            if defs and #defs > 0 then
+                return defs
+            end
+        end
+        return spec.channelSpells or {}
+    end
 
     -- Section header: Channel Spells
     local hdr1 = container:CreateFontString(nil, "OVERLAY")
@@ -2527,59 +2617,136 @@ local function BuildCastBarTab(container, spec)
     desc1:SetText("Configure per-spell FQ, clip overlay, and tick feedback.")
     y = y - 16
 
-    -- Read channelSpells (from spec file or DB overrides)
-    local channelSpells = spec.channelSpells or {}
-    local sdb = A.db and A.db.specs and A.db.specs[specID]
+    -- Read channel spells from the spec, then auto-augment from the shared
+    -- spell catalog so any future channeled spells defined in SpellDatabase
+    -- are exposed automatically.
+    local channelSpells = GetChannelSpellList()
+
+    local function PushChannelField(spellLabel, cs, field, value)
+        cs[field] = value
+        if A.ChannelHelper and A.ChannelHelper.KNOWN_CHANNELS then
+            local info = A.ChannelHelper.KNOWN_CHANNELS[spellLabel]
+            if info then info[field] = value end
+        end
+    end
+
+    local sectionWidth = math.max((container:GetWidth() or 0) - 24, 520)
 
     -- Per-spell config entries
     for idx, cs in ipairs(channelSpells) do
         local spellLabel = cs.spellName or (cs.spellKey and A.SPELLS[cs.spellKey] and A.SPELLS[cs.spellKey].name) or cs.spellKey or "Unknown"
-
-        -- Spell header
-        local spellHdr = container:CreateFontString(nil, "OVERLAY")
-        spellHdr:SetFont(FONT, 9, "OUTLINE")
-        spellHdr:SetPoint("TOPLEFT", container, "TOPLEFT", 16, y)
-        spellHdr:SetTextColor(0.9, 0.8, 1, 1)
-        spellHdr:SetText(string.format("%s (%d ticks)", spellLabel, cs.ticks or 3))
-        y = y - 18
-
-        -- Per-spell toggles (stored as channelSpell_<spellKey>_<setting>)
         local prefix = "cs_" .. (cs.spellKey or tostring(idx)) .. "_"
 
-        local toggles = {
-            { key = prefix .. "fakeQueue",   label = "Fake Queue",     default = cs.fakeQueue ~= false,
-              tooltip = "Enable busy-wait FQ for this spell." },
-            { key = prefix .. "clipOverlay", label = "Clip Overlay",   default = cs.clipOverlay ~= false,
-              tooltip = "Show green clip zone on cast bar during this channel." },
-            { key = prefix .. "tickSound",   label = "Tick Sound",     default = cs.tickSound ~= false,
-              tooltip = "Play sound on tick events for this spell." },
-            { key = prefix .. "tickFlash",   label = "Tick Flash",     default = cs.tickFlash ~= false,
-              tooltip = "Flash screen on tick events for this spell." },
-            { key = prefix .. "tickMarkers", label = "Tick Markers",   default = cs.tickMarkers ~= false,
-              tooltip = "Show tick markers on cast bar for this spell." },
-        }
+        local collapsed = A.SpecVal and A.SpecVal(prefix .. "collapsed", false) or false
 
-        for _, tog in ipairs(toggles) do
-            local cb, lbl = SUICheckbox(container, tog.label,
-                function() return A.SpecVal(tog.key, tog.default) end,
-                function(v)
-                    A.SetSpecVal(tog.key, v)
-                    -- Also update live channelSpells data
-                    local settingName = tog.key:gsub(prefix, "")
-                    cs[settingName] = v
-                    -- Push to ChannelHelper if loaded
-                    if A.ChannelHelper and A.ChannelHelper.KNOWN_CHANNELS then
-                        local info = A.ChannelHelper.KNOWN_CHANNELS[spellLabel]
-                        if info then info[settingName] = v end
-                    end
-                end,
-                30, y)
-            if tog.tooltip and lbl then
-                lbl:SetScript("OnEnter", function(self) GameTooltip:SetOwner(self, "ANCHOR_RIGHT"); GameTooltip:SetText(tog.label); GameTooltip:AddLine(tog.tooltip, 1, 1, 1, true); GameTooltip:Show() end)
-                lbl:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        local spellHdr = CreateFrame("Button", nil, container, "BackdropTemplate")
+        spellHdr:SetSize(sectionWidth, 18)
+        spellHdr:SetPoint("TOPLEFT", container, "TOPLEFT", 16, y)
+        A.CreateBackdrop(spellHdr, 0.12, 0.12, 0.12, 0.95, 0.3, 0.3, 0.3, 1)
+        local spellHdrLbl = spellHdr:CreateFontString(nil, "OVERLAY")
+        spellHdrLbl:SetFont(FONT, 9, "OUTLINE")
+        spellHdrLbl:SetPoint("LEFT", spellHdr, "LEFT", 6, 0)
+        spellHdrLbl:SetTextColor(0.9, 0.8, 1, 1)
+        spellHdrLbl:SetText(string.format("%s (%d ticks)", spellLabel, cs.ticks or 3))
+        local spellHdrHint = spellHdr:CreateFontString(nil, "OVERLAY")
+        spellHdrHint:SetFont(FONT, 8, "OUTLINE")
+        spellHdrHint:SetPoint("RIGHT", spellHdr, "RIGHT", -6, 0)
+        spellHdrHint:SetTextColor(0.7, 0.7, 0.7, 1)
+        spellHdrHint:SetText(collapsed and "expand" or "collapse")
+        spellHdr:SetScript("OnClick", function()
+            A.SetSpecVal(prefix .. "collapsed", not collapsed)
+            RefreshCastBarTab()
+        end)
+        y = y - 22
+
+        if not collapsed then
+            -- Per-spell toggles (stored as channelSpell_<spellKey>_<setting>)
+            local toggles = {
+                { key = prefix .. "fakeQueue",   label = "Fake Queue",     default = cs.fakeQueue ~= false,
+                  tooltip = "Enable busy-wait FQ for this spell.", refresh = false },
+                { key = prefix .. "clipOverlay", label = "Clip Overlay",   default = cs.clipOverlay ~= false,
+                  tooltip = "Show green clip zone on cast bar during this channel.", refresh = false },
+                { key = prefix .. "tickSound",   label = "Tick Sound",     default = cs.tickSound ~= false,
+                  tooltip = "Play sound on tick events for this spell.", refresh = true },
+                { key = prefix .. "tickFlash",   label = "Tick Flash",     default = cs.tickFlash ~= false,
+                  tooltip = "Flash screen on tick events for this spell.", refresh = true },
+                { key = prefix .. "tickMarkers", label = "Tick Markers",   default = cs.tickMarkers ~= false,
+                  tooltip = "Show tick markers on cast bar for this spell.", refresh = true },
+            }
+
+            for _, tog in ipairs(toggles) do
+                local cb, lbl = SUICheckbox(container, tog.label,
+                    function() return A.SpecVal(tog.key, tog.default) end,
+                    function(v)
+                        A.SetSpecVal(tog.key, v)
+                        local settingName = tog.key:gsub(prefix, "")
+                        cs[settingName] = v
+                        if A.ChannelHelper and A.ChannelHelper.KNOWN_CHANNELS then
+                            local info = A.ChannelHelper.KNOWN_CHANNELS[spellLabel]
+                            if info then info[settingName] = v end
+                        end
+                        if tog.refresh then RefreshCastBarTab() end
+                    end,
+                    30, y)
+                if tog.tooltip and lbl then
+                    lbl:SetScript("OnEnter", function(self) GameTooltip:SetOwner(self, "ANCHOR_RIGHT"); GameTooltip:SetText(tog.label); GameTooltip:AddLine(tog.tooltip, 1, 1, 1, true); GameTooltip:Show() end)
+                    lbl:SetScript("OnLeave", function() GameTooltip:Hide() end)
+                end
+                y = y - 22
             end
-            y = y - 22
+
+            local tickMarkersEnabled = A.SpecVal and A.SpecVal(prefix .. "tickMarkers", cs.tickMarkers ~= false)
+            local tickMarkerMode = A.SpecVal and A.SpecVal(prefix .. "tickMarkerMode", cs.tickMarkerMode or "all") or "all"
+            if tickMarkersEnabled then
+                local markerModeValues = { "all", "remaining", "none", "specific" }
+                local markerModeLabels = { all = "All", remaining = "Remaining", none = "None", specific = "Specific" }
+                local markerModeDD, markerModeLbl = SUIDropdown(container, "Tick markers mode", markerModeValues,
+                    function() return A.SpecVal(prefix .. "tickMarkerMode", cs.tickMarkerMode or "all") end,
+                    function(v)
+                        A.SetSpecVal(prefix .. "tickMarkerMode", v)
+                        PushChannelField(spellLabel, cs, "tickMarkerMode", v)
+                        RefreshCastBarTab()
+                    end,
+                    30, y, markerModeLabels)
+                y = y - 50
+
+                if cs.ticks and cs.ticks > 0 and tickMarkerMode == "specific" then
+                    local markerTickRow = BuildTickSelector(container, "Marker ticks", 30, y, cs.ticks,
+                        function() return A.SpecVal(prefix .. "tickMarkerTicks", cs.tickMarkerTicks or {}) end,
+                        function(values)
+                            A.SetSpecVal(prefix .. "tickMarkerTicks", values)
+                            PushChannelField(spellLabel, cs, "tickMarkerTicks", values)
+                        end,
+                        false)
+                    y = y - 22
+                end
+            end
+
+            local tickSoundEnabled = A.SpecVal and A.SpecVal(prefix .. "tickSound", cs.tickSound ~= false)
+            if tickSoundEnabled and cs.ticks and cs.ticks > 0 then
+                local soundTickRow = BuildTickSelector(container, "Sound ticks", 30, y, cs.ticks,
+                    function() return A.SpecVal(prefix .. "tickSoundTicks", cs.tickSoundTicks or {}) end,
+                    function(values)
+                        A.SetSpecVal(prefix .. "tickSoundTicks", values)
+                        PushChannelField(spellLabel, cs, "tickSoundTicks", values)
+                    end,
+                    true)
+                y = y - 22
+            end
+
+            local tickFlashEnabled = A.SpecVal and A.SpecVal(prefix .. "tickFlash", cs.tickFlash ~= false)
+            if tickFlashEnabled and cs.ticks and cs.ticks > 0 then
+                local flashTickRow = BuildTickSelector(container, "Flash ticks", 30, y, cs.ticks,
+                    function() return A.SpecVal(prefix .. "tickFlashTicks", cs.tickFlashTicks or {}) end,
+                    function(values)
+                        A.SetSpecVal(prefix .. "tickFlashTicks", values)
+                        PushChannelField(spellLabel, cs, "tickFlashTicks", values)
+                    end,
+                    true)
+                y = y - 22
+            end
         end
+
         y = y - 6
     end
 
@@ -2668,9 +2835,9 @@ local function BuildCastBarTab(container, spec)
     macroText:SetFont(FONT, 8)
     macroText:SetPoint("TOPLEFT", container, "TOPLEFT", 16, y)
     macroText:SetTextColor(0.7, 0.7, 0.7, 1)
-    -- Show example using first rotation spell
-    local exampleSpell = "Mind Blast"
-    if spec.rotation and spec.rotation[1] and spec.rotation[1].key then
+    -- Show example using the first channel spell when available
+    local exampleSpell = (channelSpells[1] and channelSpells[1].spellName) or "Mind Blast"
+    if exampleSpell == "Mind Blast" and spec.rotation and spec.rotation[1] and spec.rotation[1].key then
         local key = spec.rotation[1].key
         if A.SPELLS[key] and A.SPELLS[key].name then
             exampleSpell = A.SPELLS[key].name
@@ -3398,9 +3565,14 @@ function SUI:Open(specID)
     f:Show()
 end
 
-function SUI:SwitchTab(idx, spec)
+function SUI:SwitchTab(idx, spec, preserveScroll)
     spec = spec or self._spec
     if not spec or not self._content then return end
+
+    local scrollPos = 0
+    if preserveScroll and self._scroll then
+        scrollPos = self._scroll:GetVerticalScroll() or 0
+    end
 
     self._activeTab = idx
     SetTabActive(self._tabs, idx)
@@ -3434,7 +3606,15 @@ function SUI:SwitchTab(idx, spec)
     end
 
     -- Reset scroll
-    if self._scroll then self._scroll:SetVerticalScroll(0) end
+    if self._scroll then
+        self._scroll:SetVerticalScroll(preserveScroll and scrollPos or 0)
+    end
+end
+
+function SUI:RefreshCurrentTab()
+    if self._activeTab then
+        self:SwitchTab(self._activeTab, self._spec, true)
+    end
 end
 
 function SUI:Close()

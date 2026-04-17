@@ -1,8 +1,7 @@
-﻿------------------------------------------------------------------------
--- SPHelper  –  ChannelHelper.lua
+﻿-- SPHelper  –  ChannelHelper.lua
 -- Tracks channeled spell ticks, provides clip-window calculations,
 -- and optionally implements a fake-queue (FQ) busy-wait for precise
--- Mind Flay clipping.
+-- channel clipping.
 --
 -- Can operate standalone (visual/audio cues only) or attach to the
 -- existing CastBar frame for integrated clip-zone display.
@@ -12,7 +11,270 @@ local A = SPHelper
 A.ChannelHelper = {}
 local CH = A.ChannelHelper
 
-------------------------------------------------------------------------
+-- Macro-driven /run scripts on the Anniversary client start tripping the
+-- script-time budget a little below 189 ms. Keep a hard safety margin below
+-- that limit so FQ never leaves an action button in a broken state.
+CH.FAKE_QUEUE_SCRIPT_SAFE_MS = 150
+
+local function ClampFakeQueueMaxMs(ms)
+    ms = tonumber(ms) or 0
+    if ms < 0 then ms = 0 end
+    if ms > CH.FAKE_QUEUE_SCRIPT_SAFE_MS then
+        ms = CH.FAKE_QUEUE_SCRIPT_SAFE_MS
+    end
+    return ms
+end
+
+function CH:GetEffectiveFakeQueueMaxMs()
+    return ClampFakeQueueMaxMs(self._config and self._config.fakeQueueMaxMs or 0)
+end
+
+local function NormalizeChannelToken(value)
+    if type(value) ~= "string" then return nil end
+    value = value:gsub("[%s%-]+", "_")
+    value = value:gsub("__+", "_")
+    return string.upper(value)
+end
+
+local function ChannelSpecMatches(def, spec)
+    if not def or not spec or not spec.meta then return true end
+
+    local specMeta = spec.meta or {}
+    if def.class and specMeta.class and def.class ~= specMeta.class then
+        return false
+    end
+
+    if not def.spec or def.spec == "" then
+        return true
+    end
+
+    local defSpec = NormalizeChannelToken(def.spec)
+    if not defSpec then return true end
+
+    local specId = NormalizeChannelToken(specMeta.id or "")
+    local specName = NormalizeChannelToken(specMeta.specName or "")
+
+    if defSpec == specId or defSpec == specName then
+        return true
+    end
+
+    if specId and specId:find(defSpec, 1, true) then
+        return true
+    end
+    if specName and specName:find(defSpec, 1, true) then
+        return true
+    end
+
+    return false
+end
+
+local function NormalizeChannelSpellEntry(entry, fallbackKey, fallbackName)
+    if type(entry) ~= "table" then return nil end
+
+    local spellKey = entry.spellKey or entry.key or fallbackKey
+    local spellName = entry.spellName or entry.name or fallbackName
+    if not spellName and spellKey and A.SPELLS and A.SPELLS[spellKey] then
+        spellName = A.SPELLS[spellKey].name
+    end
+    if not spellName and spellKey and A.GetSpellInfoCached then
+        spellName = A.GetSpellInfoCached(spellKey)
+    end
+    if not spellName then return nil end
+
+    local ticks = tonumber(entry.ticks) or 0
+    if ticks <= 0 then
+        local duration = tonumber(entry.duration or entry.castTime) or 0
+        local tickInterval = tonumber(entry.tickInterval) or 0
+        if duration > 0 and tickInterval > 0 then
+            ticks = math.max(1, math.floor((duration / tickInterval) + 0.5))
+        elseif duration > 0 then
+            ticks = math.max(1, math.floor(duration + 0.5))
+        end
+    end
+    if ticks <= 0 then
+        -- Fall back to SpellDatabase entry before hardcoding 3
+        local dbDef = A.GetSpellDefinition
+            and (A.GetSpellDefinition(spellKey) or A.GetSpellDefinition(spellName))
+        if dbDef and (dbDef.ticks or 0) > 0 then
+            ticks = dbDef.ticks
+        end
+    end
+    if ticks <= 0 then ticks = 3 end
+
+    local normalized = {
+        castType = "channel",
+        spellKey = spellKey,
+        spellName = spellName,
+        ticks = ticks,
+        fakeQueue = entry.fakeQueue ~= false,
+        clipOverlay = entry.clipOverlay ~= false,
+        tickSound = entry.tickSound ~= false,
+        tickSoundTicks = entry.tickSoundTicks or {},
+        tickFlash = entry.tickFlash ~= false,
+        tickFlashTicks = entry.tickFlashTicks or {},
+        tickMarkers = entry.tickMarkers ~= false,
+        tickMarkerMode = entry.tickMarkerMode or "all",
+        tickMarkerTicks = entry.tickMarkerTicks or {},
+    }
+
+    return normalized
+end
+
+function CH:GetChannelSpellDefinitions(spec)
+    local defs = {}
+    local seen = {}
+
+    local function AddEntry(entry, fallbackKey, fallbackName)
+        local normalized = NormalizeChannelSpellEntry(entry, fallbackKey, fallbackName)
+        if not normalized then return end
+
+        local dedupeKey = normalized.spellKey or normalized.spellName
+        local nameKey = normalized.spellName
+        if (dedupeKey and seen[dedupeKey]) or (nameKey and seen[nameKey]) then return end
+        if dedupeKey then seen[dedupeKey] = true end
+        if nameKey then seen[nameKey] = true end
+        defs[#defs + 1] = normalized
+    end
+
+    if spec and type(spec.channelSpells) == "table" then
+        for _, cs in ipairs(spec.channelSpells) do
+            AddEntry(cs, cs.spellKey or cs.key, cs.spellName or cs.name)
+        end
+    end
+
+    local specClass = spec and spec.meta and spec.meta.class
+    local catalog = A.SpellDatabase and A.SpellDatabase.catalog or nil
+    local sortedKeys = A.SpellDatabase and A.SpellDatabase.sortedKeys or nil
+
+    if catalog and sortedKeys then
+        for _, key in ipairs(sortedKeys) do
+            local def = catalog[key]
+            if def and (def.castType == "channel" or def.channel == true or (def.flags and def.flags.channel)) then
+                if ChannelSpecMatches(def, spec) and (not specClass or not def.class or def.class == specClass) then
+                    AddEntry(def, key, def.name)
+                end
+            end
+        end
+    elseif A.SPELLS then
+        for key, spell in pairs(A.SPELLS) do
+            if type(spell) == "table" and (spell.castType == "channel" or spell.channel == true or (spell.flags and spell.flags.channel)) then
+                if ChannelSpecMatches(spell, spec) and (not specClass or not spell.class or spell.class == specClass) then
+                    AddEntry(spell, key, spell.name)
+                end
+            end
+        end
+    end
+
+    if self.KNOWN_CHANNELS then
+        for spellName, info in pairs(self.KNOWN_CHANNELS) do
+            if type(info) == "table" and spellName then
+                AddEntry(info, info.spellKey or info.spellID or spellName, spellName)
+            end
+        end
+    end
+
+    return defs
+end
+
+function CH:GetChannelInfoForSpell(spellName, spellID)
+    if spellName and self.KNOWN_CHANNELS and self.KNOWN_CHANNELS[spellName] then
+        return self.KNOWN_CHANNELS[spellName]
+    end
+
+    local resolvedName = spellName
+    local def = nil
+    if A.GetSpellDefinition then
+        def = A.GetSpellDefinition(spellID or spellName)
+    end
+    if not resolvedName and spellID and A.GetSpellInfoCached then
+        resolvedName = A.GetSpellInfoCached(spellID)
+    end
+    if not resolvedName and def and def.name then
+        resolvedName = def.name
+    end
+    if not resolvedName then
+        return nil
+    end
+
+    local function ResolveFlag(field, defaultValue)
+        if not def then
+            return defaultValue
+        end
+        local value = def[field]
+        if value == nil then
+            return defaultValue
+        end
+        return value ~= false
+    end
+
+    local info = {
+        castType = "channel",
+        ticks = (def and def.ticks) or 3,
+        fakeQueue = ResolveFlag("fakeQueue", true),
+        clipOverlay = ResolveFlag("clipOverlay", true),
+        tickSound = ResolveFlag("tickSound", true),
+        tickSoundTicks = def and def.tickSoundTicks or {},
+        tickFlash = ResolveFlag("tickFlash", true),
+        tickFlashTicks = def and def.tickFlashTicks or {},
+        tickMarkers = ResolveFlag("tickMarkers", true),
+        tickMarkerMode = def and def.tickMarkerMode or "all",
+        tickMarkerTicks = def and def.tickMarkerTicks or {},
+        spellKey = def and def.key or nil,
+        spellID = spellID,
+        spellName = resolvedName,
+        _fallback = true,
+    }
+
+    self.KNOWN_CHANNELS[resolvedName] = info
+    return info
+end
+
+local function TickListContains(list, tickNum)
+    if type(list) ~= "table" or #list == 0 then return false end
+    for _, value in ipairs(list) do
+        if tonumber(value) == tickNum then
+            return true
+        end
+    end
+    return false
+end
+
+function CH:TickSelectionContains(list, tickNum, defaultAll)
+    if type(list) ~= "table" or #list == 0 then
+        return defaultAll ~= false
+    end
+    return TickListContains(list, tickNum)
+end
+
+function CH:ShouldShowTickMarker(info, tickNum)
+    if not info or info.tickMarkers == false then return false end
+    local mode = info.tickMarkerMode or "all"
+    if mode == "none" then return false end
+    if mode == "specific" then
+        return self:TickSelectionContains(info.tickMarkerTicks, tickNum, false)
+    end
+    return true
+end
+
+function CH:ShouldPlayTickSelection(info, tickNum, selectionKey)
+    if not info then return true end
+    if info[selectionKey] == false then return false end
+    return self:TickSelectionContains(info[selectionKey .. "Ticks"], tickNum, true)
+end
+
+local function HideAllClipOverlays(self)
+    if self._clipOverlay then
+        self._clipOverlay:Hide()
+    end
+    if self._clipOverlays then
+        for i = 1, #self._clipOverlays do
+            if self._clipOverlays[i] then
+                self._clipOverlays[i]:Hide()
+            end
+        end
+    end
+end
+
 -- State
 ------------------------------------------------------------------------
 CH._state = {
@@ -22,7 +284,7 @@ CH._state = {
     startTime       = 0,
     endTime         = 0,
     totalDuration   = 0,
-    tickCount       = 3,      -- MF always has 3 ticks in TBC
+    tickCount       = 3,      -- default channel tick count
     tickInterval    = 1.0,
     ticksSoFar      = 0,
     latency         = 0,
@@ -40,7 +302,7 @@ CH._config = {
     enabled          = true,
     clipCues         = true,
     fakeQueueEnabled = true,
-    fakeQueueMaxMs   = 189,
+    fakeQueueMaxMs   = CH.FAKE_QUEUE_SCRIPT_SAFE_MS,
     clipMarginMs     = 50,
     -- FQ precision tuning --------------------------------------------------
     -- fqFireOffsetMs: milliseconds added to the predicted tick time before
@@ -66,28 +328,28 @@ CH._config = {
 -- default table if no spec data is available.
 ------------------------------------------------------------------------
 CH.KNOWN_CHANNELS = {
-    ["Mind Flay"] = { ticks = 3, fakeQueue = true, clipOverlay = true, tickSound = true, tickFlash = true, tickMarkers = true },
+    ["Mind Flay"] = { castType = "channel", ticks = 3, fakeQueue = true, clipOverlay = true, tickSound = true, tickFlash = true, tickMarkers = true },
 }
 
 ------------------------------------------------------------------------
 -- Update KNOWN_CHANNELS from spec's channelSpells data
 ------------------------------------------------------------------------
 function CH:LoadChannelSpells(spec)
-    if not spec or not spec.channelSpells then return end
     self.KNOWN_CHANNELS = {}
-    for _, cs in ipairs(spec.channelSpells) do
-        local spellName = cs.spellName
-        if not spellName and cs.spellKey and A.SPELLS[cs.spellKey] then
-            spellName = A.SPELLS[cs.spellKey].name
-        end
-        if spellName then
+    local defs = self:GetChannelSpellDefinitions(spec)
+    self._channelSpellDefs = defs
+    for _, cs in ipairs(defs) do
+        if cs.spellName then
             local prefix = "cs_" .. (cs.spellKey or "") .. "_"
-            self.KNOWN_CHANNELS[spellName] = {
+            self.KNOWN_CHANNELS[cs.spellName] = {
+                castType    = "channel",
                 ticks       = cs.ticks or 3,
                 fakeQueue   = A.SpecVal(prefix .. "fakeQueue",   cs.fakeQueue ~= false),
                 clipOverlay = A.SpecVal(prefix .. "clipOverlay", cs.clipOverlay ~= false),
                 tickSound   = A.SpecVal(prefix .. "tickSound",  cs.tickSound ~= false),
+                tickSoundTicks = A.SpecVal(prefix .. "tickSoundTicks", cs.tickSoundTicks or {}),
                 tickFlash   = A.SpecVal(prefix .. "tickFlash",  cs.tickFlash ~= false),
+                tickFlashTicks = A.SpecVal(prefix .. "tickFlashTicks", cs.tickFlashTicks or {}),
                 tickMarkers = A.SpecVal(prefix .. "tickMarkers", cs.tickMarkers ~= false),
                 tickMarkerMode  = A.SpecVal(prefix .. "tickMarkerMode",  cs.tickMarkerMode or "all"),
                 tickMarkerTicks = A.SpecVal(prefix .. "tickMarkerTicks", cs.tickMarkerTicks or {}),
@@ -103,16 +365,18 @@ end
 function CH:UpdateConfig(spec)
     if not spec then return end
     local timing = spec.constants and spec.constants.timing
+    local rawMaxMs
     if timing then
         -- Use spec-level settings first (from uiOptions/DB), fallback to spec constants
-        self._config.fakeQueueMaxMs  = A.SpecVal("fakeQueueMaxMs",  timing.fakeQueueMaxMs  or 189)
+        rawMaxMs = A.SpecVal("fakeQueueMaxMs", timing.fakeQueueMaxMs or CH.FAKE_QUEUE_SCRIPT_SAFE_MS)
         self._config.clipMarginMs    = A.SpecVal("clipMarginMs",    timing.clipMarginMs    or 50)
         self._config.fqFireOffsetMs  = A.SpecVal("fqFireOffsetMs",  timing.fqFireOffsetMs  or 0)
     else
-        self._config.fakeQueueMaxMs  = A.SpecVal("fakeQueueMaxMs",  189)
+        rawMaxMs = A.SpecVal("fakeQueueMaxMs", CH.FAKE_QUEUE_SCRIPT_SAFE_MS)
         self._config.clipMarginMs    = A.SpecVal("clipMarginMs",    50)
         self._config.fqFireOffsetMs  = A.SpecVal("fqFireOffsetMs",  0)
     end
+    self._config.fakeQueueMaxMs = ClampFakeQueueMaxMs(rawMaxMs)
     -- Read from per-spec DB
     self._config.fakeQueueEnabled = A.SpecVal("channelFakeQueue", true)
     self._config.clipCues         = A.SpecVal("channelClipCues",  true)
@@ -122,6 +386,18 @@ function CH:UpdateConfig(spec)
     self._config.fqAutoAdjust = (autoVal == true or autoVal == 1)
     local allowNeg = A.SpecVal("fqAllowNegative", false)
     self._config.fqAllowNegative = (allowNeg == true or allowNeg == 1)
+
+    if tonumber(rawMaxMs) and tonumber(rawMaxMs) > self._config.fakeQueueMaxMs then
+        if A.SetSpecVal then
+            pcall(A.SetSpecVal, "fakeQueueMaxMs", self._config.fakeQueueMaxMs)
+        end
+        if not self._warnedFakeQueueCap then
+            self._warnedFakeQueueCap = true
+            print(string.format(
+                "|cff8882d5SPHelper|r: FQ max hold capped at |cffffcc00%dms|r to avoid macro script timeouts.",
+                self._config.fakeQueueMaxMs))
+        end
+    end
 end
 
 ------------------------------------------------------------------------
@@ -129,7 +405,7 @@ end
 ------------------------------------------------------------------------
 
 function CH:OnChannelStart(spellName, startTime, endTime, spellID)
-    local info = self.KNOWN_CHANNELS[spellName]
+    local info = self:GetChannelInfoForSpell(spellName, spellID)
     if not info then
         self._state.active = false
         return
@@ -174,10 +450,11 @@ function CH:OnChannelStop()
     self._fqExitDbp     = nil
     self._fqTargetTickN = nil
     self._fqLastHeldMs  = nil
+    A._fqBlocking       = false
 
     self._state.active = false
     self._activeChannelInfo = nil
-    if self._clipOverlay then self._clipOverlay:Hide() end
+    HideAllClipOverlays(self)
 end
 
 function CH:OnChannelUpdate(endTime)
@@ -269,7 +546,11 @@ function CH:OnTick()
                         -- the slider reflects the new DB value immediately.
                         pcall(function()
                             if A.SpecUI and A.SpecUI.frame and A.SpecUI.frame:IsShown() and A.SpecUI._activeTab == 4 then
-                                A.SpecUI:SwitchTab(4)
+                                if A.SpecUI.RefreshCurrentTab then
+                                    A.SpecUI:RefreshCurrentTab()
+                                else
+                                    A.SpecUI:SwitchTab(4, nil, true)
+                                end
                             end
                         end)
                         if self._config.fqDiag then
@@ -317,7 +598,7 @@ function CH:_RecalcClipWindow()
     -- Extend clip window earlier by FQ hold time when FQ is enabled
     -- (this makes the overlay show the extended zone; FQ waits until clipWindowBase)
     if self._config.fakeQueueEnabled then
-        local fqExtend = self._config.fakeQueueMaxMs / 1000
+        local fqExtend = self:GetEffectiveFakeQueueMaxMs() / 1000
         s.clipWindowStart = s.clipWindowStart - fqExtend
     end
 
@@ -399,97 +680,91 @@ end
 
 function CH:UpdateCastbarOverlay()
     -- Check global clip cues AND per-spell clipOverlay setting
-    local spellClip = self._activeChannelInfo and self._activeChannelInfo.clipOverlay ~= false
-    if not self._state.active or not self._config.clipCues or not spellClip then
-        if self._clipOverlay then self._clipOverlay:Hide() end
+    local channelInfo = self._activeChannelInfo
+    local spellClip = channelInfo and channelInfo.clipOverlay ~= false
+    local isChannel = channelInfo and channelInfo.castType == "channel"
+    if not self._state.active or not isChannel or not self._config.clipCues or not spellClip then
+        HideAllClipOverlays(self)
         return
     end
 
     local parent = self._attachedFrame
     if not parent or not parent:IsShown() then
-        if self._clipOverlay then self._clipOverlay:Hide() end
+        HideAllClipOverlays(self)
         return
     end
 
-    -- Create overlay texture on first use
-    if not self._clipOverlay then
-        local tex = parent:CreateTexture(nil, "OVERLAY")
-        tex:SetColorTexture(0.3, 0.9, 0.3, 0.35)
-        tex:SetHeight(parent:GetHeight())
-        self._clipOverlay = tex
+    -- Create overlay textures on first use. One texture per tick keeps all
+    -- tick markers visible for the whole channel instead of only around the
+    -- next pending tick.
+    if not self._clipOverlays then
+        self._clipOverlays = {}
     end
 
     local s = self._state
     local totalDur = s.totalDuration
     if totalDur <= 0 then
-        self._clipOverlay:Hide()
+        HideAllClipOverlays(self)
         return
     end
 
     local barWidth = parent:GetWidth()
 
-    -- The SPHelper castbar shows REMAINING time (value = remaining / total, draining
-    -- from 1 → 0 as the channel progresses).  So the bar's visual x-position is:
-    --   x = barWidth * remainingFraction
-    -- The clip window is defined in elapsed-time fractions:
-    --   clipStartFrac ≈ 0.67 (elapsed) = 0.33 (remaining)
-    --   clipEndFrac   ≈ 1.00 (elapsed) = 0.00 (remaining)
-    -- Convert to REMAINING fractions so the overlay aligns with the draining bar:
-    -- Compute per-tick overlay windows and display only those ticks that
-    -- are near enough in time to warrant a visual. We pre-show the next
-    -- tick by a small adaptive lead so the overlay moves to the next
-    -- segment before the castbar reaches it.
+    -- Render one persistent zone per shown tick marker.
     local overlayAfter = 0.1 -- seconds shown after the tick (100ms)
-    local fqExtend = (self._config.fakeQueueEnabled and (self._config.fakeQueueMaxMs or 0) / 1000) or 0
-    -- Pre-show lead: a small fraction of the tick interval, capped to avoid
-    -- extremely early showing on long channels. This controls how early the
-    -- next tick zone appears before its base start.
-    local preShowLead = math.min(0.25, s.tickInterval * 0.45)
-    local now = GetTime()
-    local overlayStartSec, overlayEndSec
+    local fqExtend = (self._config.fakeQueueEnabled and self:GetEffectiveFakeQueueMaxMs() / 1000) or 0
+    local activeCount = 0
     for i = 1, s.tickCount do
-        local tickTime = s.startTime + (i * s.tickInterval)
-        local baseStart = tickTime - fqExtend         -- visual begins at baseStart
-        local showThreshold = baseStart - preShowLead -- when to start showing this tick
-        local endSec = tickTime + overlayAfter
-        -- Skip ticks that don't overlap the channel
-        if endSec >= s.startTime and baseStart <= s.endTime then
-            -- Only include this tick's visual if we're past the show threshold
-            -- (i.e., proactively show upcoming tick) and not long after it
-            if now >= showThreshold and now <= endSec then
-                local ds = math.max(baseStart, s.startTime)
-                local de = math.min(endSec, s.endTime)
-                overlayStartSec = overlayStartSec and math.min(overlayStartSec, ds) or ds
-                overlayEndSec   = overlayEndSec   and math.max(overlayEndSec,   de) or de
+        local showTick = true
+        if self._activeChannelInfo then
+            showTick = self:ShouldShowTickMarker(self._activeChannelInfo, i)
+        end
+
+        if showTick then
+            local tickTime = s.startTime + (i * s.tickInterval)
+            local baseStart = math.max(tickTime - fqExtend, s.startTime)
+            local endSec = math.min(tickTime + overlayAfter, s.endTime)
+            local clipStartFrac = (baseStart - s.startTime) / totalDur
+            local clipEndFrac   = (endSec   - s.startTime) / totalDur
+            clipStartFrac = math.max(0, math.min(1, clipStartFrac))
+            clipEndFrac   = math.max(0, math.min(1, clipEndFrac))
+
+            -- Invert: remaining = 1 - elapsed
+            local startPx = barWidth * (1 - clipEndFrac)
+            local endPx   = barWidth * (1 - clipStartFrac)
+            local width   = endPx - startPx
+
+            local tex = self._clipOverlays[i]
+            if width < 1 then
+                if tex then tex:Hide() end
+            else
+                if not tex then
+                    tex = parent:CreateTexture(nil, "OVERLAY")
+                    tex:SetColorTexture(0.3, 0.9, 0.3, 0.35)
+                    self._clipOverlays[i] = tex
+                end
+                tex:SetHeight(parent:GetHeight())
+                tex:ClearAllPoints()
+                tex:SetPoint("LEFT", parent, "LEFT", startPx, 0)
+                tex:SetWidth(width)
+                tex:Show()
+                activeCount = activeCount + 1
             end
+        else
+            local tex = self._clipOverlays[i]
+            if tex then tex:Hide() end
         end
     end
 
-    if not overlayStartSec then
-        self._clipOverlay:Hide()
-        return
+    for i = s.tickCount + 1, #self._clipOverlays do
+        if self._clipOverlays[i] then
+            self._clipOverlays[i]:Hide()
+        end
     end
 
-    local clipStartFrac = (overlayStartSec - s.startTime) / totalDur
-    local clipEndFrac   = (overlayEndSec   - s.startTime) / totalDur
-    clipStartFrac = math.max(0, math.min(1, clipStartFrac))
-    clipEndFrac   = math.max(0, math.min(1, clipEndFrac))
-
-    -- Invert: remaining = 1 - elapsed
-    local startPx = barWidth * (1 - clipEndFrac)    -- left edge of zone (closer to bar-end)
-    local endPx   = barWidth * (1 - clipStartFrac)  -- right edge of zone
-    local width   = endPx - startPx
-
-    if width < 1 then
-        self._clipOverlay:Hide()
-        return
+    if activeCount == 0 then
+        HideAllClipOverlays(self)
     end
-
-    self._clipOverlay:ClearAllPoints()
-    self._clipOverlay:SetPoint("LEFT", parent, "LEFT", startPx, 0)
-    self._clipOverlay:SetWidth(width)
-    self._clipOverlay:SetHeight(parent:GetHeight())
-    self._clipOverlay:Show()
 end
 
 ------------------------------------------------------------------------
@@ -509,8 +784,10 @@ function CH:FakeQueue()
     if not self._config.fakeQueueEnabled then return end
     if self._activeChannelInfo and self._activeChannelInfo.fakeQueue == false then return end
 
-    local s       = self._state
-    local maxWait = self._config.fakeQueueMaxMs / 1000
+    local s = self._state
+    local maxWaitMs = self:GetEffectiveFakeQueueMaxMs()
+    local maxWait = maxWaitMs / 1000
+    if maxWait <= 0 then return end
 
     -- ---------------------------------------------------------------
     -- Compute the next upcoming tick time we should wait for.
@@ -547,7 +824,19 @@ function CH:FakeQueue()
 
     -- Skip if the target is more than maxWait away (would freeze too long)
     -- or already past (nothing to wait for).
-    if needed > maxWait then return end
+    if needed > maxWait then
+        if self._config and self._config.fqDiag then
+            local now2 = GetTime()
+            if not self._lastFQSkipPrint or (now2 - self._lastFQSkipPrint) >= 2.0 then
+                self._lastFQSkipPrint = now2
+                print(string.format(
+                    "|cff8882d5SPHelper|r: FQ skipped |cffffcc00%dms|r wait exceeds safe macro budget |cffffcc00%dms|r",
+                    math.floor((needed * 1000) + 0.5),
+                    maxWaitMs))
+            end
+        end
+        return
+    end
     if needed <= 0 then return end
 
     -- ---------------------------------------------------------------
@@ -593,6 +882,9 @@ end
 ------------------------------------------------------------------------
 
 function CH:GetMacroText(spellName)
+    if not spellName and self._channelSpellDefs and self._channelSpellDefs[1] then
+        spellName = self._channelSpellDefs[1].spellName
+    end
     return "/run SPH_FQ()\n/cast " .. (spellName or "Mind Blast")
 end
 
@@ -608,27 +900,30 @@ end
 --- Get the list of spell names that should have FQ macros for the active spec.
 function CH:GetMacroSpells()
     local spells = {}
-    local seen = {}
-    -- Collect all spells from active spec's rotation
-    if A.SpecManager then
-        local activeSpecs = A.SpecManager:GetActiveSpecs()
-        for _, spec in pairs(activeSpecs) do
-            if spec.rotation then
-                for _, entry in ipairs(spec.rotation) do
-                    local key = entry.key
-                    if key and A.SPELLS[key] and A.SPELLS[key].name and not seen[key] then
-                        seen[key] = true
-                        spells[#spells + 1] = A.SPELLS[key].name
-                    end
+    if self._channelSpellDefs and #self._channelSpellDefs > 0 then
+        for _, cs in ipairs(self._channelSpellDefs) do
+            if cs.spellName then
+                spells[#spells + 1] = cs.spellName
+            end
+        end
+    elseif self.KNOWN_CHANNELS then
+        for spellName in pairs(self.KNOWN_CHANNELS) do
+            spells[#spells + 1] = spellName
+        end
+        table.sort(spells)
+    end
+    if #spells == 0 then
+        if self.GetChannelSpellDefinitions then
+            local defs = self:GetChannelSpellDefinitions(nil)
+            for _, cs in ipairs(defs or {}) do
+                if cs.spellName then
+                    spells[#spells + 1] = cs.spellName
                 end
             end
-            break  -- only use first active spec
         end
-    end
-    -- Fallback if no spec or empty rotation
-    if #spells == 0 then
-        spells = { "Mind Blast", "Shadow Word: Death", "Shadow Word: Pain",
-                   "Vampiric Touch", "Devouring Plague", "Mind Flay" }
+        if #spells == 0 then
+            spells = { "Mind Flay" }
+        end
     end
     return spells
 end

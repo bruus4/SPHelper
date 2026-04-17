@@ -23,10 +23,11 @@ local function BuildTrackedDebuffs()
         local result = {}
         for _, def in ipairs(spec.trackedDebuffs) do
             local spellData = A.SPELLS[def.spellKey]
+            local spellDef = A.GetSpellDefinition and A.GetSpellDefinition(def.spellKey)
             result[#result + 1] = {
                 key   = def.key,
                 spell = function() return spellData end,
-                dur   = def.duration or 15,
+                dur   = def.duration or (spellDef and spellDef.duration) or 15,
                 color = def.color or def.key:upper(),
             }
         end
@@ -38,10 +39,11 @@ local function BuildTrackedDebuffs()
         local result = {}
         for _, def in ipairs(dbDefs) do
             local spellData = A.SPELLS[def.spellKey]
+            local spellDef = A.GetSpellDefinition and A.GetSpellDefinition(def.spellKey)
             result[#result + 1] = {
                 key   = def.key,
                 spell = function() return spellData end,
-                dur   = def.duration or 15,
+                dur   = def.duration or (spellDef and spellDef.duration) or 15,
                 color = def.color or def.key:upper(),
             }
         end
@@ -69,6 +71,28 @@ local spellIconCache = {}
 function A:InitDotTracker()
     local db = A.db.dotTracker
     if not db.enabled then return end
+
+    -- If the tracker is already built, reuse it instead of creating another
+    -- frame set. This keeps placement/preview refreshes from duplicating the UI.
+    if A.dotAnchor and A._dotTrackerCLEU then
+        A._dotTrackerCLEU:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
+        A._dotTrackerCLEU:RegisterEvent("PLAYER_TARGET_CHANGED")
+        A._dotTrackerCLEU:RegisterEvent("UNIT_AURA")
+        A._dotTrackerCLEU:RegisterEvent("UNIT_HEALTH")
+        A._dotTrackerCLEU:RegisterEvent("NAME_PLATE_UNIT_ADDED")
+        A._dotTrackerCLEU:RegisterEvent("NAME_PLATE_UNIT_REMOVED")
+        A._dotTrackerCLEU:RegisterEvent("PLAYER_REGEN_ENABLED")
+        A._dotTrackerCLEU:RegisterEvent("PLAYER_REGEN_DISABLED")
+        if UnitAffectingCombat("player") or A.dotTrackerPreviewActive then
+            A.dotAnchor:Show()
+        else
+            A.dotAnchor:Hide()
+        end
+        if A.DotTrackerResizeLayout then
+            pcall(A.DotTrackerResizeLayout)
+        end
+        return
+    end
 
     local ROW_W       = db.width       or 300
     local ROW_H       = db.rowHeight   or 40
@@ -170,10 +194,12 @@ function A:InitDotTracker()
     -- Preview / dummy data support
     ----------------------------------------------------------------
     local previewActive = false
+    local RefreshRows
     -- Expose preview state for other modules
     A.dotTrackerPreviewActive = false
 
     local function InjectDummyData()
+        addCounter = 0
         wipe(targets)
         local now = GetTime()
         local sampleNames = { "Fel Reaver", "Void Reaver", "Shade of Aran", "Hydross the Unstable", "Doomwalker", "Warbringer" }
@@ -210,6 +236,7 @@ function A:InitDotTracker()
         A.dotTrackerPreviewActive = true
         -- Ensure the anchor is visible for preview even when out of combat
         if anchor then anchor:Show() end
+        RefreshRows(0)
     end
 
     local function ClearDummyData()
@@ -224,6 +251,7 @@ function A:InitDotTracker()
         A.dotTrackerPreviewActive = false
         -- If player is not in combat, hide the anchor after clearing preview
         if not playerInCombat and anchor then anchor:Hide() end
+        RefreshRows(0)
     end
 
     -- Expose for Config.lua
@@ -564,7 +592,7 @@ function A:InitDotTracker()
     local sorted = {}
     local blinkTimer = 0
 
-    local function RefreshRows(elapsed)
+    RefreshRows = function(elapsed)
         blinkTimer = blinkTimer + (elapsed or 0)
         wipe(sorted)
         local now = GetTime()
@@ -1047,6 +1075,9 @@ function A:InitDotTracker()
             end
         end
     end)
+
+    A._dotTrackerCLEU = ev
+    A._dotTrackerInitialized = true
 end
 
 ------------------------------------------------------------------------
@@ -1071,6 +1102,7 @@ if SPHelper.SpecManager then
             if SPHelper._dotTrackerCLEU then
                 SPHelper._dotTrackerCLEU:UnregisterAllEvents()
             end
+            SPHelper._dotTrackerInitialized = false
         end,
     })
 end

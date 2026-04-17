@@ -660,7 +660,8 @@ function RE:BuildContext(spec)
     if vtRem == 0 then
         if (castingSpell and castingSpell == A.SPELLS.VT.name)
            or (recentCast[A.SPELLS.VT.name] and (now - recentCast[A.SPELLS.VT.name]) < 1.0) then
-            vtRem = constants.VT_DURATION or 15
+            local vtDef = A.GetSpellDefinition and A.GetSpellDefinition("VT")
+            vtRem = constants.VT_DURATION or (vtDef and vtDef.duration) or 15
         end
     end
     if swpRem == 0 then
@@ -698,8 +699,12 @@ function RE:BuildContext(spec)
         clearcasting = PlayerHasBuff(A.SPELLS.CLEARCASTING.name)
     end
 
-    local VT_CAST_TIME = constants.VT_CAST_TIME or 1.5
-    local MF_CAST_TIME = constants.MF_CAST_TIME or 3.0
+    local VT_CAST_TIME = constants.VT_CAST_TIME
+        or (A.GetSpellDefinition and A.GetSpellDefinition("VT") and A.GetSpellDefinition("VT").castTime)
+        or 1.5
+    local MF_CAST_TIME = constants.MF_CAST_TIME
+        or (A.GetSpellDefinition and A.GetSpellDefinition("MF") and A.GetSpellDefinition("MF").castTime)
+        or 3.0
     local MIN_MF_DURATION = constants.MIN_MF_DURATION or 1.0
 
     local vtCastEff = VT_CAST_TIME / hasteMul

@@ -25,21 +25,11 @@ local function MakeClassTaggedName(def)
 end
 
 ------------------------------------------------------------------------
--- Shadow Priest spell coefficients (TBC values)
--- base = base damage (avg of min/max for max rank)
--- coeff = spell power coefficient
--- dur = base DoT duration (seconds, 0 for direct)
--- ticks = number of DoT ticks (0 for direct)
--- school = damage school index (6 = shadow)
+-- Shadow Priest spell coefficients are now stored in SpellDatabase.lua
+-- per entry under entry.coefficients and entry.damage.
+-- SD.SP_COEFFICIENTS is rebuilt at runtime from the catalog so that
+-- EstimateDamage() can still be keyed by spell ID.
 ------------------------------------------------------------------------
-local BASE_SP_COEFFICIENTS = {
-    [34914] = { name = "Vampiric Touch",    base = 650,  coeff = 1.0,   dur = 15, ticks = 5,  school = 6, castTime = 1.5 },
-    [589]   = { name = "Shadow Word: Pain", base = 1236, coeff = 1.10,  dur = 18, ticks = 6,  school = 6, castTime = 0,   instant = true },
-    [8092]  = { name = "Mind Blast",        base = 731,  coeff = 0.429, dur = 0,  ticks = 0,  school = 6, castTime = 1.5 },
-    [15407] = { name = "Mind Flay",         base = 528,  coeff = 0.57,  dur = 3,  ticks = 3,  school = 6, castTime = 3,   channel = true },
-    [32379] = { name = "Shadow Word: Death",base = 572,  coeff = 0.429, dur = 0,  ticks = 0,  school = 6, castTime = 0,   instant = true },
-    [2944]  = { name = "Devouring Plague",  base = 1216, coeff = 0.80,  dur = 24, ticks = 8,  school = 6, castTime = 0,   instant = true },
-}
 
 SD.SP_COEFFICIENTS = {}
 
@@ -47,16 +37,40 @@ local function GetCatalogSpell(spellRef)
     return A.GetSpellDefinition and A.GetSpellDefinition(spellRef) or nil
 end
 
+-- Build a coefficient entry from a catalog definition for use by EstimateDamage.
+local function MakeCatalogCoeffEntry(def)
+    if not def then return nil end
+    local coeff = def.coefficients and def.coefficients.spellPower
+    if not coeff then return nil end
+    return {
+        name     = def.name,
+        base     = def.damage and def.damage.estimateBase or 0,
+        coeff    = coeff,
+        dur      = def.duration or 0,
+        ticks    = def.ticks or 0,
+        school   = def.schoolMask or 0,
+        castTime = def.castTime or 0,
+        channel  = (def.castType == "channel"),
+        instant  = (def.castType == "instant"),
+    }
+end
+
 function SD:RebuildCoefficientIndex()
     local coeffs = {}
-    for spellId, data in pairs(BASE_SP_COEFFICIENTS) do
-        coeffs[spellId] = data
+    if A.SpellDatabase and A.SpellDatabase.catalog then
+        for _, def in pairs(A.SpellDatabase.catalog) do
+            local entry = MakeCatalogCoeffEntry(def)
+            if entry then
+                if def.baseId then coeffs[def.baseId] = entry end
+            end
+        end
     end
 
+    -- Also index resolved (current rank) spell IDs from A.SPELLS
     if A.SPELLS then
         for _, spell in pairs(A.SPELLS) do
             local baseId = spell.baseId or spell.id
-            local data = baseId and BASE_SP_COEFFICIENTS[baseId]
+            local data = baseId and coeffs[baseId]
             if data and spell.id and spell.id ~= baseId then
                 coeffs[spell.id] = data
             end
@@ -130,25 +144,20 @@ local function BuildStaticTooltipText(def)
 end
 
 ------------------------------------------------------------------------
--- Talent modifiers for Shadow Priest (TBC)
--- tab, index = talent tree position
--- Each modifier has: talentTab, talentIndex, maxRank, perRank, affects
+-- Talent modifiers are now stored per-spell in SpellDatabase.lua under
+-- entry.talentModifiers[]. SD.TALENT_MODIFIERS below aggregates the
+-- global "affects whole school" modifiers that span multiple spells.
+-- Per-spell modifiers (duration, cooldown, crit_bonus) live in the DB.
 ------------------------------------------------------------------------
 SD.TALENT_MODIFIERS = {
-    -- Shadow Weaving: +10% shadow damage (stacking debuff, simplified as personal)
+    -- Shadow Focus: -10% miss chance (treat as +hit) – global to shadow
+    { name = "Shadow Focus",   tab = 3, index = 2,  maxRank = 5, perRank = 0.02,   affects = "shadow_hit" },
+    -- Misery: +5% spell damage taken by target – global to all shadow spells
+    { name = "Misery",         tab = 3, index = 21, maxRank = 5, perRank = 0.01,   affects = "target_spell_damage" },
+    -- Shadow Weaving: stacking debuff, treated as personal damage bonus
     { name = "Shadow Weaving", tab = 3, index = 15, maxRank = 5, perRank = 0.02,   affects = "shadow_damage" },
     -- Darkness: +10% shadow damage
     { name = "Darkness",       tab = 3, index = 16, maxRank = 5, perRank = 0.02,   affects = "shadow_damage" },
-    -- Shadow Focus: -10% miss chance (treat as +hit)
-    { name = "Shadow Focus",   tab = 3, index = 2,  maxRank = 5, perRank = 0.02,   affects = "shadow_hit" },
-    -- Improved SWP: +6 sec duration
-    { name = "Improved SWP",   tab = 3, index = 4,  maxRank = 2, perRank = 3,      affects = "swp_duration" },
-    -- Improved Mind Blast: -0.5s cooldown per rank
-    { name = "Improved MB",    tab = 3, index = 12, maxRank = 5, perRank = -0.5,    affects = "mb_cooldown" },
-    -- Shadow Power: +15% crit bonus damage on MB/MF/SWD
-    { name = "Shadow Power",   tab = 3, index = 20, maxRank = 5, perRank = 0.03,   affects = "shadow_crit_bonus" },
-    -- Misery: +5% spell damage taken by target
-    { name = "Misery",         tab = 3, index = 21, maxRank = 5, perRank = 0.01,   affects = "target_spell_damage" },
 }
 
 ------------------------------------------------------------------------
@@ -184,11 +193,28 @@ function SD:GetTalentRank(tab, index)
 end
 
 ------------------------------------------------------------------------
--- Calculate total talent modifier for a given affect type
+-- Calculate total talent modifier for a given affect type (global mods)
 ------------------------------------------------------------------------
 function SD:GetTalentModifier(affectType)
     local total = 0
     for _, tm in ipairs(self.TALENT_MODIFIERS) do
+        if tm.affects == affectType then
+            local rank = self:GetTalentRank(tm.tab, tm.index)
+            total = total + rank * tm.perRank
+        end
+    end
+    return total
+end
+
+------------------------------------------------------------------------
+-- Calculate talent modifier for a specific spell (per-spell modifiers
+-- stored in SpellDatabase entry.talentModifiers)
+------------------------------------------------------------------------
+function SD:GetSpellTalentModifier(spellRef, affectType)
+    local def = GetCatalogSpell(spellRef)
+    if not def or not def.talentModifiers then return 0 end
+    local total = 0
+    for _, tm in ipairs(def.talentModifiers) do
         if tm.affects == affectType then
             local rank = self:GetTalentRank(tm.tab, tm.index)
             total = total + rank * tm.perRank
@@ -243,9 +269,11 @@ function SD:EstimateDamage(spellId)
 
     local sp = A.GetSpellPower and A.GetSpellPower() or 0
 
-    -- Base multiplier from talents
+    -- Global school-wide modifiers
     local shadowMod = 1 + self:GetTalentModifier("shadow_damage")
     local miseryMod = 1 + self:GetTalentModifier("target_spell_damage")
+    -- Per-spell damage modifier from catalog talentModifiers
+    local spellDamageMod = 1 + self:GetSpellTalentModifier(baseSpellId, "damage")
 
     -- Spell-specific set bonuses
     local mbBonus = 0
@@ -255,7 +283,7 @@ function SD:EstimateDamage(spellId)
         end
     end
 
-    local totalDamage = (data.base + sp * data.coeff) * shadowMod * miseryMod * (1 + mbBonus)
+    local totalDamage = (data.base + sp * data.coeff) * shadowMod * miseryMod * spellDamageMod * (1 + mbBonus)
 
     return {
         damage   = math.floor(totalDamage),
@@ -280,9 +308,12 @@ function SD:GetEffectiveDuration(spellId)
     end
 
     local dur = data.dur
-    -- SWP duration extensions
+    -- Read duration modifiers from per-spell catalog talentModifiers
+    local spellDurationMod = self:GetSpellTalentModifier(baseSpellId, "duration")
+    dur = dur + spellDurationMod
+
+    -- Set bonus overrides (SWP)
     if baseSpellId == 589 then
-        dur = dur + self:GetTalentModifier("swp_duration")
         for _, ab in ipairs(self:GetActiveSetBonuses()) do
             if ab.bonus.affects == "swp_duration" then dur = dur + ab.bonus.value end
         end

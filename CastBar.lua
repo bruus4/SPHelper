@@ -158,7 +158,7 @@ function A:InitCastBar()
     ----------------------------------------------------------------
     -- Show / hide helpers
     ----------------------------------------------------------------
-    local function ShowBar(name, startMS, endMS, isChannel)
+    local function ShowBar(name, startMS, endMS, isChannel, spellID)
         f.spellName  = name or ""
         f.startTime  = startMS / 1000
         f.endTime    = endMS   / 1000
@@ -171,8 +171,13 @@ function A:InitCastBar()
 
         -- Check if this is any tracked channel spell (data-driven)
         local CH = A.ChannelHelper
-        local channelInfo = isChannel and CH and CH.KNOWN_CHANNELS and CH.KNOWN_CHANNELS[name]
-        f.isTrackedChannel = channelInfo ~= nil
+        local channelInfo = nil
+        if isChannel and CH and CH.GetChannelInfoForSpell then
+            channelInfo = CH:GetChannelInfoForSpell(name, spellID)
+        elseif isChannel and CH and CH.KNOWN_CHANNELS then
+            channelInfo = CH.KNOWN_CHANNELS[name]
+        end
+        f.isTrackedChannel = isChannel and channelInfo ~= nil
         f.channelInfo      = channelInfo
         f.tickCount  = channelInfo and channelInfo.ticks or (f.isMindFlay and 3 or 0)
         f._earlyTickFired = {}  -- reset early tick feedback tracker
@@ -188,7 +193,11 @@ function A:InitCastBar()
 
         for i, t in ipairs(f.tickMarkers) do
             local showMarkers = f.isTrackedChannel and (not f.channelInfo or f.channelInfo.tickMarkers ~= false)
-            if showMarkers and i <= f.tickCount then
+            local showTick = showMarkers and i <= f.tickCount
+            if showTick and A.ChannelHelper and A.ChannelHelper.ShouldShowTickMarker then
+                showTick = A.ChannelHelper:ShouldShowTickMarker(f.channelInfo, i)
+            end
+            if showTick then
                 local frac = (f.tickCount - i) / f.tickCount
                 t:ClearAllPoints()
                 t:SetPoint("CENTER", bar, "LEFT", BAR_W * frac, 0)
@@ -282,6 +291,9 @@ function A:InitCastBar()
         f.isMindFlay = false
         f.isTrackedChannel = true
         f.channelInfo = CH and CH.KNOWN_CHANNELS and CH.KNOWN_CHANNELS[previewName]
+        if not f.channelInfo and CH and CH.GetChannelInfoForSpell then
+            f.channelInfo = CH:GetChannelInfoForSpell(previewName)
+        end
         f.tickCount  = previewTicks
         f.ticksDone  = 1
         f.clipSafe   = true
@@ -300,8 +312,22 @@ function A:InitCastBar()
             local frac = (previewTicks - i) / previewTicks
             t:ClearAllPoints()
             t:SetPoint("CENTER", bar, "LEFT", BAR_W * frac, 0)
-            local mode = (A.db and A.db.castBar and A.db.castBar.tickMarkers) or "all"
-            if mode == "all" and i <= previewTicks then
+            local mode = (f.channelInfo and f.channelInfo.tickMarkerMode) or ((A.db and A.db.castBar and A.db.castBar.tickMarkers) or "all")
+            local showTick = true
+            if A.ChannelHelper and A.ChannelHelper.ShouldShowTickMarker then
+                showTick = A.ChannelHelper:ShouldShowTickMarker(f.channelInfo, i)
+            else
+                if mode == "none" then
+                    showTick = false
+                elseif mode == "specific" then
+                    local ticks = f.channelInfo and f.channelInfo.tickMarkerTicks or {}
+                    showTick = false
+                    for _, tn in ipairs(ticks) do
+                        if tonumber(tn) == i then showTick = true; break end
+                    end
+                end
+            end
+            if showTick and i <= previewTicks then
                 if i <= f.ticksDone then
                     t:SetColorTexture(unpack(A.COLORS.SAFE))
                 else
@@ -389,6 +415,12 @@ function A:InitCastBar()
                                 local activeInfo = f.channelInfo
                                 local doSound = not activeInfo or activeInfo.tickSound ~= false
                                 local doFlash = not activeInfo or activeInfo.tickFlash ~= false
+                                if doSound and A.ChannelHelper and A.ChannelHelper.ShouldPlayTickSelection then
+                                    doSound = A.ChannelHelper:ShouldPlayTickSelection(activeInfo, tickNum, "tickSound")
+                                end
+                                if doFlash and A.ChannelHelper and A.ChannelHelper.ShouldPlayTickSelection then
+                                    doFlash = A.ChannelHelper:ShouldPlayTickSelection(activeInfo, tickNum, "tickFlash")
+                                end
                                 local ts = doSound and (A.SpecVal and A.SpecVal("tickSound", nil) or nil) or "none"
                                 if not ts and A.db and A.db.castBar then ts = A.db.castBar.tickSound end
                                 ts = ts or "click"
@@ -437,6 +469,9 @@ function A:InitCastBar()
         if event == "UNIT_SPELLCAST_START" then
             local unit = ...
             if unit ~= "player" then return end
+            if A.ChannelHelper and A.ChannelHelper.OnChannelStop then
+                A.ChannelHelper:OnChannelStop()
+            end
             local name, _, _, startMS, endMS = UnitCastingInfo("player")
             if name then ShowBar(name, startMS, endMS, false) end
 
@@ -470,8 +505,9 @@ function A:InitCastBar()
         elseif event == "UNIT_SPELLCAST_CHANNEL_START" then
             local unit = ...
             if unit ~= "player" then return end
+            local _, _, spellID = ...
             local name, _, _, startMS, endMS = UnitChannelInfo("player")
-            if name then ShowBar(name, startMS, endMS, true) end
+            if name then ShowBar(name, startMS, endMS, true, spellID) end
 
         elseif event == "UNIT_SPELLCAST_CHANNEL_UPDATE" then
             -- Channel pushback: re-read channel end time
@@ -534,6 +570,12 @@ function A:InitCastBar()
                 if not f._earlyTickFired[f.ticksDone] then
                     local doSound = not activeInfo or activeInfo.tickSound ~= false
                     local doFlash = not activeInfo or activeInfo.tickFlash ~= false
+                    if doSound and A.ChannelHelper and A.ChannelHelper.ShouldPlayTickSelection then
+                        doSound = A.ChannelHelper:ShouldPlayTickSelection(activeInfo, f.ticksDone, "tickSound")
+                    end
+                    if doFlash and A.ChannelHelper and A.ChannelHelper.ShouldPlayTickSelection then
+                        doFlash = A.ChannelHelper:ShouldPlayTickSelection(activeInfo, f.ticksDone, "tickFlash")
+                    end
                     local ts = doSound and (A.SpecVal and A.SpecVal("tickSound", nil) or nil) or "none"
                     if not ts and A.db and A.db.castBar then ts = A.db.castBar.tickSound end
                     ts = ts or "click"

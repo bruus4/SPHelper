@@ -1147,7 +1147,7 @@ end
 A.PreviewTickFlash = function(key) A.DoTickFlash(key) end
 A.PreviewTickSound = function(key) A.PlayTickSound(key) end
 
--- TickManager: fires shared tick feedback on every MF SPELL_PERIODIC_DAMAGE
+-- TickManager: fires shared tick feedback on every tracked channel SPELL_PERIODIC_DAMAGE
 -- event. When the cast bar UI is enabled and currently showing, the cast bar
 -- handles tick feedback itself, so shared feedback is suppressed to avoid
 -- double-firing.
@@ -1161,28 +1161,46 @@ function A.InitTickManager()
         local _, subEvent, _, sourceGUID, _, _, _, _, _, _, _, _, cleuSpellName = CombatLogGetCurrentEventInfo()
         if sourceGUID ~= UnitGUID("player") then return end
         if subEvent ~= "SPELL_PERIODIC_DAMAGE" then return end
-        if cleuSpellName ~= (A.SPELLS and A.SPELLS.MF and A.SPELLS.MF.name) then return end
+
+        local channelInfo = nil
+        if A.ChannelHelper then
+            channelInfo = A.ChannelHelper._activeChannelInfo
+                or (A.ChannelHelper.KNOWN_CHANNELS and A.ChannelHelper.KNOWN_CHANNELS[cleuSpellName])
+        end
+        if not channelInfo then return end
+
         -- Suppress if the cast bar UI is currently visible (it handles ticks itself)
         if A.castBarFrame and A.castBarFrame:IsShown() then return end
-        -- Respect the user's Mind Flay tick mode even when the cast bar is disabled.
-        local mode = (A.db and A.db.castBar and A.db.castBar.tickMarkers) or "all"
-        if mode == "all" then
-            pcall(function() if A.PlayTickSound then A.PlayTickSound() end end)
-            pcall(function() if A.DoTickFlash then A.DoTickFlash() end end)
+
+        -- Respect the active channel's tick selections even when the cast bar is disabled.
+        A._tickManagerState = A._tickManagerState or { last = 0, count = 0, spellName = nil }
+        local now = GetTime()
+        local resetGap = 2.0
+        if channelInfo.tickInterval and channelInfo.tickInterval > 0 then
+            resetGap = math.max(channelInfo.tickInterval * 1.5, 2.0)
+        end
+        if A._tickManagerState.spellName ~= cleuSpellName or (now - A._tickManagerState.last) > resetGap then
+            A._tickManagerState.count = 1
         else
-            -- Track consecutive ticks to detect the 2nd tick. Reset if ticks are too far apart.
-            A._tickManagerState = A._tickManagerState or { last = 0, count = 0 }
-            local now = GetTime()
-            if (now - A._tickManagerState.last) > 2.0 then
-                A._tickManagerState.count = 1
-            else
-                A._tickManagerState.count = A._tickManagerState.count + 1
-            end
-            A._tickManagerState.last = now
-            if A._tickManagerState.count == 2 then
-                pcall(function() if A.PlayTickSound then A.PlayTickSound() end end)
-                pcall(function() if A.DoTickFlash then A.DoTickFlash() end end)
-            end
+            A._tickManagerState.count = A._tickManagerState.count + 1
+        end
+        A._tickManagerState.last = now
+        A._tickManagerState.spellName = cleuSpellName
+
+        local tickNum = A._tickManagerState.count
+
+        local doSound = true
+        local doFlash = true
+        if A.ChannelHelper and A.ChannelHelper.ShouldPlayTickSelection then
+            doSound = A.ChannelHelper:ShouldPlayTickSelection(channelInfo, tickNum, "tickSound")
+            doFlash = A.ChannelHelper:ShouldPlayTickSelection(channelInfo, tickNum, "tickFlash")
+        end
+
+        if doSound then
+            pcall(function() if A.PlayTickSound then A.PlayTickSound() end end)
+        end
+        if doFlash then
+            pcall(function() if A.DoTickFlash then A.DoTickFlash() end end)
         end
     end)
 end
