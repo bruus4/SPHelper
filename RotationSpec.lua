@@ -38,7 +38,7 @@ A.RotationSpec = {
     -- - `not_debuff_on_target` : inverse of `dot_missing` alias
     -- - `min_cast_duration_available` : allow casting a channel only if a minimum duration remains
 
-    -- Spell entries: key must match keys used in Rotation.lua (e.g. "VT", "SWP", "MB"...)
+    -- Spell entries: key is the canonical full spell name (e.g. "Vampiric Touch", "Shadow Word: Pain", "Mind Blast"...)
     spells = {
         VT = {
             id = A.SPELLS and A.SPELLS.VT and A.SPELLS.VT.id,

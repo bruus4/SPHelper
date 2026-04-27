@@ -172,7 +172,28 @@ local function SUIDropdown(parent, label, options, get, set, x, y)
 
     local dd = CreateFrame("Frame", globalName, parent, "UIDropDownMenuTemplate")
     dd:SetPoint("TOPLEFT", lbl, "BOTTOMLEFT", -16, -2)
-    UIDropDownMenu_SetWidth(dd, 130)
+    -- Auto-size the visible width to fit the longest option label so values
+    -- like "boss_dungeon_raid" or "Always (Aggressive)" aren't clipped.
+    -- Uses a hidden FontString to measure pixel width in the same font the
+    -- dropdown text uses (GameFontHighlightSmall is what UIDropDownMenu_SetText draws).
+    local function MeasureWidth(text)
+        local probe = parent._sphDDProbe
+        if not probe then
+            probe = parent:CreateFontString(nil, "BACKGROUND", "GameFontHighlightSmall")
+            probe:Hide()
+            parent._sphDDProbe = probe
+        end
+        probe:SetText(tostring(text or ""))
+        return probe:GetStringWidth() or 0
+    end
+    local maxTextWidth = MeasureWidth(get())
+    for _, opt in ipairs(options or {}) do
+        local w = MeasureWidth(opt)
+        if w > maxTextWidth then maxTextWidth = w end
+    end
+    -- 24px padding accounts for the dropdown's left/right edges + the arrow button.
+    local ddWidth = math.max(80, math.min(260, math.ceil(maxTextWidth) + 24))
+    UIDropDownMenu_SetWidth(dd, ddWidth)
     UIDropDownMenu_SetText(dd, tostring(get()))
     UIDropDownMenu_Initialize(dd, function(self, level)
         for _, opt in ipairs(options) do
@@ -194,107 +215,249 @@ end
 local scrollMenuCounter = 0
 local activeScrollMenu = nil
 
-local function OpenScrollableListMenu(anchor, title, items, onSelect, selectedValue)
+-- Close the active scroll menu, if any.
+local function CloseActiveScrollMenu()
     if activeScrollMenu then
         activeScrollMenu:Hide()
+        activeScrollMenu = nil
     end
+end
+
+--[[
+  OpenScrollableListMenu(anchor, title, items, onSelect, selectedValue)
+  Opens a scrollable, searchable picker anchored to `anchor`.
+  - Items are sorted alphabetically by text.
+  - A search box at the top filters the list as you type.
+  - Press Enter to select the first visible item; Escape to close.
+  - Clicking the same anchor again closes the menu (toggle).
+  - Smart positioning: opens below the anchor by default; flips above
+    if there is not enough room below.
+--]]
+local function OpenScrollableListMenu(anchor, title, items, onSelect, selectedValue)
+    -- Toggle: clicking the same button again closes the menu.
+    if activeScrollMenu and activeScrollMenu._anchor == anchor then
+        CloseActiveScrollMenu()
+        return
+    end
+    CloseActiveScrollMenu()
+
+    -- Sort items alphabetically by display text.
+    local sortedItems = {}
+    for _, item in ipairs(items) do
+        sortedItems[#sortedItems + 1] = item
+    end
+    table.sort(sortedItems, function(a, b)
+        return tostring(a.text or a.value or "") < tostring(b.text or b.value or "")
+    end)
 
     scrollMenuCounter = scrollMenuCounter + 1
     local frame = CreateFrame("Frame", "SPHScrollMenu" .. scrollMenuCounter, UIParent, "BackdropTemplate")
     activeScrollMenu = frame
-    frame:SetFrameStrata("DIALOG")
+    frame._anchor = anchor
+
+    -- Use TOOLTIP strata so the menu is always above every other frame,
+    -- including the condition editor (FULLSCREEN_DIALOG).
+    frame:SetFrameStrata("TOOLTIP")
     frame:SetToplevel(true)
     frame:SetClampedToScreen(true)
     frame:EnableMouse(true)
-    frame:EnableKeyboard(true)
-    frame:SetScript("OnKeyDown", function(self, key)
-        if key == "ESCAPE" then
-            self:Hide()
+
+    local rowHeight  = 18
+    local maxVisible = 14
+    local titleH     = 22
+    local searchH    = 24
+    local visibleRows = math.min(#sortedItems, maxVisible)
+    local menuW  = 320
+    local menuH  = titleH + searchH + (visibleRows * rowHeight) + 8
+    frame:SetSize(menuW, menuH)
+
+    -- Smart positioning: prefer below anchor, flip above if near bottom.
+    local function PositionMenu()
+        frame:ClearAllPoints()
+        local anchorBottom = anchor:GetBottom() or 0
+        if anchorBottom - menuH < 20 then
+            -- Not enough room below: open above the anchor.
+            frame:SetPoint("BOTTOMLEFT", anchor, "TOPLEFT", 0, 2)
+        else
+            frame:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -2)
         end
-    end)
+    end
+    PositionMenu()
 
-    local rowHeight = 18
-    local maxVisible = 12
-    local visibleRows = math.min(#items, maxVisible)
-    local width = 300
-    local height = math.max((visibleRows * rowHeight) + 30, 70)
-    frame:SetSize(width, height)
-    frame:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -2)
-    A.CreateBackdrop(frame, 0.08, 0.08, 0.08, 0.98, 0.45, 0.45, 0.45, 1)
+    A.CreateBackdrop(frame, 0.06, 0.06, 0.10, 0.98, 0.40, 0.40, 0.50, 1)
 
+    -- ── Title row ──────────────────────────────────────────────────
     local titleFs = frame:CreateFontString(nil, "OVERLAY")
     titleFs:SetFont(FONT, 10, "OUTLINE")
-    titleFs:SetPoint("TOPLEFT", frame, "TOPLEFT", 8, -6)
+    titleFs:SetPoint("TOPLEFT", frame, "TOPLEFT", 8, -5)
     titleFs:SetTextColor(1, 0.82, 0, 1)
     titleFs:SetText(title or "Select")
 
     local closeBtn = CreateFrame("Button", nil, frame, "BackdropTemplate")
     closeBtn:SetSize(16, 16)
-    closeBtn:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -6, -5)
+    closeBtn:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -4, -3)
     A.CreateBackdrop(closeBtn, 0.35, 0.1, 0.1, 0.95, 0.6, 0.2, 0.2, 1)
     local closeLbl = closeBtn:CreateFontString(nil, "OVERLAY")
-    closeLbl:SetFont(FONT, 9, "OUTLINE")
-    closeLbl:SetPoint("CENTER")
-    closeLbl:SetText("x")
+    closeLbl:SetFont(FONT, 9, "OUTLINE"); closeLbl:SetPoint("CENTER"); closeLbl:SetText("x")
     closeBtn:SetScript("OnClick", function() frame:Hide() end)
 
-    local scrollFrame = CreateFrame("ScrollFrame", nil, frame, "UIPanelScrollFrameTemplate")
-    scrollFrame:SetPoint("TOPLEFT", frame, "TOPLEFT", 6, -22)
-    scrollFrame:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -26, 6)
-    scrollFrame:EnableMouseWheel(true)
-    scrollFrame:SetScript("OnMouseWheel", function(self, delta)
-        local step = rowHeight * 2
-        local newScroll = self:GetVerticalScroll() - (delta * step)
-        newScroll = math.max(0, math.min(newScroll, self:GetVerticalScrollRange()))
-        self:SetVerticalScroll(newScroll)
-    end)
+    -- ── Search box ─────────────────────────────────────────────────
+    local searchEB = CreateFrame("EditBox", nil, frame, "BackdropTemplate")
+    searchEB:SetSize(menuW - 12, 20)
+    searchEB:SetPoint("TOPLEFT", frame, "TOPLEFT", 6, -(titleH))
+    searchEB:SetFont(FONT, 9, "")
+    searchEB:SetAutoFocus(false)
+    searchEB:SetTextColor(1, 1, 1, 1)
+    searchEB:SetTextInsets(6, 6, 0, 0)
+    A.CreateBackdrop(searchEB, 0.04, 0.04, 0.08, 0.95, 0.25, 0.25, 0.35, 1)
 
-    local content = CreateFrame("Frame", nil, scrollFrame)
-    content:SetSize(width - 40, math.max(#items * rowHeight, 1))
-    scrollFrame:SetScrollChild(content)
+    local placeholder = searchEB:CreateFontString(nil, "OVERLAY")
+    placeholder:SetFont(FONT, 9, "")
+    placeholder:SetTextColor(0.4, 0.4, 0.5, 1)
+    placeholder:SetPoint("LEFT", searchEB, "LEFT", 6, 0)
+    placeholder:SetText("Search…")
 
-    for i, item in ipairs(items) do
+    searchEB:SetScript("OnEscapePressed", function() frame:Hide() end)
+
+    -- ── Scroll area — plain ScrollFrame (no template) ──────────────
+    -- Leave 10px on the right for the thumb track.
+    local THUMB_W = 10
+    local sf = CreateFrame("ScrollFrame", nil, frame)
+    sf:SetPoint("TOPLEFT",     frame, "TOPLEFT",     6,            -(titleH + searchH))
+    sf:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -(THUMB_W+4), 4)
+    sf:EnableMouseWheel(true)
+
+    local function DoScroll(delta)
+        local step = rowHeight * 3
+        local cur  = sf:GetVerticalScroll()
+        sf:SetVerticalScroll(math.max(0, math.min(cur - delta * step, sf:GetVerticalScrollRange())))
+    end
+    sf:SetScript("OnMouseWheel", function(_, delta) DoScroll(delta) end)
+
+    local content = CreateFrame("Frame", nil, sf)
+    content:SetWidth(sf:GetWidth() or (menuW - THUMB_W - 10))
+    sf:SetScrollChild(content)
+
+    -- Bubble wheel events from the content + buttons up to sf.
+    content:EnableMouseWheel(true)
+    content:SetScript("OnMouseWheel", function(_, delta) DoScroll(delta) end)
+
+    -- ── Thumb scrollbar (visual only, not draggable for simplicity) ─
+    local trackBG = frame:CreateTexture(nil, "ARTWORK")
+    trackBG:SetColorTexture(0.08, 0.08, 0.12, 0.9)
+    trackBG:SetWidth(THUMB_W)
+    trackBG:SetPoint("TOPRIGHT",    frame, "TOPRIGHT",    -2, -(titleH + searchH + 2))
+    trackBG:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -2, 4)
+
+    local thumb = CreateFrame("Frame", nil, frame, "BackdropTemplate")
+    thumb:SetWidth(THUMB_W - 2)
+    thumb:Hide()
+    A.CreateBackdrop(thumb, 0.45, 0.45, 0.55, 0.95, 0.55, 0.55, 0.65, 1)
+
+    local function UpdateThumb()
+        local range = sf:GetVerticalScrollRange()
+        if not range or range <= 0 then thumb:Hide(); return end
+        local sfH      = sf:GetHeight()
+        local contH    = content:GetHeight()
+        if not sfH or sfH <= 0 or not contH or contH <= 0 then thumb:Hide(); return end
+        local trackH   = sfH
+        local thumbH   = math.max(16, sfH / contH * trackH)
+        local scroll   = sf:GetVerticalScroll()
+        local maxScroll = range
+        local thumbTop = (scroll / maxScroll) * (trackH - thumbH)
+        thumb:SetHeight(thumbH)
+        thumb:ClearAllPoints()
+        thumb:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -2, -(titleH + searchH + 2 + thumbTop))
+        thumb:Show()
+    end
+
+    sf:SetScript("OnVerticalScroll", function() UpdateThumb() end)
+    sf:SetScript("OnSizeChanged",    function() UpdateThumb() end)
+
+    -- ── Pre-build all rows ─────────────────────────────────────────
+    local rowBtns = {}
+    for _, item in ipairs(sortedItems) do
         local btn = CreateFrame("Button", nil, content)
-        btn:SetSize(width - 54, rowHeight)
-        btn:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -((i - 1) * rowHeight))
+        btn:SetSize(menuW - 48, rowHeight)
 
         local bg = btn:CreateTexture(nil, "BACKGROUND")
         bg:SetAllPoints()
-        bg:SetColorTexture(0.12, 0.12, 0.12, 0.9)
         if item.value == selectedValue then
-            bg:SetColorTexture(0.18, 0.28, 0.42, 0.98)
+            bg:SetColorTexture(0.18, 0.28, 0.42, 0.95)
+        else
+            bg:SetColorTexture(0.10, 0.10, 0.14, 0.92)
         end
 
         local hl = btn:CreateTexture(nil, "HIGHLIGHT")
         hl:SetAllPoints()
-        hl:SetColorTexture(1, 1, 1, 0.12)
+        hl:SetColorTexture(1, 1, 1, 0.10)
 
         local txt = btn:CreateFontString(nil, "OVERLAY")
         txt:SetFont(FONT, 9, "")
-        txt:SetPoint("LEFT", btn, "LEFT", 6, 0)
+        txt:SetPoint("LEFT",  btn, "LEFT",  6, 0)
         txt:SetPoint("RIGHT", btn, "RIGHT", -6, 0)
         txt:SetJustifyH("LEFT")
         txt:SetText(tostring(item.text or item.value or ""))
 
         btn:SetScript("OnClick", function()
-            if onSelect then
-                onSelect(item.value)
-            end
+            if onSelect then onSelect(item.value) end
             frame:Hide()
         end)
 
+        -- Bubble mouse wheel from each row button up to the scroll frame.
+        btn:EnableMouseWheel(true)
+        btn:SetScript("OnMouseWheel", function(_, delta) DoScroll(delta) end)
+
         if item.tooltipText then
-            btn:SetScript("OnEnter", function(self)
-                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            btn:SetScript("OnEnter", function(self2)
+                GameTooltip:SetOwner(self2, "ANCHOR_RIGHT")
                 GameTooltip:SetText(item.tooltipTitle or tostring(item.text or item.value or ""))
                 GameTooltip:AddLine(item.tooltipText, 1, 1, 1, true)
                 GameTooltip:Show()
             end)
-            btn:SetScript("OnLeave", function()
-                GameTooltip:Hide()
-            end)
+            btn:SetScript("OnLeave", function() GameTooltip:Hide() end)
         end
+
+        rowBtns[#rowBtns + 1] = { btn = btn, item = item }
     end
+
+    -- ── Filter + layout ────────────────────────────────────────────
+    local function RefreshList(filter)
+        filter = filter and filter:lower() or ""
+        local visY = 0
+        for _, row in ipairs(rowBtns) do
+            local itemText = tostring(row.item.text or row.item.value or ""):lower()
+            if filter == "" or itemText:find(filter, 1, true) then
+                row.btn:ClearAllPoints()
+                row.btn:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -visY)
+                row.btn:Show()
+                visY = visY + rowHeight
+            else
+                row.btn:Hide()
+            end
+        end
+        content:SetHeight(math.max(visY, rowHeight))
+        sf:SetVerticalScroll(0)
+        UpdateThumb()
+    end
+    RefreshList("")
+
+    searchEB:SetScript("OnTextChanged", function(self)
+        local txt = self:GetText()
+        placeholder:SetShown(txt == "")
+        RefreshList(txt)
+    end)
+
+    -- Enter: pick first visible row
+    searchEB:SetScript("OnEnterPressed", function()
+        for _, row in ipairs(rowBtns) do
+            if row.btn:IsShown() then
+                if onSelect then onSelect(row.item.value) end
+                frame:Hide()
+                return
+            end
+        end
+    end)
 
     frame:SetScript("OnHide", function(self)
         GameTooltip:Hide()
@@ -302,6 +465,9 @@ local function OpenScrollableListMenu(anchor, title, items, onSelect, selectedVa
             activeScrollMenu = nil
         end
     end)
+
+    -- Focus search box so the user can type immediately.
+    searchEB:SetFocus()
 
     return frame
 end
@@ -311,6 +477,9 @@ local function SUIButton(parent, text, w, h, onClick, x, y)
     btn:SetSize(w or 80, h or 20)
     btn:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y)
     A.CreateBackdrop(btn, 0.18, 0.18, 0.18, 0.95, 0.35, 0.35, 0.35, 1)
+    local hl = btn:CreateTexture(nil, "HIGHLIGHT")
+    hl:SetAllPoints()
+    hl:SetColorTexture(1, 1, 1, 0.08)
     local lbl = btn:CreateFontString(nil, "OVERLAY")
     lbl:SetFont(FONT, 9, "OUTLINE")
     lbl:SetPoint("CENTER")
@@ -744,25 +913,131 @@ local function IsOptionKeyInUse(specID, optionKey)
     return false
 end
 
--- Build the merged options list: file uiOptions (minus deleted) + castBarOptions + customOptions
+------------------------------------------------------------------------
+-- Collect all setting keys referenced inside a rotation's conditions.
+-- This walks nested any_of/all_of/not groups recursively.
+-- Returns a list of keys in first-encounter order (stable, no dupes).
+------------------------------------------------------------------------
+local function CollectRotationSettingKeys(rotation)
+    local keys  = {}
+    local seen  = {}
+    local function Collect(cond)
+        if type(cond) ~= "table" then return end
+        -- Direct optionKey references (spec_option_enabled, setting_compare, etc.)
+        if cond.optionKey and type(cond.optionKey) == "string" and not seen[cond.optionKey] then
+            keys[#keys + 1] = cond.optionKey
+            seen[cond.optionKey] = true
+        end
+        -- String values in numeric fields that refer to setting keys
+        for _, f in ipairs({ "value", "pct", "seconds", "amount", "count", "points", "minTTD", "hp", "size", "safetyKey", "pctPerSec" }) do
+            if type(cond[f]) == "string" and not seen[cond[f]] then
+                keys[#keys + 1] = cond[f]
+                seen[cond[f]] = true
+            end
+        end
+        -- dbKey on content_mode_allow → generates per-content setting keys
+        if cond.dbKey and type(cond.dbKey) == "string" then
+            local prefix = cond.dbKey
+            for _, suffix in ipairs({ "World", "Dungeon", "Raid" }) do
+                local fk = prefix .. suffix
+                if not seen[fk] then keys[#keys + 1] = fk; seen[fk] = true end
+            end
+        end
+        -- Recurse into composite groups
+        if cond.conditions then
+            for _, sub in ipairs(cond.conditions) do Collect(sub) end
+        end
+        if cond.condition then Collect(cond.condition) end
+    end
+    for _, entry in ipairs(rotation or {}) do
+        -- postCast.set references a setting key for the post-cast resource amount
+        if entry.postCast and type(entry.postCast.set) == "string" and not seen[entry.postCast.set] then
+            keys[#keys + 1] = entry.postCast.set
+            seen[entry.postCast.set] = true
+        end
+        -- insertBeforeKey references a setting key whose value names the target spell
+        if entry.insertBeforeKey and type(entry.insertBeforeKey) == "string" and not seen[entry.insertBeforeKey] then
+            keys[#keys + 1] = entry.insertBeforeKey
+            seen[entry.insertBeforeKey] = true
+        end
+        for _, cond in ipairs(entry.conditions or {}) do Collect(cond) end
+    end
+    return keys
+end
+
+-- Build the merged options list.
+--
+-- If the spec provides `settingDefs` (keyed dictionary), those are the
+-- source of truth for labels, types, defaults, etc. Otherwise fall back
+-- to the legacy `uiOptions` array.
+--
+-- **Rotation-referenced settings come first** (in rotation-encounter
+-- order), then non-rotation settings, then DB custom options.
 local function GetMergedOptions(spec, specID)
     local merged = {}
-    local sdb = A.db and A.db.specs and A.db.specs[specID]
+    local sdb    = A.db and A.db.specs and A.db.specs[specID]
     local deleted = sdb and sdb.deletedOptions or {}
+    local seen   = {}
 
-    -- File-defined uiOptions (skip deleted ones)
-    for _, opt in ipairs(spec.uiOptions or {}) do
-        if not deleted[opt.key] then
-            local copy = {}
-            for k, v in pairs(opt) do copy[k] = v end
-            copy._fromFile = true
-            merged[#merged + 1] = copy
+    local defs = spec.settingDefs  -- keyed dict or nil
+
+    -- Helper: turn a settingDefs entry into the flat format RenderOption expects.
+    local function DefToOpt(key, def)
+        if not def then return nil end
+        return {
+            key     = key,
+            type    = def.type or "checkbox",
+            label   = def.label or key,
+            default = def.default,
+            min     = def.min,
+            max     = def.max,
+            step    = def.step,
+            values  = def.values,
+            tooltip = def.tooltip,
+            _fromFile = true,
+        }
+    end
+
+    -- Helper: add from defs or from legacy uiOptions
+    local function AddKey(key)
+        if seen[key] or deleted[key] then return end
+        seen[key] = true
+        if defs and defs[key] then
+            merged[#merged + 1] = DefToOpt(key, defs[key])
+        elseif spec.uiOptions then
+            for _, opt in ipairs(spec.uiOptions) do
+                if opt.key == key then
+                    local copy = {}
+                    for k, v in pairs(opt) do copy[k] = v end
+                    copy._fromFile = true
+                    merged[#merged + 1] = copy
+                    return
+                end
+            end
         end
     end
 
-    -- File-defined castBarOptions (skip deleted ones)
+    -- Phase 1: rotation-referenced settings (in encounter order).
+    -- Priority: in-memory editor data (reflects unsaved deletions/additions)
+    -- → DB-saved rotation.
+    -- NOTE: spec.rotation (file default) is intentionally NOT used here so
+    -- that deleting all rotation entries produces an empty General tab.
+    local effectiveRotation =
+        (editorData and editorSpecID == specID and editorData) or
+        (sdb and sdb.rotation)
+    local rotKeys = CollectRotationSettingKeys(effectiveRotation)
+    for _, key in ipairs(rotKeys) do AddKey(key) end
+
+    -- Phase 1.5: spec-declared extra General settings (settings read by
+    -- engine logic rather than directly referenced in rotation conditions)
+    if spec.generalSettings then
+        for _, key in ipairs(spec.generalSettings) do AddKey(key) end
+    end
+
+    -- Phase 4: castBarOptions
     for _, opt in ipairs(spec.castBarOptions or {}) do
-        if not deleted[opt.key] then
+        if not deleted[opt.key] and not seen[opt.key] then
+            seen[opt.key] = true
             local copy = {}
             for k, v in pairs(opt) do copy[k] = v end
             copy._fromFile = true
@@ -771,13 +1046,18 @@ local function GetMergedOptions(spec, specID)
         end
     end
 
-    -- Custom options from DB
+    -- Phase 5: DB custom options
+    -- Skip any entry whose key is already defined in settingDefs — those were
+    -- erroneously auto-created before Phase 10a knew about settingDefs.
     local customOpts = sdb and sdb.customOptions or {}
     for _, opt in ipairs(customOpts) do
-        local copy = {}
-        for k, v in pairs(opt) do copy[k] = v end
-        copy._fromFile = false
-        merged[#merged + 1] = copy
+        if not seen[opt.key] and not (defs and defs[opt.key]) then
+            seen[opt.key] = true
+            local copy = {}
+            for k, v in pairs(opt) do copy[k] = v end
+            copy._fromFile = false
+            merged[#merged + 1] = copy
+        end
     end
 
     return merged
@@ -788,43 +1068,17 @@ local function BuildGeneralTab(container, spec)
     local specID = spec.meta.id
     local sdb = A.db and A.db.specs and A.db.specs[specID]
 
-    -- Preview toggle
-    SUIButton(container, "Preview All", 100, 18, function()
-        if A._visualsPreviewActive then
-            if A.DotTrackerPreviewOff then pcall(A.DotTrackerPreviewOff) end
-            if A.CastBarPreviewOff then pcall(A.CastBarPreviewOff) end
-            if A.RotationPreviewOff then pcall(A.RotationPreviewOff) end
-            A._visualsPreviewActive = false
-        else
-            if A.DotTrackerPreviewOn then pcall(A.DotTrackerPreviewOn) end
-            if A.CastBarPreviewOn then pcall(A.CastBarPreviewOn) end
-            if A.RotationPreviewOn then pcall(A.RotationPreviewOn) end
-            if A.PreviewTickSound then pcall(A.PreviewTickSound) end
-            if A.PreviewTickFlash then pcall(A.PreviewTickFlash) end
-            A._visualsPreviewActive = true
-        end
-    end, 390, y)
-
-    -- Reset Defaults button (restores file-defined options, clears customOptions)
-    SUIButton(container, "Reset Defaults", 100, 18, function()
-        if sdb then
-            sdb.deletedOptions = nil
-            sdb.customOptions = nil
-            -- Clear stored values for all file-defined option keys
-            for _, opt in ipairs(spec.uiOptions or {}) do
-                if sdb[opt.key] ~= nil then sdb[opt.key] = nil end
-            end
-        end
-        print("|cff8882d5SPHelper|r: Options reset to spec defaults.")
-        if SUI.frame and SUI.frame:IsShown() and SUI._activeTab == 1 then
-            SUI:SwitchTab(1, spec)
-        end
-    end, 270, y)
-    y = y - 26
+    -- Informational header: settings are derived automatically from the rotation.
+    local hdr = container:CreateFontString(nil, "OVERLAY")
+    hdr:SetFont(FONT, 9, "")
+    hdr:SetPoint("TOPLEFT", container, "TOPLEFT", 16, y)
+    hdr:SetTextColor(0.6, 0.6, 0.6, 1)
+    hdr:SetText("Settings are generated automatically from the Rotation tab.")
+    y = y - 20
 
     local merged = GetMergedOptions(spec, specID)
 
-    -- Render a single option with tooltip and remove button
+    -- Render a single option with its control widget.
     local function RenderOption(opt, mergedIdx)
         local tooltip = opt.tooltip
         if opt.type == "checkbox" then
@@ -858,47 +1112,6 @@ local function BuildGeneralTab(container, spec)
             end
             y = y - 50
         end
-
-        -- Remove button (available for all options — file-defined get marked as deleted)
-        local yOffset = opt.type == "dropdown" and 50 or (opt.type == "slider" and 38 or 26)
-        local removeBtn = SUIButton(container, "X", 18, 18, function()
-            if IsOptionKeyInUse(specID, opt.key) then
-                print("|cff8882d5SPHelper|r: Cannot remove |cffffcc00" .. opt.key .. "|r — it is referenced in the rotation.")
-                return
-            end
-            if opt._fromFile then
-                -- Mark as deleted in DB (can be restored via Reset Defaults)
-                if not A.db.specs[specID].deletedOptions then A.db.specs[specID].deletedOptions = {} end
-                A.db.specs[specID].deletedOptions[opt.key] = true
-            else
-                -- Remove from customOptions
-                local co = A.db.specs[specID] and A.db.specs[specID].customOptions
-                if co then
-                    for ci = #co, 1, -1 do
-                        if co[ci].key == opt.key then
-                            table.remove(co, ci)
-                            break
-                        end
-                    end
-                end
-            end
-            -- Clear stored value
-            if A.db.specs[specID] then A.db.specs[specID][opt.key] = nil end
-            print("|cff8882d5SPHelper|r: Removed option |cffffcc00" .. opt.key .. "|r")
-            if SUI.frame and SUI.frame:IsShown() and SUI._activeTab == 1 then
-                SUI:SwitchTab(1, spec)
-            end
-        end, 300, y + yOffset)
-        removeBtn:SetScript("OnEnter", function(self)
-            GameTooltip:SetOwner(self, "ANCHOR_RIGHT"); GameTooltip:SetText("Remove")
-            if opt._fromFile then
-                GameTooltip:AddLine("Hide this default option.\nUse 'Reset Defaults' to restore.", 1, 1, 1, true)
-            else
-                GameTooltip:AddLine("Remove this custom option.\nOnly works if the key is not used in the rotation.", 1, 1, 1, true)
-            end
-            GameTooltip:Show()
-        end)
-        removeBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
     end
 
     -- Render all merged options (skip castBar options — they live in tab 4)
@@ -907,17 +1120,6 @@ local function BuildGeneralTab(container, spec)
             RenderOption(opt, i)
         end
     end
-
-    -- Add custom option button
-    y = y - 10
-    SUIButton(container, "+ Add Config Option", 140, 20, function()
-        OpenConfigCreator(specID, function()
-            if SUI.frame and SUI.frame:IsShown() and SUI._activeTab == 1 then
-                SUI:SwitchTab(1, spec)
-            end
-        end)
-    end, 16, y)
-    y = y - 26
 
     container:SetHeight(math.abs(y) + 20)
 end
@@ -939,20 +1141,19 @@ local COND_TYPES = {
     { type = "content_mode_allow",         label = "Content Mode Allow",   fields = { "dbKey" } },
     { type = "not_recently_cast",          label = "Not Recently Cast",    fields = { "spellName", "window" } },
     { type = "target_valid",               label = "Target Valid",         fields = {} },
-    { type = "not_debuff_on_target",       label = "No Debuff on Target",  fields = { "debuff" } },
-    { type = "not_buff_on_player",         label = "No Buff on Player",    fields = { "buff" } },
-    { type = "predicted_kill",             label = "Predicted Kill (SWD)", fields = {} },
+    { type = "not_debuff_on_target",       label = "Unit Missing Debuff",  fields = { "unit", "debuff", "debuffId" } },
+    { type = "not_buff_on_player",         label = "Unit Missing Buff",    fields = { "unit", "buff", "buffId" } },
+    { type = "spell_can_kill_target",      label = "Spell Can Kill Target", fields = { "spellKey", "safetyKey" } },
     { type = "threat_pct_lt",              label = "Threat % <",           fields = { "pct" } },
     { type = "threat_pct_ge",              label = "Threat % >=",          fields = { "pct" } },
     { type = "target_classification",      label = "Target Classification",fields = { "classification" } },
     { type = "option_gated_classification",label = "Option-Gated Class.",  fields = { "optionKey", "classification" } },
-    { type = "buff_on_player",             label = "Has Player Buff",      fields = { "buff" } },
+    { type = "buff_on_player",             label = "Unit Has Buff",        fields = { "unit", "buff", "buffId" } },
     { type = "buff_stacks_gte",            label = "Buff Stacks >=",       fields = { "buff", "stacks" } },
     { type = "target_hp_pct_lt",           label = "Target HP % <",        fields = { "pct" } },
     { type = "target_hp_pct_gt",           label = "Target HP % >",        fields = { "pct" } },
     { type = "player_hp_pct_lt",           label = "Player HP % <",        fields = { "pct" } },
     { type = "player_hp_pct_gt",           label = "Player HP % >",        fields = { "pct" } },
-    { type = "clearcasting",               label = "Clearcasting",         fields = {} },
     { type = "spec_option_enabled",        label = "Spec Option Enabled",  fields = { "optionKey" } },
     { type = "spec_option_value",          label = "Spec Option = Value",  fields = { "optionKey", "value" } },
     { type = "in_combat",                  label = "In Combat",            fields = {} },
@@ -966,13 +1167,11 @@ local COND_TYPES = {
     { type = "not_behind_target",          label = "Not Behind Target",    fields = {} },
     { type = "combo_points_gte",           label = "Combo Points >=",       fields = { "points" } },
     { type = "combo_points_lt",            label = "Combo Points <",        fields = { "points" } },
-    { type = "debuff_on_target",           label = "Debuff on Target",      fields = { "debuff" } },
+    { type = "debuff_on_target",           label = "Unit Has Debuff",       fields = { "unit", "debuff", "debuffId", "source" } },
     { type = "debuff_time_left_lt",        label = "Debuff Time < Seconds", fields = { "debuff", "seconds" } },
     { type = "target_dying_fast",          label = "Target Dying Fast",     fields = { "pctPerSec", "direction" } },
     { type = "target_ttd_gte",             label = "Target TTD >=",         fields = { "seconds" } },
     { type = "target_ttd_lt",              label = "Target TTD <",          fields = { "seconds" } },
-    { type = "cat_form",                   label = "Cat Form",             fields = {} },
-    { type = "bear_form",                  label = "Bear Form",            fields = {} },
     { type = "resource_gte",               label = "Resource >= Amount",    fields = { "amount" } },
     { type = "resource_lt",                label = "Resource < Amount",     fields = { "amount" } },
     { type = "other_targets_with_debuff_lt", label = "Other Targets Debuff <", fields = { "spellKey", "count", "seconds", "minTTD" } },
@@ -984,11 +1183,9 @@ local COND_TYPES = {
     { type = "debuff_property_compare",   label = "Debuff Property Compare", fields = { "debuff", "source", "property", "op", "value" } },
     { type = "unit_cast_compare",         label = "Unit Cast Compare",     fields = { "unit", "op", "value" } },
     { type = "unit_interruptible",        label = "Unit Interruptible",    fields = { "unit" } },
-    { type = "is_stealthed",               label = "Is Stealthed",          fields = {} },
-    { type = "not_stealthed",              label = "Not Stealthed",         fields = {} },
     { type = "not_in_combat",              label = "Not In Combat",         fields = {} },
-    { type = "any_of",                     label = "Any Of",               fields = {} },
-    { type = "all_of",                     label = "All Of",               fields = {} },
+    { type = "any_of",                     label = "OR Group",             fields = {} },
+    { type = "all_of",                     label = "AND Group",            fields = {} },
     { type = "not",                        label = "Not",                  fields = {} },
     -- Phase 10 additions
     { type = "player_mana_pct_lt",         label = "Player Mana % <",      fields = { "pct" } },
@@ -1001,6 +1198,7 @@ local COND_TYPES = {
     { type = "resource_at_gcd_gt",         label = "Resource @ Ready >",    fields = { "amount" } },
     { type = "next_power_tick_with_gcd_lt",label = "Next Tick @ Ready <",   fields = { "seconds" } },
     { type = "next_power_tick_with_gcd_gt",label = "Next Tick @ Ready >",   fields = { "seconds" } },
+    { type = "setting_compare",            label = "Setting Compare",       fields = { "optionKey", "op", "value" } },
 }
 
 -- Fields that should render as dropdowns instead of free-text edit boxes
@@ -1008,10 +1206,21 @@ local function CollectSliderOptionKeys()
     local keys = {}
     local specID = A._activeSpecID
     local spec = specID and A.SpecManager and A.SpecManager:GetSpecByID(specID)
-    if spec and spec.uiOptions then
-        for _, opt in ipairs(spec.uiOptions) do
-            if opt.type == "slider" then
-                keys[#keys + 1] = opt.key
+    if spec then
+        -- New keyed settingDefs
+        if spec.settingDefs then
+            for key, def in pairs(spec.settingDefs) do
+                if def.type == "slider" then
+                    keys[#keys + 1] = key
+                end
+            end
+        end
+        -- Legacy uiOptions
+        if spec.uiOptions then
+            for _, opt in ipairs(spec.uiOptions) do
+                if opt.type == "slider" then
+                    keys[#keys + 1] = opt.key
+                end
             end
         end
     end
@@ -1022,14 +1231,21 @@ local function CollectSliderOptionKeys()
             end
         end
     end
-    table.sort(keys)
-    return keys
+    -- Dedupe
+    local seen = {}
+    local deduped = {}
+    for _, k in ipairs(keys) do
+        if not seen[k] then seen[k] = true; deduped[#deduped + 1] = k end
+    end
+    table.sort(deduped)
+    return deduped
 end
 
 local editorData = nil  -- array of rotation entries
 local editorDirty = false
 local editorSpecID = nil
 local editorRefreshFn = nil  -- set by BuildRotationTab
+local generalRefreshFn = nil  -- set when General tab (idx=1) is the active tab
 local condEditorFrame = nil
 local ceState = {}
 
@@ -1053,10 +1269,20 @@ local function GetEditorSpellClass()
     return playerClass
 end
 
+local function NormalizeSpellValue(rawValue)
+    if type(rawValue) ~= "string" then return rawValue end
+    local def = A.GetSpellDefinition and A.GetSpellDefinition(rawValue)
+    if def and def.name and def.name ~= "" then
+        return def.name
+    end
+    return rawValue
+end
+
 local function GetSpellDropdownText(options, value)
+    local normalizedValue = NormalizeSpellValue(value)
     for _, opt in ipairs(options or {}) do
         local optionValue = type(opt) == "table" and (opt.value or opt.key or opt.text) or opt
-        if optionValue == value then
+        if optionValue == value or optionValue == normalizedValue or NormalizeSpellValue(optionValue) == normalizedValue then
             return type(opt) == "table" and (opt.text or opt.name or opt.key or tostring(optionValue)) or tostring(optionValue)
         end
     end
@@ -1070,10 +1296,11 @@ local FIELD_DROPDOWNS = {
         if A.SpellData and A.SpellData.GetSpellKeysForEditor then
             for _, spell in ipairs(A.SpellData:GetSpellKeysForEditor(classFilter) or {}) do
                 if spell and spell.key then
+                    local displayName = spell.resolvedName or spell.name or spell.key
                     keys[#keys + 1] = {
-                        key = spell.key,
-                        text = (spell.name or spell.key),
-                        value = spell.key,
+                        key = displayName,
+                        text = displayName,
+                        value = displayName,
                         class = spell.class,
                         resolvedName = spell.resolvedName,
                     }
@@ -1083,10 +1310,11 @@ local FIELD_DROPDOWNS = {
             for k in pairs(A.SPELLS) do
                 if k ~= "CLEARCASTING" then
                     local spell = A.SPELLS[k]
+                    local displayName = (spell and spell.label) or k
                     keys[#keys + 1] = {
-                        key = k,
-                        text = (spell and spell.label) or k,
-                        value = k,
+                        key = displayName,
+                        text = displayName,
+                        value = displayName,
                         class = spell and spell.class,
                         resolvedName = spell and spell.name,
                     }
@@ -1144,21 +1372,28 @@ local FIELD_DROPDOWNS = {
         return { "boss", "elite", "normal", "none" }
     end,
     optionKey = function()
-        -- Collect from active spec's uiOptions
         local keys = {}
+        local seen = {}
         local specID = A._activeSpecID
         local spec = specID and A.SpecManager and A.SpecManager:GetSpecByID(specID)
-        if spec and spec.uiOptions then
-            for _, opt in ipairs(spec.uiOptions) do
-                keys[#keys + 1] = opt.key
+        if spec then
+            if spec.settingDefs then
+                for key in pairs(spec.settingDefs) do
+                    if not seen[key] then seen[key] = true; keys[#keys + 1] = key end
+                end
+            end
+            if spec.uiOptions then
+                for _, opt in ipairs(spec.uiOptions) do
+                    if not seen[opt.key] then seen[opt.key] = true; keys[#keys + 1] = opt.key end
+                end
             end
         end
-        -- Also include custom options
         if A.db and A.db.specs and specID and A.db.specs[specID] and A.db.specs[specID].customOptions then
             for _, opt in ipairs(A.db.specs[specID].customOptions) do
-                keys[#keys + 1] = opt.key
+                if not seen[opt.key] then seen[opt.key] = true; keys[#keys + 1] = opt.key end
             end
         end
+        table.sort(keys)
         return keys
     end,
     buff = function()
@@ -1190,7 +1425,34 @@ local FIELD_DROPDOWNS = {
         return { "faster", "slower" }
     end,
     contentType = function()
-        return { "world", "dungeon", "raid" }
+        return {
+            { text = "Open World", value = "world" },
+            { text = "Dungeon",    value = "dungeon" },
+            { text = "Raid",       value = "raid" },
+        }
+    end,
+    buffId = function() return nil end,
+    debuffId = function() return nil end,
+    safetyKey = function()
+        -- Reuse the optionKey list so safetyKey can reference a spec setting.
+        local keys = {}
+        local seen = {}
+        local specID = A._activeSpecID
+        local spec = specID and A.SpecManager and A.SpecManager:GetSpecByID(specID)
+        if spec then
+            if spec.settingDefs then
+                for key in pairs(spec.settingDefs) do
+                    if not seen[key] then seen[key] = true; keys[#keys + 1] = key end
+                end
+            end
+            if spec.uiOptions then
+                for _, opt in ipairs(spec.uiOptions) do
+                    if not seen[opt.key] then seen[opt.key] = true; keys[#keys + 1] = opt.key end
+                end
+            end
+        end
+        table.sort(keys)
+        return #keys > 0 and keys or nil
     end,
     pct = function()
         -- Numeric literals + spec option keys that can be used as dynamic references
@@ -1204,6 +1466,17 @@ local FIELD_DROPDOWNS = {
 
         local specID = A._activeSpecID
         local spec = specID and A.SpecManager and A.SpecManager:GetSpecByID(specID)
+
+        -- Check settingDefs first (keyed dictionary)
+        if spec and spec.settingDefs and spec.settingDefs[optionKey] then
+            local def = spec.settingDefs[optionKey]
+            if def.type == "dropdown" and def.values and #def.values > 0 then
+                return def.values
+            end
+            if def.type == "checkbox" then
+                return { "true", "false" }
+            end
+        end
 
         local function CollectValues(options)
             for _, opt in ipairs(options or {}) do
@@ -1254,6 +1527,9 @@ local function GetCondTypeLabel(typeName)
 end
 
 local PREVIEW_FIELD_LABELS = {
+    buffId        = "Buff ID",
+    debuffId      = "Debuff ID",
+    safetyKey     = "Safety %",
     spellKey      = "Spell",
     spellName     = "Spell Name",
     subject       = "Subject",
@@ -1312,24 +1588,107 @@ end
 
 local function DescribeCondition(cond, activeSpec)
     if type(cond) ~= "table" then
-        return "Unknown"
+        return "?"
     end
 
-    local label = GetCondTypeLabel(cond.type)
-    if cond.type == "any_of" or cond.type == "all_of" then
+    -- Groups: (A OR B) / (A AND B) — no verbose type prefix.
+    if cond.type == "any_of" or cond.type == "any" or cond.type == "or" then
         local parts = {}
         for _, subCond in ipairs(cond.conditions or {}) do
             parts[#parts + 1] = DescribeCondition(subCond, activeSpec)
         end
-        if #parts == 0 then
-            return label
-        end
-        local joiner = (cond.type == "any_of") and " OR " or " AND "
-        return string.format("%s [%s]", label, table.concat(parts, joiner))
-    elseif cond.type == "not" then
-        return string.format("%s (%s)", label, DescribeCondition(cond.condition, activeSpec))
+        if #parts == 0 then return "(empty OR)" end
+        if #parts == 1 then return parts[1] end
+        return "(" .. table.concat(parts, " OR ") .. ")"
     end
 
+    if cond.type == "all_of" or cond.type == "all" or cond.type == "and" then
+        local parts = {}
+        for _, subCond in ipairs(cond.conditions or {}) do
+            parts[#parts + 1] = DescribeCondition(subCond, activeSpec)
+        end
+        if #parts == 0 then return "(empty AND)" end
+        if #parts == 1 then return parts[1] end
+        return "(" .. table.concat(parts, " AND ") .. ")"
+    end
+
+    if cond.type == "not" then
+        return "NOT " .. DescribeCondition(cond.condition or { type = "always" }, activeSpec)
+    end
+
+    -- setting_compare: "optionKey op value"  e.g. "swdWorld = execute"
+    if cond.type == "setting_compare" then
+        local opSym = cond.op or "="
+        if opSym == "==" then opSym = "=" end
+        return tostring(cond.optionKey or "?") .. " " .. opSym .. " "
+               .. FormatPreviewValue("value", cond.value, activeSpec)
+    end
+
+    -- state_compare: "subject op value"  e.g. "player_mana_pct < sfManaThreshold"
+    if cond.type == "state_compare" then
+        local opSym = cond.op or "="
+        if opSym == "==" then opSym = "=" end
+        return tostring(cond.subject or "?") .. " " .. opSym .. " "
+               .. FormatPreviewValue("value", cond.value, activeSpec)
+    end
+
+    -- content_type: "In open world" / "In dungeon" / "In raid"
+    if cond.type == "content_type" then
+        local ct = cond.contentType or "world"
+        local display = (ct == "world") and "open world" or ct
+        return "In " .. display
+    end
+
+    -- predicted_kill (legacy alias) and spell_can_kill_target
+    if cond.type == "predicted_kill" then
+        return "Predicted Kill"
+    end
+    if cond.type == "spell_can_kill_target" then
+        local spellName = cond.spellKey or "spell"
+        if A.SPELLS and A.SPELLS[spellName] then
+            spellName = A.SPELLS[spellName].name or spellName
+        end
+        return spellName .. " can kill target"
+    end
+
+    -- buff_on_player / not_buff_on_player / debuff_on_target / not_debuff_on_target
+    if cond.type == "buff_on_player" then
+        local unit = cond.unit or "player"
+        local name = cond.buff or (cond.buffId and ("ID:" .. tostring(cond.buffId))) or "?"
+        if unit == "player" then
+            return "Has " .. name
+        end
+        return unit .. " has " .. name
+    end
+    if cond.type == "not_buff_on_player" then
+        local unit = cond.unit or "player"
+        local name = cond.buff or (cond.buffId and ("ID:" .. tostring(cond.buffId))) or "?"
+        if unit == "player" then
+            return "Missing " .. name
+        end
+        return unit .. " missing " .. name
+    end
+    if cond.type == "debuff_on_target" then
+        local unit = cond.unit or "target"
+        local name = cond.debuff or (cond.debuffId and ("ID:" .. tostring(cond.debuffId))) or "?"
+        if unit == "target" then
+            return name .. " on target"
+        end
+        return name .. " on " .. unit
+    end
+    if cond.type == "not_debuff_on_target" then
+        local unit = cond.unit or "target"
+        local name = cond.debuff or (cond.debuffId and ("ID:" .. tostring(cond.debuffId))) or "?"
+        if unit == "target" then
+            return "No " .. name .. " on target"
+        end
+        return "No " .. name .. " on " .. unit
+    end
+
+    -- predicted_kill
+
+    -- Generic fallback: label + key fields
+    local label = GetCondTypeLabel(cond.type)
     local details = {}
     for _, field in ipairs({
         "spellKey", "spellName", "subject", "property", "op", "unit", "source",
@@ -1363,195 +1722,365 @@ local function InitEditorData(spec)
     editorDirty = false
 end
 ------------------------------------------------------------------------
--- Advanced Condition Editor Popup
+-- Advanced Condition Editor Popup  (stack-based, recursive)
 ------------------------------------------------------------------------
 local function RebuildCondEditor() end  -- forward declaration
 
-local function CEFieldEditor(parent, cond, field, x, y)
+-- Navigate the ceState.navStack to get the condition at the current depth.
+-- navStack = {} means root (ceState.working.cond).
+-- navStack = {3} means root is a group and we're editing subcondition 3.
+-- navStack = {3, 2} means subcondition 3 is a group and we're in its child 2.
+local function CE_ResolveCond(stack)
+    local cond = ceState.working.cond
+    for _, idx in ipairs(stack or {}) do
+        -- Unwrap NOT wrappers to get to the group's conditions array
+        local inner = cond
+        if inner.type == "not" then inner = inner.condition end
+        if inner and inner.conditions and inner.conditions[idx] then
+            cond = inner.conditions[idx]
+        else
+            return cond  -- safety: bad index
+        end
+    end
+    return cond
+end
+
+-- Get the parent condition and child index for the current nav level.
+-- Returns nil, nil at root level.
+local function CE_GetParentAndIndex()
+    if #ceState.navStack == 0 then return nil, nil end
+    local parentStack = {}
+    for i = 1, #ceState.navStack - 1 do
+        parentStack[i] = ceState.navStack[i]
+    end
+    local parent = CE_ResolveCond(parentStack)
+    local inner = parent
+    if inner.type == "not" then inner = inner.condition end
+    return inner, ceState.navStack[#ceState.navStack]
+end
+
+-- Build a breadcrumb string for the current navigation path.
+local function CE_Breadcrumb()
+    local parts = { "Root" }
+    local cond = ceState.working.cond
+    for depth, idx in ipairs(ceState.navStack) do
+        local inner = cond
+        if inner.type == "not" then inner = inner.condition end
+        if inner and inner.conditions and inner.conditions[idx] then
+            cond = inner.conditions[idx]
+            local label = GetCondTypeLabel(cond.type)
+            parts[#parts + 1] = string.format("#%d %s", idx, label)
+        end
+    end
+    return table.concat(parts, "  >  ")
+end
+
+-- Field editor row: label + scrollable picker (for lists) or edit box.
+local function CEFieldEditor(parent, cond, field, x, y, onChanged)
     local flbl = parent:CreateFontString(nil, "OVERLAY")
     flbl:SetFont(FONT, 9)
     flbl:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y)
     flbl:SetTextColor(0.8, 0.8, 0.8, 1)
     flbl:SetText((PREVIEW_FIELD_LABELS[field] or field) .. ":")
+
     local ddBuilder = FIELD_DROPDOWNS[field]
     local options = ddBuilder and ddBuilder(cond, field) or nil
+
     if ddBuilder and options and #options > 0 then
-        suiDropdownCounter = suiDropdownCounter + 1
-        local fdd = CreateFrame("Frame", "SPHCEFldDD" .. suiDropdownCounter, parent, "UIDropDownMenuTemplate")
-        fdd:SetPoint("LEFT", flbl, "RIGHT", -10, -4)
-        UIDropDownMenu_SetWidth(fdd, 120)
-        UIDropDownMenu_SetText(fdd, tostring(cond[field] or ""))
-        UIDropDownMenu_Initialize(fdd, function(self, level)
+        -- Use a button that opens a scrollable picker (handles long lists)
+        local currentText = GetSpellDropdownText(options, cond[field])
+        local pickBtn = SUIButton(parent, currentText, 220, 16, nil, 0, 0)
+        pickBtn:ClearAllPoints()
+        pickBtn:SetPoint("LEFT", flbl, "RIGHT", 6, 0)
+        pickBtn._label:SetJustifyH("LEFT")
+        pickBtn._label:SetPoint("LEFT", pickBtn, "LEFT", 4, 0)
+        pickBtn._label:SetPoint("RIGHT", pickBtn, "RIGHT", -4, 0)
+        pickBtn:SetScript("OnClick", function(self)
+            local menuItems = {}
             for _, opt in ipairs(options) do
-                local info = UIDropDownMenu_CreateInfo()
                 local optionText = type(opt) == "table" and (opt.text or opt.name or opt.key or opt.value) or tostring(opt)
                 local optionValue = type(opt) == "table" and (opt.value or opt.key or opt.text) or opt
-                info.text = optionText
-                info.value = optionValue
-                info.func = function(s) cond[field] = s.value; UIDropDownMenu_SetText(fdd, GetSpellDropdownText(options, s.value)); CloseDropDownMenus() end
-                info.checked = (optionValue == cond[field])
-                UIDropDownMenu_AddButton(info, level)
+                menuItems[#menuItems + 1] = { text = tostring(optionText), value = optionValue }
             end
+            local selectedValue = cond[field]
+            if type(selectedValue) == "table" then selectedValue = selectedValue.value or selectedValue.key end
+            OpenScrollableListMenu(self, PREVIEW_FIELD_LABELS[field] or field, menuItems, function(value)
+                cond[field] = value
+                pickBtn._label:SetText(GetSpellDropdownText(options, value))
+                if onChanged then onChanged() end
+            end, selectedValue)
         end)
-        UIDropDownMenu_SetText(fdd, GetSpellDropdownText(options, cond[field]))
-        return 30
+        return 24
     else
         local eb = CreateFrame("EditBox", nil, parent, "BackdropTemplate")
-        eb:SetSize(160, 18)
+        eb:SetSize(220, 18)
         eb:SetPoint("LEFT", flbl, "RIGHT", 6, 0)
         eb:SetFont(FONT, 9, ""); eb:SetAutoFocus(false); eb:SetTextColor(1, 1, 1, 1)
         A.CreateBackdrop(eb, 0.1, 0.1, 0.1, 0.8, 0.3, 0.3, 0.3, 0.8)
         eb:SetTextInsets(4, 4, 0, 0)
         eb:SetText(tostring(cond[field] or ""))
-        eb:SetScript("OnEnterPressed", function(s) local v = s:GetText(); cond[field] = tonumber(v) or v; s:ClearFocus() end)
+        eb:SetScript("OnEnterPressed", function(s)
+            local v = s:GetText()
+            cond[field] = tonumber(v) or v
+            if onChanged then onChanged() end
+            s:ClearFocus()
+        end)
         eb:SetScript("OnEscapePressed", function(s) s:ClearFocus() end)
         return 24
     end
 end
 
+-- Hidden frame used as a recycle bin for cleaned-up children.
+local _ceRecycleBin = CreateFrame("Frame"); _ceRecycleBin:Hide()
+
 RebuildCondEditor = function()
     local f = condEditorFrame
     if not f or not ceState.working then return end
     local c = f.ceContent
-    for _, ch in ipairs({c:GetChildren()}) do ch:Hide(); ch:SetParent(nil) end
+    -- Clear content — reparent to hidden bin so they don't eat clicks
+    for _, ch in ipairs({c:GetChildren()}) do ch:Hide(); ch:SetParent(_ceRecycleBin) end
     for _, r in ipairs({c:GetRegions()}) do if r.Hide then r:Hide() end end
+
     local w = ceState.working
-    local ic = w.cond
+    local ic = CE_ResolveCond(ceState.navStack)
+    if not ic then return end
+
+    local isAtRoot = (#ceState.navStack == 0)
+
+    -- Determine NOT state
+    local isNot
+    if isAtRoot then
+        isNot = w.isNot
+    else
+        isNot = (ic.type == "not")
+    end
+    -- The condition we actually edit fields on (unwrap NOT)
+    local editCond = ic
+    if not isAtRoot and isNot then
+        editCond = ic.condition or { type = "always" }
+    end
+
     local y = -8
+
+    -- Breadcrumb
+    local bc = c:CreateFontString(nil, "OVERLAY")
+    bc:SetFont(FONT, 9, "OUTLINE")
+    bc:SetPoint("TOPLEFT", c, "TOPLEFT", 12, y)
+    bc:SetWidth(420)
+    bc:SetJustifyH("LEFT")
+    bc:SetTextColor(0.5, 0.7, 1, 1)
+    bc:SetText(CE_Breadcrumb())
+    y = y - 16
+
+    -- Back button (when not at root)
+    if not isAtRoot then
+        SUIButton(c, "<  Back", 60, 18, function()
+            ceState.navStack[#ceState.navStack] = nil
+            RebuildCondEditor()
+        end, 12, y)
+        y = y - 24
+    end
 
     -- NOT toggle
     SUICheckbox(c, "NOT (negate this condition)",
-        function() return w.isNot end,
-        function(v) w.isNot = v end,
+        function() return isNot end,
+        function(v)
+            if isAtRoot then
+                w.isNot = v
+            else
+                local parent, idx = CE_GetParentAndIndex()
+                if parent and parent.conditions and parent.conditions[idx] then
+                    if v then
+                        -- Wrap in NOT
+                        parent.conditions[idx] = { type = "not", condition = parent.conditions[idx] }
+                    else
+                        -- Unwrap NOT
+                        local wr = parent.conditions[idx]
+                        if wr.type == "not" and wr.condition then
+                            parent.conditions[idx] = wr.condition
+                        end
+                    end
+                end
+            end
+            RebuildCondEditor()
+        end,
         12, y)
     y = y - 26
 
-    -- Type dropdown
+    -- Type selector (button opens scrollable picker)
     local tLbl = c:CreateFontString(nil, "OVERLAY")
     tLbl:SetFont(FONT, 9, "OUTLINE"); tLbl:SetPoint("TOPLEFT", c, "TOPLEFT", 12, y)
     tLbl:SetTextColor(1, 0.82, 0, 1); tLbl:SetText("Type:")
-    suiDropdownCounter = suiDropdownCounter + 1
-    local tdd = CreateFrame("Frame", "SPHCETypDD" .. suiDropdownCounter, c, "UIDropDownMenuTemplate")
-    tdd:SetPoint("LEFT", tLbl, "RIGHT", -10, -4)
-    UIDropDownMenu_SetWidth(tdd, 180)
-    UIDropDownMenu_SetText(tdd, GetCondTypeLabel(ic.type))
-    UIDropDownMenu_Initialize(tdd, function(self, level)
+    local typePickBtn = SUIButton(c, GetCondTypeLabel(editCond.type), 260, 18, nil, 0, 0)
+    typePickBtn:ClearAllPoints()
+    typePickBtn:SetPoint("LEFT", tLbl, "RIGHT", 8, 0)
+    typePickBtn._label:SetJustifyH("LEFT")
+    typePickBtn._label:SetPoint("LEFT", typePickBtn, "LEFT", 6, 0)
+    typePickBtn._label:SetPoint("RIGHT", typePickBtn, "RIGHT", -6, 0)
+    typePickBtn:SetScript("OnClick", function(self)
+        local menuItems = {}
         for _, ct in ipairs(COND_TYPES) do
-            local info = UIDropDownMenu_CreateInfo()
-            info.text = ct.label; info.value = ct.type
-            info.func = function(s)
-                local nc = { type = s.value }
-                if s.value == "any_of" or s.value == "all_of" then nc.conditions = ic.conditions or {} end
-                if s.value == "not" then nc.condition = ic.condition or { type = "always" } end
-                w.cond = nc
-                CloseDropDownMenus()
-                RebuildCondEditor()
-            end
-            info.checked = (ct.type == ic.type)
-            UIDropDownMenu_AddButton(info, level)
+            menuItems[#menuItems + 1] = { text = ct.label, value = ct.type }
         end
+        OpenScrollableListMenu(self, "Condition Type", menuItems, function(value)
+            local nc = { type = value }
+            if value == "any_of" or value == "all_of" then
+                nc.conditions = editCond.conditions or {}
+            end
+            if value == "not" then
+                nc.condition = editCond.condition or { type = "always" }
+            end
+            -- Replace the condition at the current navigation level
+            if isAtRoot then
+                w.cond = nc
+            else
+                local parent, idx = CE_GetParentAndIndex()
+                if parent and parent.conditions then
+                    if isNot then
+                        parent.conditions[idx] = { type = "not", condition = nc }
+                    else
+                        parent.conditions[idx] = nc
+                    end
+                end
+            end
+            RebuildCondEditor()
+        end, editCond.type)
     end)
-    y = y - 38
+    y = y - 28
 
     -- Dynamic fields
-    local ct = COND_TYPES[GetCondTypeIndex(ic.type)]
-    if ct and ct.fields then
+    local ct = COND_TYPES[GetCondTypeIndex(editCond.type)]
+    if ct and ct.fields and #ct.fields > 0 then
         for _, field in ipairs(ct.fields) do
-            y = y - CEFieldEditor(c, ic, field, 16, y)
+            y = y - CEFieldEditor(c, editCond, field, 16, y)
         end
     end
 
-    -- Group subcondition management
-    if ic.type == "any_of" or ic.type == "all_of" then
-        y = y - 6
+    -- Group subconditions (any_of / all_of / any / all / or / and)
+    local isGroup = (editCond.type == "any_of" or editCond.type == "all_of"
+        or editCond.type == "any" or editCond.type == "all"
+        or editCond.type == "or" or editCond.type == "and")
+    if isGroup then
+        y = y - 8
+        local isOr = (editCond.type == "any_of" or editCond.type == "any" or editCond.type == "or")
+        local joiner = isOr and "OR" or "AND"
         local shdr = c:CreateFontString(nil, "OVERLAY")
-        shdr:SetFont(FONT, 10, "OUTLINE"); shdr:SetPoint("TOPLEFT", c, "TOPLEFT", 12, y)
-        shdr:SetTextColor(1, 0.85, 0.4, 1); shdr:SetText("Subconditions:")
+        shdr:SetFont(FONT, 10, "OUTLINE")
+        shdr:SetPoint("TOPLEFT", c, "TOPLEFT", 12, y)
+        shdr:SetTextColor(1, 0.85, 0.4, 1)
+        shdr:SetText("Subconditions  (" .. joiner .. "):")
         y = y - 18
-        local joiner = (ic.type == "any_of") and "OR" or "AND"
-        for si, sub in ipairs(ic.conditions or {}) do
+
+        if not editCond.conditions then editCond.conditions = {} end
+        for si, sub in ipairs(editCond.conditions) do
             if si > 1 then
                 local jl = c:CreateFontString(nil, "OVERLAY")
-                jl:SetFont(FONT, 8, "OUTLINE"); jl:SetPoint("TOPLEFT", c, "TOPLEFT", 24, y)
-                jl:SetTextColor(0.5, 0.8, 1, 1); jl:SetText(joiner)
+                jl:SetFont(FONT, 8, "OUTLINE")
+                jl:SetPoint("TOPLEFT", c, "TOPLEFT", 24, y - 2)
+                jl:SetTextColor(0.5, 0.8, 1, 1)
+                jl:SetText(joiner)
                 y = y - 14
             end
-            -- Sub NOT toggle
-            local subIsNot = (sub.type == "not")
-            local subInner = subIsNot and sub.condition or sub
-            if not subInner then subInner = { type = "always" } end
+
+            -- Description text for subcondition
+            local desc = DescribeCondition(sub, ceState.spec)
+            local descFS = c:CreateFontString(nil, "OVERLAY")
+            descFS:SetFont(FONT, 9)
+            descFS:SetPoint("TOPLEFT", c, "TOPLEFT", 24, y)
+            descFS:SetWidth(280)
+            descFS:SetJustifyH("LEFT")
+            descFS:SetWordWrap(true)
+            descFS:SetTextColor(0.85, 0.85, 0.85, 1)
+            descFS:SetText(desc)
+
+            local textH = descFS:GetStringHeight() or 14
+            local subRowH = math.max(18, math.ceil(textH) + 4)
+
+            -- Edit button — pushes into this subcondition
             local csi = si
-            local sNotCB, sNotLbl = SUICheckbox(c, "NOT",
-                function() return subIsNot end,
-                function(v)
-                    if v then
-                        ic.conditions[csi] = { type = "not", condition = ic.conditions[csi] }
-                    else
-                        local wr = ic.conditions[csi]
-                        if wr.type == "not" and wr.condition then ic.conditions[csi] = wr.condition end
-                    end
+            SUIButton(c, "Edit", 32, 14, function()
+                ceState.navStack[#ceState.navStack + 1] = csi
+                RebuildCondEditor()
+            end, 314, y)
+
+            -- Move Up
+            if si > 1 then
+                SUIButton(c, "^", 16, 14, function()
+                    editCond.conditions[csi], editCond.conditions[csi - 1] =
+                        editCond.conditions[csi - 1], editCond.conditions[csi]
                     RebuildCondEditor()
-                end,
-                20, y)
-            sNotLbl:SetTextColor(1, 0.45, 0.45, 1)
-            -- Sub type dropdown
-            suiDropdownCounter = suiDropdownCounter + 1
-            local sd = CreateFrame("Frame", "SPHCESubDD" .. suiDropdownCounter, c, "UIDropDownMenuTemplate")
-            sd:SetPoint("TOPLEFT", c, "TOPLEFT", 72, y - 4)
-            UIDropDownMenu_SetWidth(sd, 130)
-            UIDropDownMenu_SetText(sd, GetCondTypeLabel(subInner.type))
-            UIDropDownMenu_Initialize(sd, function(self, level)
-                for _, ct2 in ipairs(COND_TYPES) do
-                    local info = UIDropDownMenu_CreateInfo()
-                    info.text = ct2.label; info.value = ct2.type
-                    info.func = function(s)
-                        local newSub = { type = s.value }
-                        if subIsNot then
-                            ic.conditions[csi] = { type = "not", condition = newSub }
-                        else
-                            ic.conditions[csi] = newSub
-                        end
-                        CloseDropDownMenus(); RebuildCondEditor()
-                    end
-                    info.checked = (ct2.type == subInner.type)
-                    UIDropDownMenu_AddButton(info, level)
-                end
-            end)
-            -- Sub fields
-            local sct = COND_TYPES[GetCondTypeIndex(subInner.type)]
-            local sfx = 250
-            if sct and sct.fields then
-                for _, sf in ipairs(sct.fields) do
-                    local sfl = c:CreateFontString(nil, "OVERLAY")
-                    sfl:SetFont(FONT, 8); sfl:SetPoint("TOPLEFT", c, "TOPLEFT", sfx, y)
-                    sfl:SetTextColor(0.6, 0.6, 0.6, 1); sfl:SetText(sf .. ":")
-                    local seb = CreateFrame("EditBox", nil, c, "BackdropTemplate")
-                    seb:SetSize(60, 16); seb:SetPoint("LEFT", sfl, "RIGHT", 4, 0)
-                    seb:SetFont(FONT, 9, ""); seb:SetAutoFocus(false); seb:SetTextColor(1, 1, 1, 1)
-                    A.CreateBackdrop(seb, 0.1, 0.1, 0.1, 0.8, 0.3, 0.3, 0.3, 0.8)
-                    seb:SetTextInsets(4, 4, 0, 0); seb:SetText(tostring(subInner[sf] or ""))
-                    local csub, csf = subInner, sf
-                    seb:SetScript("OnEnterPressed", function(s) local v = s:GetText(); csub[csf] = tonumber(v) or v; s:ClearFocus() end)
-                    seb:SetScript("OnEscapePressed", function(s) s:ClearFocus() end)
-                    sfx = sfx + 100
-                end
+                end, 350, y)
             end
+            -- Move Down
+            if si < #editCond.conditions then
+                SUIButton(c, "v", 16, 14, function()
+                    editCond.conditions[csi], editCond.conditions[csi + 1] =
+                        editCond.conditions[csi + 1], editCond.conditions[csi]
+                    RebuildCondEditor()
+                end, 370, y)
+            end
+
             -- Remove sub
             local sr = CreateFrame("Button", nil, c, "BackdropTemplate")
-            sr:SetSize(16, 14); sr:SetPoint("TOPLEFT", c, "TOPLEFT", 410, y)
+            sr:SetSize(16, 14)
+            sr:SetPoint("TOPLEFT", c, "TOPLEFT", 392, y)
             A.CreateBackdrop(sr, 0.4, 0.1, 0.1, 0.9, 0.5, 0.2, 0.2, 1)
             local srl = sr:CreateFontString(nil, "OVERLAY")
             srl:SetFont(FONT, 9, "OUTLINE"); srl:SetPoint("CENTER"); srl:SetText("x")
-            local csi2 = si
-            sr:SetScript("OnClick", function() table.remove(ic.conditions, csi2); RebuildCondEditor() end)
-            y = y - 26
+            sr:SetScript("OnClick", function()
+                table.remove(editCond.conditions, csi)
+                RebuildCondEditor()
+            end)
+
+            y = y - subRowH
         end
-        SUIButton(c, "+ Add Subcondition", 120, 16, function()
-            if not ic.conditions then ic.conditions = {} end
-            ic.conditions[#ic.conditions + 1] = { type = "always" }
+
+        -- Add subcondition button
+        SUIButton(c, "+ Add Subcondition", 130, 16, function()
+            editCond.conditions[#editCond.conditions + 1] = { type = "always" }
             RebuildCondEditor()
         end, 24, y)
         y = y - 22
+    end
+
+    -- Wrap buttons (only at root or for non-group conditions)
+    if not isGroup then
+        y = y - 8
+        local wx = 12
+        SUIButton(c, "Wrap in OR Group", 120, 18, function()
+            local nc = { type = "any_of", conditions = { DeepCopy(editCond) } }
+            if isAtRoot then
+                w.cond = nc
+            else
+                local parent, idx = CE_GetParentAndIndex()
+                if parent and parent.conditions then
+                    if isNot then
+                        parent.conditions[idx] = { type = "not", condition = nc }
+                    else
+                        parent.conditions[idx] = nc
+                    end
+                end
+            end
+            RebuildCondEditor()
+        end, wx, y)
+        wx = wx + 128
+        SUIButton(c, "Wrap in AND Group", 120, 18, function()
+            local nc = { type = "all_of", conditions = { DeepCopy(editCond) } }
+            if isAtRoot then
+                w.cond = nc
+            else
+                local parent, idx = CE_GetParentAndIndex()
+                if parent and parent.conditions then
+                    if isNot then
+                        parent.conditions[idx] = { type = "not", condition = nc }
+                    else
+                        parent.conditions[idx] = nc
+                    end
+                end
+            end
+            RebuildCondEditor()
+        end, wx, y)
+        y = y - 24
     end
 
     c:SetHeight(math.abs(y) + 20)
@@ -1564,18 +2093,20 @@ local function OpenConditionEditor(entryIdx, condIdx, spec)
     ceState.entryIdx = entryIdx
     ceState.condIdx = condIdx
     ceState.spec = spec
+    ceState.navStack = {}
     ceState.working = {
         isNot = isNot,
         cond = DeepCopy(isNot and cond.condition or cond),
     }
     if not condEditorFrame then
         local f = CreateFrame("Frame", "SPHCondEditor", UIParent, "BackdropTemplate")
-        f:SetSize(480, 420)
+        f:SetSize(480, 460)
         f:SetPoint("CENTER"); f:SetMovable(true); f:EnableMouse(true)
         f:RegisterForDrag("LeftButton")
         f:SetScript("OnDragStart", function(s) s:StartMoving() end)
         f:SetScript("OnDragStop", function(s) s:StopMovingOrSizing() end)
         f:SetFrameStrata("FULLSCREEN_DIALOG"); f:SetToplevel(true)
+        f:SetClampedToScreen(true)
         A.CreateBackdrop(f, 0.10, 0.10, 0.16, 0.98, 0.3, 0.25, 0.4, 1)
         condEditorFrame = f
         local t = f:CreateFontString(nil, "OVERLAY")
@@ -1585,173 +2116,72 @@ local function OpenConditionEditor(entryIdx, condIdx, spec)
         closeBtn:SetSize(20, 20); closeBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -6, -6)
         local xl = closeBtn:CreateFontString(nil, "OVERLAY")
         xl:SetFont(FONT, 12, "OUTLINE"); xl:SetPoint("CENTER"); xl:SetText("X")
-        closeBtn:SetScript("OnClick", function() f:Hide() end)
+        closeBtn:SetScript("OnClick", function()
+            CloseActiveScrollMenu()
+            f:Hide()
+        end)
+        -- Also close any open picker when the editor hides (e.g. Save/Cancel).
+        f:SetScript("OnHide", function() CloseActiveScrollMenu() end)
         local sc = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
         sc:SetPoint("TOPLEFT", f, "TOPLEFT", 8, -28)
         sc:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -28, 44)
         local co = CreateFrame("Frame", nil, sc)
-        co:SetSize(430, 600); sc:SetScrollChild(co)
+        co:SetSize(430, 800)
+        sc:SetScrollChild(co)
+        -- Raise scroll child so its children are above the backdrop
+        co:SetFrameLevel(sc:GetFrameLevel() + 2)
+        f.ceScroll = sc
         f.ceContent = co
-        -- Bottom buttons
-        local sv = SUIButton(f, "Save", 70, 22, function()
+        -- Bottom buttons: Save / Cancel
+        local sv = SUIButton(f, "Save", 80, 22, function()
             local w = ceState.working; if not w then return end
             local result = w.isNot and { type = "not", condition = w.cond } or w.cond
             editorData[ceState.entryIdx].conditions[ceState.condIdx] = result
-            editorDirty = true; if editorRefreshFn then editorRefreshFn() end; f:Hide()
-        end, 0, 0); sv:ClearAllPoints(); sv:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 16, 12)
-        local cn = SUIButton(f, "Cancel", 70, 22, function() f:Hide() end, 0, 0)
-        cn:ClearAllPoints(); cn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 96, 12)
-        local wo = SUIButton(f, "Wrap OR", 70, 22, function()
-            local w = ceState.working; if not w then return end
-            if w.cond.type ~= "any_of" and w.cond.type ~= "all_of" then
-                w.cond = { type = "any_of", conditions = { w.cond } }; RebuildCondEditor()
-            end
-        end, 0, 0); wo:ClearAllPoints(); wo:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 176, 12)
-        local wa = SUIButton(f, "Wrap AND", 78, 22, function()
-            local w = ceState.working; if not w then return end
-            if w.cond.type ~= "any_of" and w.cond.type ~= "all_of" then
-                w.cond = { type = "all_of", conditions = { w.cond } }; RebuildCondEditor()
-            end
-        end, 0, 0); wa:ClearAllPoints(); wa:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 256, 12)
+            editorDirty = true
+            if editorRefreshFn then editorRefreshFn() end
+            f:Hide()
+        end, 0, 0)
+        sv:ClearAllPoints(); sv:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 16, 12)
+        local cn = SUIButton(f, "Cancel", 80, 22, function() f:Hide() end, 0, 0)
+        cn:ClearAllPoints(); cn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 106, 12)
+    end
+    -- Reset scroll position on each open
+    if condEditorFrame.ceScroll then
+        condEditorFrame.ceScroll:SetVerticalScroll(0)
     end
     RebuildCondEditor()
     condEditorFrame:Show()
 end
 
 ------------------------------------------------------------------------
--- Condition row builder (enhanced with NOT toggle, Edit button,
--- AND/OR labels, and parenthesised group display)
+-- Condition row builder — shows a concise description with Edit + x.
+-- Editing is done in the condition editor popup (OpenConditionEditor).
 ------------------------------------------------------------------------
 local function BuildConditionRow(parent, cond, idx, entryIdx, y, spec)
-    local isNot = (cond.type == "not")
-    local innerCond = isNot and cond.condition or cond
-    if not innerCond then innerCond = { type = "always" } end
-    local isGroup = (innerCond.type == "any_of" or innerCond.type == "all_of")
+    -- Description text (full recursive description via DescribeCondition)
+    local desc = DescribeCondition(cond, spec)
+    local descFS = parent:CreateFontString(nil, "OVERLAY")
+    descFS:SetFont(FONT, 9)
+    descFS:SetPoint("TOPLEFT", parent, "TOPLEFT", 36, y)
+    descFS:SetWidth(390)
+    descFS:SetJustifyH("LEFT")
+    descFS:SetWordWrap(true)
+    descFS:SetTextColor(0.85, 0.85, 0.85, 1)
+    descFS:SetText(desc)
 
-    -- NOT toggle checkbox
-    local notCB = CreateFrame("CheckButton", nil, parent)
-    notCB:SetSize(14, 14)
-    notCB:SetPoint("TOPLEFT", parent, "TOPLEFT", 30, y + 1)
-    notCB:SetNormalTexture("Interface\\Buttons\\UI-CheckBox-Up")
-    notCB:SetPushedTexture("Interface\\Buttons\\UI-CheckBox-Down")
-    notCB:SetHighlightTexture("Interface\\Buttons\\UI-CheckBox-Highlight", "ADD")
-    notCB:SetCheckedTexture("Interface\\Buttons\\UI-CheckBox-Check")
-    notCB:SetChecked(isNot)
-    local notLbl = parent:CreateFontString(nil, "OVERLAY")
-    notLbl:SetFont(FONT, 8)
-    notLbl:SetPoint("LEFT", notCB, "RIGHT", 0, 0)
-    notLbl:SetTextColor(1, 0.45, 0.45, 1)
-    notLbl:SetText("NOT")
-    notCB:SetScript("OnClick", function(self)
-        if self:GetChecked() then
-            local orig = editorData[entryIdx].conditions[idx]
-            editorData[entryIdx].conditions[idx] = { type = "not", condition = orig }
-        else
-            local wrapped = editorData[entryIdx].conditions[idx]
-            if wrapped.type == "not" and wrapped.condition then
-                editorData[entryIdx].conditions[idx] = wrapped.condition
-            end
-        end
-        editorDirty = true
-        if editorRefreshFn then editorRefreshFn() end
-    end)
+    -- Compute row height from text
+    local textHeight = descFS:GetStringHeight() or 14
+    local rowHeight = math.max(20, math.ceil(textHeight) + 6)
 
-    -- Type dropdown (operates on innerCond)
-    suiDropdownCounter = suiDropdownCounter + 1
-    local ddName = "SPHRotCondDD" .. suiDropdownCounter
-    local dd = CreateFrame("Frame", ddName, parent, "UIDropDownMenuTemplate")
-    dd:SetPoint("TOPLEFT", parent, "TOPLEFT", 76, y - 4)
-    UIDropDownMenu_SetWidth(dd, 130)
-    UIDropDownMenu_SetText(dd, GetCondTypeLabel(innerCond.type))
-    UIDropDownMenu_Initialize(dd, function(self, level)
-        for ci, ct in ipairs(COND_TYPES) do
-            local info = UIDropDownMenu_CreateInfo()
-            info.text    = ct.label
-            info.value   = ct.type
-            info.func    = function(self2)
-                local keep = { type = true, conditions = true, condition = true }
-                for k in pairs(innerCond) do if not keep[k] then innerCond[k] = nil end end
-                innerCond.type = self2.value
-                UIDropDownMenu_SetText(dd, ct.label)
-                CloseDropDownMenus()
-                editorDirty = true
-                if editorRefreshFn then editorRefreshFn() end
-            end
-            info.checked = (ct.type == innerCond.type)
-            UIDropDownMenu_AddButton(info, level)
-        end
-    end)
-
-    -- Field controls inline (non-group types)
-    local ct = COND_TYPES[GetCondTypeIndex(innerCond.type)]
-    local fx = 240
-    if not isGroup and ct and ct.fields then
-        for _, field in ipairs(ct.fields) do
-            local flbl = parent:CreateFontString(nil, "OVERLAY")
-            flbl:SetFont(FONT, 8)
-            flbl:SetPoint("TOPLEFT", parent, "TOPLEFT", fx, y)
-            flbl:SetTextColor(0.6, 0.6, 0.6, 1)
-            flbl:SetText(field .. ":")
-            local ddBuilder = FIELD_DROPDOWNS[field]
-            local options = ddBuilder and ddBuilder(innerCond, field) or nil
-            if ddBuilder and options and #options > 0 then
-                suiDropdownCounter = suiDropdownCounter + 1
-                local fdName = "SPHCondFieldDD" .. suiDropdownCounter
-                local fdd = CreateFrame("Frame", fdName, parent, "UIDropDownMenuTemplate")
-                fdd:SetPoint("LEFT", flbl, "RIGHT", -14, -4)
-                UIDropDownMenu_SetWidth(fdd, 70)
-                UIDropDownMenu_SetText(fdd, tostring(innerCond[field] or ""))
-                UIDropDownMenu_Initialize(fdd, function(self2, level)
-                    for _, opt in ipairs(options) do
-                        local info = UIDropDownMenu_CreateInfo()
-                        local optionText = type(opt) == "table" and (opt.text or opt.name or opt.key or opt.value) or tostring(opt)
-                        local optionValue = type(opt) == "table" and (opt.value or opt.key or opt.text) or opt
-                        info.text  = optionText
-                        info.value = optionValue
-                        info.func  = function(self3)
-                            innerCond[field] = self3.value
-                            UIDropDownMenu_SetText(fdd, GetSpellDropdownText(options, self3.value))
-                            CloseDropDownMenus()
-                            editorDirty = true
-                        end
-                        info.checked = (optionValue == innerCond[field])
-                        UIDropDownMenu_AddButton(info, level)
-                    end
-                end)
-                UIDropDownMenu_SetText(fdd, GetSpellDropdownText(options, innerCond[field]))
-                fx = fx + 130
-            else
-                local eb = CreateFrame("EditBox", nil, parent, "BackdropTemplate")
-                eb:SetSize(60, 16)
-                eb:SetPoint("LEFT", flbl, "RIGHT", 4, 0)
-                eb:SetFont(FONT, 9, "")
-                eb:SetAutoFocus(false)
-                eb:SetTextColor(1, 1, 1, 1)
-                A.CreateBackdrop(eb, 0.1, 0.1, 0.1, 0.8, 0.3, 0.3, 0.3, 0.8)
-                eb:SetTextInsets(4, 4, 0, 0)
-                eb:SetText(tostring(innerCond[field] or ""))
-                eb:SetScript("OnEnterPressed", function(self)
-                    local val = self:GetText()
-                    local num = tonumber(val)
-                    innerCond[field] = num or val
-                    editorDirty = true
-                    self:ClearFocus()
-                end)
-                eb:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
-                fx = fx + 100
-            end
-        end
-    end
-
-    -- Edit button (opens advanced popup)
-    SUIButton(parent, "Edit", 30, 14, function()
+    -- Edit button (opens condition editor popup)
+    SUIButton(parent, "Edit", 32, 14, function()
         OpenConditionEditor(entryIdx, idx, spec)
-    end, fx + 4, y)
+    end, 432, y)
 
     -- Remove button
     local rem = CreateFrame("Button", nil, parent, "BackdropTemplate")
     rem:SetSize(16, 14)
-    rem:SetPoint("TOPLEFT", parent, "TOPLEFT", fx + 40, y)
+    rem:SetPoint("TOPLEFT", parent, "TOPLEFT", 468, y)
     A.CreateBackdrop(rem, 0.4, 0.1, 0.1, 0.9, 0.5, 0.2, 0.2, 1)
     local rl = rem:CreateFontString(nil, "OVERLAY")
     rl:SetFont(FONT, 9, "OUTLINE")
@@ -1762,44 +2192,6 @@ local function BuildConditionRow(parent, cond, idx, entryIdx, y, spec)
         editorDirty = true
         if editorRefreshFn then editorRefreshFn() end
     end)
-
-    local rowHeight = 24
-
-    -- Group display with parentheses and OR/AND between subconditions
-    if isGroup then
-        local subConds = innerCond.conditions or {}
-        local joiner = (innerCond.type == "any_of") and "OR" or "AND"
-        local pOpen = parent:CreateFontString(nil, "OVERLAY")
-        pOpen:SetFont(FONT, 10, "OUTLINE")
-        pOpen:SetPoint("TOPLEFT", parent, "TOPLEFT", 240, y)
-        pOpen:SetTextColor(0.6, 0.8, 1, 1)
-        pOpen:SetText("(")
-        for si, sub in ipairs(subConds) do
-            if si > 1 then
-                local jl = parent:CreateFontString(nil, "OVERLAY")
-                jl:SetFont(FONT, 8, "OUTLINE")
-                jl:SetPoint("TOPLEFT", parent, "TOPLEFT", 250, y - rowHeight)
-                jl:SetTextColor(0.5, 0.8, 1, 1)
-                jl:SetText(joiner)
-                rowHeight = rowHeight + 12
-            end
-            local sd = DescribeCondition(sub, spec)
-            local sl = parent:CreateFontString(nil, "OVERLAY")
-            sl:SetFont(FONT, 8)
-            sl:SetPoint("TOPLEFT", parent, "TOPLEFT", 256, y - rowHeight)
-            sl:SetWidth(200)
-            sl:SetJustifyH("LEFT")
-            sl:SetTextColor(0.75, 0.75, 0.75, 1)
-            sl:SetText(sd)
-            rowHeight = rowHeight + 14
-        end
-        local pCl = parent:CreateFontString(nil, "OVERLAY")
-        pCl:SetFont(FONT, 10, "OUTLINE")
-        pCl:SetPoint("TOPLEFT", parent, "TOPLEFT", 240, y - rowHeight)
-        pCl:SetTextColor(0.6, 0.8, 1, 1)
-        pCl:SetText(")")
-        rowHeight = rowHeight + 4
-    end
 
     return rowHeight
 end
@@ -1847,6 +2239,9 @@ local function BuildRotationTab(container, spec)
         end
         -- Build lookup of existing keys (spec file + custom)
         local existingKeys = {}
+        if spec.settingDefs then
+            for key in pairs(spec.settingDefs) do existingKeys[key] = true end
+        end
         for _, opt in ipairs(spec.uiOptions or {}) do existingKeys[opt.key] = true end
         local custOpts = A.db.specs[editorSpecID] and A.db.specs[editorSpecID].customOptions or {}
         for _, opt in ipairs(custOpts) do existingKeys[opt.key] = true end
@@ -1952,13 +2347,14 @@ local function BuildRotationTab(container, spec)
             local menuItems = {}
             local spellEntries = (A.SpellData and A.SpellData.GetSpellKeysForEditor and A.SpellData:GetSpellKeysForEditor(spec.meta.class)) or {}
             for _, spellEntry in ipairs(spellEntries) do
-                local displayText = spellEntry.name or spellEntry.key
+                local displayText = spellEntry.resolvedName or spellEntry.name or spellEntry.key
                 if spellEntry.resolvedName and spellEntry.resolvedName ~= spellEntry.name then
                     displayText = string.format("%s (%s)", spellEntry.name, spellEntry.resolvedName)
                 end
+                local spellValue = spellEntry.resolvedName or spellEntry.name or spellEntry.key
                 local item = {
                     text = displayText,
-                    value = spellEntry.key,
+                    value = spellValue,
                 }
                 if A.SpellData then
                     local tip = A.SpellData:GetSpellTooltipText(spellEntry.id or spellEntry.baseId)
@@ -1972,12 +2368,13 @@ local function BuildRotationTab(container, spec)
             table.sort(menuItems, function(a, b)
                 return tostring(a.text) < tostring(b.text)
             end)
+            local selectedSpellValue = NormalizeSpellValue(entry.key)
             OpenScrollableListMenu(spellPickBtn, "Pick Ability", menuItems, function(value)
                 entry.key = value
                 keyEB:SetText(value)
                 editorDirty = true
                 if editorRefreshFn then editorRefreshFn() end
-            end, entry.key)
+            end, selectedSpellValue)
         end, 0, 0)  -- position will be anchored
         spellPickBtn:ClearAllPoints()
         spellPickBtn:SetPoint("LEFT", keyEB, "RIGHT", 2, 0)
@@ -2471,11 +2868,11 @@ local function BuildPreviewTab(container, spec)
         end
         -- DoT timers (only show ones used in rotation)
         local dotLines = {}
-        if usesDot["VT"] then dotLines[#dotLines + 1] = string.format("VT:%.1fs", ctx.vtRem) end
-        if usesDot["SWP"] then dotLines[#dotLines + 1] = string.format("SWP:%.1fs", ctx.swpRem) end
+        if usesDot["Vampiric Touch"] then dotLines[#dotLines + 1] = string.format("VT:%.1fs", ctx.vtRem) end
+        if usesDot["Shadow Word: Pain"] then dotLines[#dotLines + 1] = string.format("SWP:%.1fs", ctx.swpRem) end
         -- Generic debuffs
         for dkey in pairs(usesDot) do
-            if dkey ~= "VT" and dkey ~= "SWP" and dkey ~= "?" then
+            if dkey ~= "Vampiric Touch" and dkey ~= "Shadow Word: Pain" and dkey ~= "?" then
                 local debuffName = dkey
                 -- Try resolve from A.SPELLS
                 if A.SPELLS[dkey] then debuffName = A.SPELLS[dkey].name end
@@ -2550,8 +2947,20 @@ local function BuildPreviewTab(container, spec)
                 elseif entryDiag.status == "unknown_spell" then
                     status = "|cff888888UNKNOWN SPELL|r"
                 end
-                lines[#lines + 1] = string.format("  [%d] %s  %s  { %s }",
-                    i, entry.key, status, table.concat(condStrs, ", "))
+                -- Render the entry across multiple lines: header line with
+                -- spell name and status, followed by one indented line per
+                -- condition. Long conditions wrap inside the FontString's
+                -- 560px width, and the leading "      |  " indent + the
+                -- FontString's natural wrap visually groups continuations
+                -- under the originating condition.
+                lines[#lines + 1] = string.format("  [%d] %s  %s", i, entry.key, status)
+                if #condStrs > 0 then
+                    for _, c in ipairs(condStrs) do
+                        lines[#lines + 1] = "      |  " .. c
+                    end
+                else
+                    lines[#lines + 1] = "      |  (no conditions)"
+                end
             end
         else
             lines[#lines + 1] = "No rotation data."
@@ -3172,12 +3581,17 @@ local function BuildLoadConditionsTab(container, spec)
         -- Talent tab: allow selecting by name (map back to numeric tab index)
         if talentTabValue and talentTabValue ~= "(any)" then
             local chosen = talentTabValue
-            local chosenIndex = tonumber(chosen)
+            -- Labels are formatted as "N: Name" — extract the leading number first.
+            local chosenIndex = tonumber(chosen:match("^%s*(%d+)"))
+            -- Fallback: bare numeric string
+            if not chosenIndex then chosenIndex = tonumber(chosen) end
+            -- Fallback: match by tree name (strip leading "N: " prefix for comparison)
             if not chosenIndex then
                 local numTabs = GetNumTalentTabs and GetNumTalentTabs() or 3
+                local chosenName = (chosen:match("^%s*%d+%s*:%s*(.+)$") or chosen):lower()
                 for t = 1, numTabs do
                     local name = select(1, GetTalentTabInfo(t)) or tostring(t)
-                    if name == chosen or (type(chosen) == "string" and name and chosen and name:lower() == chosen:lower()) then
+                    if name and name:lower() == chosenName then
                         chosenIndex = t
                         break
                     end
@@ -3405,8 +3819,11 @@ function SUI:Open(specID)
 
     -- Reuse or create the window
     if self.frame then
+        local prevID = self._spec and self._spec.meta and self._spec.meta.id
         self._spec = spec
-        editorData = nil  -- reset rotation editor for new spec
+        if prevID ~= spec.meta.id then
+            editorData = nil  -- reset editor only when switching to a different spec
+        end
         self.frame:Show()
         -- Update title
         if self._title then
@@ -3588,7 +4005,23 @@ function SUI:SwitchTab(idx, spec, preserveScroll)
     -- Reset ticker
     if previewTicker then previewTicker:Cancel(); previewTicker = nil end
 
+    -- Always clear the cross-tab refresh functions before rebuilding.
+    generalRefreshFn = nil
+    if idx ~= 2 then editorRefreshFn = nil end
+
     if idx == 1 then
+        -- Keep a live-refresh handle so anything that mutates the rotation
+        -- (e.g. the Config Creator save, a future inline edit) can call
+        -- generalRefreshFn() to rebuild the General tab without a /reload.
+        local function RebuildGeneral()
+            local kids = { content:GetChildren() }
+            for _, c in ipairs(kids) do c:Hide(); c:SetParent(nil) end
+            local regions = { content:GetRegions() }
+            for _, r in ipairs(regions) do if r.Hide then r:Hide() end end
+            content:SetHeight(400)
+            BuildGeneralTab(content, spec)
+        end
+        generalRefreshFn = RebuildGeneral
         BuildGeneralTab(content, spec)
     elseif idx == 2 then
         editorRefreshFn = function()

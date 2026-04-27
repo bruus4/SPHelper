@@ -86,6 +86,15 @@ SV.ALLOWED_CONDITION_TYPES = {
     any_of                      = true,
     all_of                      = true,
     ["not"]                    = true,
+    -- Aliases for logical grouping
+    any                         = true,
+    all                         = true,
+    ["or"]                     = true,
+    ["and"]                    = true,
+    -- Composable setting comparison
+    setting_compare             = true,
+    -- Kill-prediction condition
+    spell_can_kill_target       = true,
 }
 
 ------------------------------------------------------------------------

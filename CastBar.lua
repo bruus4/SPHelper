@@ -33,6 +33,10 @@ function A:InitCastBar()
 
     A.CreateBackdrop(f)
     A.castBarFrame = f
+    if A.RegisterMovableFrame then
+        A.RegisterMovableFrame(f, "castBar",
+            { point = "CENTER", relPoint = "CENTER", x = 0, y = -180 })
+    end
 
     ----------------------------------------------------------------
     -- Status bar

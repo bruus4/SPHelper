@@ -120,24 +120,53 @@ function A.UpdateTargetHealthSample(guid, hpPct, now)
             lastTime = now,
             rate = 0,
             ttd = nil,
-            alpha = 0.25,
+            -- Sliding-window samples used to compute the smoothed HP-loss
+            -- rate. A simple ring of {t, hp} entries trimmed to `windowSec`
+            -- seconds. This avoids the spikes an EWMA produces every time a
+            -- DoT tick lands (which used to cause TTD-gated suggestions like
+            -- SWP/VT to flicker on/off in sync with the tick rhythm).
+            samples = { { t = now, hp = hpPct } },
+            windowSec = 6,
         }
         A._targetMetrics[guid] = rec
         return nil
     end
 
-    local dt = rec.lastTime and (now - rec.lastTime) or 0
-    if dt > 0.1 then
-        local instantRate = (rec.lastHP - hpPct) / dt
-        rec.rate = (rec.alpha * instantRate) + ((1 - rec.alpha) * (rec.rate or 0))
-        if rec.rate < 0 then
-            rec.rate = 0
-        end
-        rec.lastHP = hpPct
-        rec.lastTime = now
+    -- Append a sample at most every 0.1s to keep the ring small.
+    local lastSample = rec.samples[#rec.samples]
+    if not lastSample or (now - lastSample.t) >= 0.1 then
+        rec.samples[#rec.samples + 1] = { t = now, hp = hpPct }
+    else
+        -- Update the last sample in-place so the most recent HP is current.
+        lastSample.hp = hpPct
+        lastSample.t = now
     end
 
+    -- Drop samples older than the window so the rate reflects recent
+    -- combat only and recovers quickly when DPS changes.
+    local cutoff = now - (rec.windowSec or 6)
+    while rec.samples[1] and rec.samples[1].t < cutoff do
+        table.remove(rec.samples, 1)
+    end
+
+    -- Smoothed rate: total HP lost / total time across the window. A DoT
+    -- tick adds the same per-second contribution whether we sample on the
+    -- tick or between ticks, so the result no longer pulses with each tick.
+    local first = rec.samples[1]
+    if first and (now - first.t) >= 0.5 then
+        local span = now - first.t
+        local lost = first.hp - hpPct
+        if lost < 0 then lost = 0 end
+        if span > 0.001 then
+            rec.rate = lost / span
+        end
+    end
+    if rec.rate < 0 then rec.rate = 0 end
+
+    rec.lastHP = hpPct
+    rec.lastTime = now
     rec.hpPct = hpPct
+
     if hpPct <= 0 then
         rec.ttd = 0
     elseif rec.rate and rec.rate > 0.0001 then
@@ -477,6 +506,33 @@ function A.GetSpellPower()
     return 0
 end
 
+-- Return the raw power stat relevant for a given schoolMask.
+-- For magical schools: GetSpellBonusDamage(school index).
+-- For physical (schoolMask == 1): net attack power from UnitAttackPower.
+-- Falls back to GetSpellPower() for unknown masks.
+--   schoolMask: 1=Physical, 2=Holy, 4=Fire, 8=Nature,
+--               16=Frost, 32=Shadow, 64=Arcane
+local _SCHOOL_INDEX = { [2]=2, [4]=3, [8]=4, [16]=5, [32]=6, [64]=7 }
+function A.GetSchoolPower(schoolMask)
+    if schoolMask == 1 then
+        -- Physical: attack power (base + positive buff + negative buff).
+        if type(UnitAttackPower) == "function" then
+            local ok, base, pos, neg = pcall(UnitAttackPower, "player")
+            if ok and base then
+                return (base or 0) + (pos or 0) + (neg or 0)
+            end
+        end
+        return 0
+    end
+    local idx = _SCHOOL_INDEX[schoolMask]
+    if idx and type(GetSpellBonusDamage) == "function" then
+        local ok, v = pcall(GetSpellBonusDamage, idx)
+        return (ok and v) and v or 0
+    end
+    -- Unknown mask (e.g. multi-school) — fall back to highest school SP.
+    return A.GetSpellPower()
+end
+
 -- Return player's haste percent and multiplier.
 -- For TBC Anniversary (modern client) we rely on `UnitSpellHaste` only.
 -- Caller receives: hastePercent (number), hasteMultiplier (1 + percent/100)
@@ -625,6 +681,56 @@ function A.CreateBackdrop(frame, r, g, b, a, borderR, borderG, borderB, borderA)
     })
     frame:SetBackdropColor(r, g, b, a)
     frame:SetBackdropBorderColor(borderR, borderG, borderB, borderA)
+end
+
+------------------------------------------------------------------------
+-- Persistent frame positioning
+--
+-- A.RegisterMovableFrame(frame, key, defaultPoint)
+--
+--   Saves point/relativePoint/x/y to A.db.framePositions[key] on
+--   OnDragStop and restores them at registration time. Survives /reload
+--   and replaces the original SetPoint() default if a saved value exists.
+--
+--   `defaultPoint` is a table { point, relPoint, x, y } used the first
+--   time the frame is shown. Frames must already have :SetMovable(true),
+--   :EnableMouse(true), and :RegisterForDrag("LeftButton") configured.
+------------------------------------------------------------------------
+function A.RegisterMovableFrame(frame, key, defaultPoint)
+    if not frame or not key then return end
+
+    A.db = A.db or {}
+    A.db.framePositions = A.db.framePositions or {}
+
+    local saved = A.db.framePositions[key]
+    local function ApplyPoint(p)
+        if not p then return end
+        frame:ClearAllPoints()
+        frame:SetPoint(p.point or "CENTER", UIParent, p.relPoint or p.point or "CENTER", p.x or 0, p.y or 0)
+    end
+
+    if saved and saved.point then
+        ApplyPoint(saved)
+    elseif defaultPoint then
+        ApplyPoint(defaultPoint)
+    end
+
+    -- Hook OnDragStop without clobbering an existing handler the frame
+    -- may already define for visual / lock checks.
+    local prevStop = frame:GetScript("OnDragStop")
+    frame:SetScript("OnDragStop", function(self, ...)
+        self:StopMovingOrSizing()
+        local point, _, relPoint, x, y = self:GetPoint()
+        A.db.framePositions = A.db.framePositions or {}
+        A.db.framePositions[key] = {
+            point = point, relPoint = relPoint, x = x, y = y,
+        }
+        if prevStop and prevStop ~= self.StopMovingOrSizing then
+            -- Run any extra handler the caller had registered.
+            local ok, err = pcall(prevStop, self, ...)
+            if not ok then A.DebugLog("ERR", "RegisterMovableFrame stop hook: " .. tostring(err)) end
+        end
+    end)
 end
 
 ------------------------------------------------------------------------
@@ -799,6 +905,8 @@ A.defaults = {
                     warnBorderSize = 4, warnBarAlpha = 0.35, warnIconAlpha = 0.6, newTargetPosition = "bottom", anchorPosition = "top", sortMode = "addOrder" },
     rotation    = { enabled = true, iconSize = 40, primaryIconSize = 40 },
     debug       = { echo = false, bufferSize = 200, modules = {} },
+    -- Per-frame saved positions (point/relPoint/x/y) keyed by frame name.
+    framePositions = {},
     -- Per-spec settings namespace (populated by migration and SpecManager)
     specs       = {},
     -- Legacy flat keys kept for backward compatibility during migration.
@@ -868,10 +976,15 @@ function A.SpecVal(key, default)
     -- Fall through to SPEC_DEFAULTS
     local sd = A.SPEC_DEFAULTS and A.SPEC_DEFAULTS[specID]
     if sd and sd[key] ~= nil then return sd[key] end
-    -- Fall through to active spec's uiOptions defaults
+    -- Fall through to active spec's settingDefs defaults (new keyed dict)
     if A.SpecManager and A.SpecManager.GetSpecByID then
         local spec = A.SpecManager:GetSpecByID(specID)
         if spec then
+            if spec.settingDefs and spec.settingDefs[key] then
+                local def = spec.settingDefs[key]
+                if def.default ~= nil then return def.default end
+            end
+            -- Legacy: uiOptions array
             if spec.uiOptions then
                 for _, opt in ipairs(spec.uiOptions) do
                     if opt.key == key and opt.default ~= nil then

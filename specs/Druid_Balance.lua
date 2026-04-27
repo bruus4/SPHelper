@@ -41,20 +41,20 @@ local spec = {
 
     trackedDebuffs = {
         -- Example: track Moonfire and Insect Swarm
-        -- { key = "mf",  spellKey = "MOONFIRE",     duration = 12, color = "VT",  isDot = true },
-        -- { key = "is",  spellKey = "INSECT_SWARM", duration = 12, color = "SWP", isDot = true },
+        -- { key = "mf",  spellKey = "Moonfire",     duration = 12, color = "VT",  isDot = true },
+        -- { key = "is",  spellKey = "Insect Swarm", duration = 12, color = "SWP", isDot = true },
     },
 
-    uiOptions = {
+    settingDefs = {
         -- Example options:
-        -- { key = "innervateThreshold", type = "slider", label = "Innervate mana %", default = 30, min = 5, max = 80, step = 5 },
+        -- innervateThreshold = { type = "slider", label = "Innervate mana %", default = 30, min = 5, max = 80, step = 5 },
     },
 
     channelSpells = {
         {
-            spellKey = "HURRICANE",
+            spellKey = "Hurricane",
             spellName = "Hurricane",
-            -- ticks read from SpellDatabase (HURRICANE.ticks = 10)
+            -- ticks read from SpellDatabase (Hurricane.ticks = 10)
             fakeQueue = true,
             clipOverlay = true,
             tickSound = true,
@@ -68,9 +68,9 @@ local spec = {
     rotation = {
         _fromFile = true,
         -- Example entries:
-        -- { key = "MOONFIRE",     conditions = {{ type = "dot_missing", spellKey = "MOONFIRE" }},     explicitPriority = 90 },
-        -- { key = "INSECT_SWARM", conditions = {{ type = "dot_missing", spellKey = "INSECT_SWARM" }}, explicitPriority = 85 },
-        -- { key = "STARFIRE",     conditions = {{ type = "always" }},                                  explicitPriority = 10 },
+        -- { key = "Moonfire",     conditions = {{ type = "dot_missing", spellKey = "Moonfire" }},     explicitPriority = 90 },
+        -- { key = "Insect Swarm", conditions = {{ type = "dot_missing", spellKey = "Insect Swarm" }}, explicitPriority = 85 },
+        -- { key = "Starfire",     conditions = {{ type = "always" }},                                   explicitPriority = 10 },
     },
 }
 

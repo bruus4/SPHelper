@@ -20,7 +20,6 @@ local spec = {
     loadConditions = {
         class          = "PRIEST",
         talentTab      = 3,          -- Shadow talent tree
-        requiredSpells = { 15473 },  -- Shadowform
     },
 
     helpers = {
@@ -49,61 +48,76 @@ local spec = {
 
     -- Debuffs tracked by the DotTracker module
     trackedDebuffs = {
-        { key = "swp", spellKey = "SWP", color = "SWP", isDot = true },
-        { key = "vt",  spellKey = "VT",  color = "VT",  isDot = true },
-        { key = "ms",  spellKey = "MS",  duration = 15, color = "MS",  isDot = false },  -- no DB duration (Mind Soothe is not a standard aura)
-        { key = "su",  spellKey = "SU",  color = "SU",  isDot = false },
+      { key = "shadow_word_pain", spellKey = "Shadow Word: Pain", color = "SWP", isDot = true },
+      { key = "vampiric_touch",    spellKey = "Vampiric Touch", color = "VT",  isDot = true },
+      { key = "mind_soothe",       spellKey = "Mind Soothe", duration = 15, color = "MS", isDot = false },  -- no DB duration (Mind Soothe is not a standard aura)
+      { key = "shackle_undead",    spellKey = "Shackle Undead", color = "SU",  isDot = false },
     },
 
-    uiOptions = {
-        -- Rotation behavior
-        { key = "sfManaThreshold",    type = "slider",   label = "Shadowfiend mana %", default = 35, min = 5, max = 100, step = 5,
-          tooltip = "Suggest Shadowfiend when mana drops below this percentage." },
-        { key = "suggestPot",         type = "checkbox", label = "Suggest mana potion", default = true,
-          tooltip = "Show mana potion in rotation suggestions when low on mana." },
-        { key = "potManaThreshold",   type = "slider",   label = "Potion mana %",       default = 70, min = 5, max = 100, step = 5,
-          tooltip = "Suggest mana potion when mana drops below this percentage." },
-        { key = "potEarly",           type = "checkbox", label = "Pot before Shadowfiend", default = false,
-          tooltip = "Suggest using a potion before Shadowfiend cooldown (pre-pot strategy)." },
-        { key = "suggestRune",        type = "checkbox", label = "Suggest dark rune",  default = true,
-          tooltip = "Show dark/demonic rune in rotation suggestions when low on mana." },
-        { key = "runeManaThreshold",  type = "slider",   label = "Rune mana %",         default = 40, min = 5, max = 100, step = 5,
-          tooltip = "Suggest rune when mana drops below this percentage." },
-        { key = "vtMinTTD",           type = "slider",   label = "VT min target TTD",   default = 12, min = 0, max = 30, step = 1,
-          tooltip = "Only suggest Vampiric Touch when the current target is projected to live at least this many seconds. Set to 0 to disable." },
-        { key = "swpMinTTD",          type = "slider",   label = "SW:P min target TTD", default = 8, min = 0, max = 30, step = 1,
-          tooltip = "Only suggest Shadow Word: Pain when the current target is projected to live at least this many seconds. Set to 0 to disable." },
-        { key = "multidotMaxVTTargets",  type = "slider", label = "VT max targets",     default = 3, min = 1, max = 8, step = 1,
-          tooltip = "Maximum total targets to keep Vampiric Touch on while tab-dotting. Set to 1 for single-target only." },
-        { key = "multidotMaxSWPTargets", type = "slider", label = "SW:P max targets",   default = 4, min = 1, max = 8, step = 1,
-          tooltip = "Maximum total targets to keep Shadow Word: Pain on while tab-dotting. Set to 1 for single-target only." },
-        -- SW:D behavior
-        { key = "swdWorld",           type = "dropdown", label = "SW:D (world)",        default = "always",  values = {"always","execute","never"},
-          tooltip = "When to suggest Shadow Word: Death in open world. 'execute' = below 25% HP only." },
-        { key = "swdDungeon",         type = "dropdown", label = "SW:D (dungeon)",      default = "always",  values = {"always","execute","never"},
-          tooltip = "When to suggest Shadow Word: Death in dungeons." },
-        { key = "swdRaid",            type = "dropdown", label = "SW:D (raid)",         default = "execute", values = {"always","execute","never"},
-          tooltip = "When to suggest Shadow Word: Death in raids. 'execute' recommended to avoid self-damage." },
-        { key = "swdSafetyPct",       type = "slider",   label = "SW:D safety margin %", default = 10, min = 0, max = 50, step = 1,
-          tooltip = "Extra HP margin for SW:D kill prediction. Higher = more conservative." },
-        -- Inner Focus
-        { key = "ifInsert.enabled",     type = "checkbox", label = "Suggest Inner Focus",    default = true,
-          tooltip = "Insert Inner Focus before a spell in the rotation for free crit + mana save." },
-        { key = "ifInsert.onlyForBoss", type = "checkbox", label = "Inner Focus bosses only", default = true,
-          tooltip = "Only suggest Inner Focus on boss encounters." },
-        { key = "ifInsert.before",      type = "dropdown", label = "Inner Focus before",      default = "MB", values = {"MB","SWP","DP"},
-          tooltip = "Which spell to cast Inner Focus before. MB is most common." },
-        -- Channel / Fake Queue — now configured in CastBar & FQ tab
-        -- (These keys are kept here so they appear in General too, and
-        --  are read by ChannelHelper/CastBar via SpecVal. The CastBar tab
-        --  provides per-spell channel config.)
-        -- Per-spell enable toggles (only for optional/situational spells)
-        { key = "use_DP",    type = "checkbox", label = "Use Devouring Plague",  default = true,
-          tooltip = "Include Devouring Plague in the rotation." },
-        { key = "use_SWD",   type = "checkbox", label = "Use Shadow Word: Death",default = true,
-          tooltip = "Include Shadow Word: Death in the rotation (see per-content SW:D settings above)." },
-        { key = "use_SF",    type = "checkbox", label = "Use Shadowfiend",       default = true,
-          tooltip = "Include Shadowfiend in the rotation." },
+    trackedBuffs = {
+      { key = "clearcasting", name = "Clearcasting", spellKey = "Clearcasting" },
+    },
+
+    -------------------------------------------------------------------
+    -- Settings definitions (keyed dictionary).
+    -- Each key is a setting identifier used in conditions via optionKey
+    -- references, setting_compare, or string-valued numeric fields.
+    -- The General tab is auto-generated from these definitions in the
+    -- order they are first referenced in the rotation, followed by any
+    -- remaining settings in settingOrder.
+    -------------------------------------------------------------------
+    settingDefs = {
+        use_SWD           = { type = "checkbox", label = "Use Shadow Word: Death", default = true,
+                              tooltip = "Include Shadow Word: Death in the rotation (see per-content SW:D settings below)." },
+        use_DP            = { type = "checkbox", label = "Use Devouring Plague",   default = true,
+                              tooltip = "Include Devouring Plague in the rotation." },
+        use_SF            = { type = "checkbox", label = "Use Shadowfiend",        default = true,
+                              tooltip = "Include Shadowfiend in the rotation." },
+        sfManaThreshold   = { type = "slider",   label = "Shadowfiend mana %",    default = 35, min = 5, max = 100, step = 5,
+                              tooltip = "Suggest Shadowfiend when mana drops below this percentage." },
+        suggestPot        = { type = "checkbox", label = "Suggest mana potion",    default = true,
+                              tooltip = "Show mana potion in rotation suggestions when low on mana." },
+        potManaThreshold  = { type = "slider",   label = "Potion mana %",         default = 70, min = 5, max = 100, step = 5,
+                              tooltip = "Suggest mana potion when mana drops below this percentage." },
+        suggestRune       = { type = "checkbox", label = "Suggest dark rune",      default = true,
+                              tooltip = "Show dark/demonic rune in rotation suggestions when low on mana." },
+        runeManaThreshold = { type = "slider",   label = "Rune mana %",           default = 40, min = 5, max = 100, step = 5,
+                              tooltip = "Suggest rune when mana drops below this percentage." },
+        vtMinTTD          = { type = "slider",   label = "Vampiric Touch min target TTD",  default = 12, min = 0, max = 30, step = 1,
+                              tooltip = "Only suggest Vampiric Touch when the target will live at least this many seconds. 0 = disabled." },
+        swpMinTTD         = { type = "slider",   label = "Shadow Word: Pain min target TTD", default = 8, min = 0, max = 30, step = 1,
+                              tooltip = "Only suggest Shadow Word: Pain when the target will live at least this many seconds. 0 = disabled." },
+        multidotMaxVTTargets  = { type = "slider", label = "Vampiric Touch max targets",     default = 3, min = 1, max = 8, step = 1,
+                              tooltip = "Maximum targets to keep Vampiric Touch on. 1 = single-target only." },
+        multidotMaxSWPTargets = { type = "slider", label = "Shadow Word: Pain max targets",   default = 4, min = 1, max = 8, step = 1,
+                              tooltip = "Maximum targets to keep Shadow Word: Pain on. 1 = single-target only." },
+        swdWorld          = { type = "dropdown", label = "Shadow Word: Death (world)",   default = "always",  values = {"always","execute","never"},
+                              tooltip = "When to suggest SW:D in open world. 'execute' = below kill threshold only." },
+        swdDungeon        = { type = "dropdown", label = "Shadow Word: Death (dungeon)", default = "always",  values = {"always","execute","never"},
+                              tooltip = "When to suggest SW:D in dungeons." },
+        swdRaid           = { type = "dropdown", label = "Shadow Word: Death (raid)",    default = "execute", values = {"always","execute","never"},
+                              tooltip = "When to suggest SW:D in raids. 'execute' recommended to avoid self-damage." },
+        swdSafetyPct      = { type = "slider",   label = "SW:D safety margin %",        default = 10, min = 0, max = 50, step = 1,
+                              tooltip = "Extra HP margin for SW:D kill prediction. Higher = more conservative." },
+        ["ifInsert.enabled"]     = { type = "checkbox", label = "Suggest Inner Focus",    default = true,
+                              tooltip = "Insert Inner Focus before a spell for free crit + mana save." },
+        ["ifInsert.onlyForBoss"] = { type = "checkbox", label = "Inner Focus bosses only", default = true,
+                              tooltip = "Only suggest Inner Focus on boss encounters." },
+        ["ifInsert.before"]      = { type = "dropdown", label = "Inner Focus before",      default = "Mind Blast",
+                              values = {"Mind Blast","Shadow Word: Pain","Devouring Plague"},
+                              tooltip = "Which spell to cast Inner Focus before." },
+    },
+
+    -- Preferred rendering order for settings that aren't rotation-referenced.
+    settingOrder = {
+        "use_SWD", "use_DP", "use_SF",
+        "sfManaThreshold",
+        "suggestPot", "potManaThreshold",
+        "suggestRune", "runeManaThreshold",
+        "vtMinTTD", "swpMinTTD",
+        "multidotMaxVTTargets", "multidotMaxSWPTargets",
+        "swdWorld", "swdDungeon", "swdRaid", "swdSafetyPct",
+        "ifInsert.enabled", "ifInsert.onlyForBoss", "ifInsert.before",
     },
 
     -------------------------------------------------------------------
@@ -113,11 +127,13 @@ local spec = {
     -------------------------------------------------------------------
     channelSpells = {
         {
-            spellKey    = "MF",
+        spellKey    = "Mind Flay",
             spellName   = "Mind Flay",
-            -- ticks read from SpellDatabase (MF.ticks = 3)
+            -- ticks read from SpellDatabase (Mind Flay.ticks = 3)
             fakeQueue   = true,   -- enable FQ for this spell
             clipOverlay = true,   -- show green clip zone
+        minDuration = 1.0,    -- minimum channel duration required before clipping
+        clipReasons = { "Mind Blast", "Vampiric Touch", "Shadow Word: Pain" },
             tickSound   = true,   -- tick sound feedback
             tickFlash   = true,   -- tick flash feedback
             tickMarkers = true,   -- show tick markers on bar
@@ -156,31 +172,125 @@ local spec = {
     },
 
     -------------------------------------------------------------------
-    -- Rotation — core spells (VT, SWP, MB, MF) are always on.
-    -- Optional/situational spells (DP, SWD, SF) have enable toggles.
+    -- Rotation — core spells (Vampiric Touch, Shadow Word: Pain, Mind Blast, Mind Flay) are always on.
+    -- Optional/situational spells (Devouring Plague, Shadow Word: Death, Shadowfiend) have enable toggles.
     -------------------------------------------------------------------
     rotation = {
         _fromFile = true,
-        { key = "SWD_EXEC", conditions = {{ type = "predicted_kill" }, { type = "cooldown_ready", spellKey = "SWD" }, { type = "spec_option_enabled", optionKey = "use_SWD" }} },
-        { key = "IF",       conditions = {{ type = "spec_option_enabled", optionKey = "ifInsert.enabled" }, { type = "option_gated_classification", optionKey = "ifInsert.onlyForBoss", classification = "boss" }, { type = "cooldown_ready", spellKey = "IF" }, { type = "buff_property_compare", buff = "Inner Focus", property = "stacks", op = "==", value = 0 }}, insertBefore = "MB" },
-        { key = "VT",       conditions = {
-          { type = "projected_dot_time_left_lt", spellKey = "VT",  seconds = "vtCastEff + vtTravel + SAFETY" },
+        { key = "SWD_EXEC", conditions = {{ type = "spell_can_kill_target", spellKey = "Shadow Word: Death", safetyKey = "swdSafetyPct" }, { type = "cooldown_ready", spellKey = "Shadow Word: Death" }, { type = "spec_option_enabled", optionKey = "use_SWD" }} },
+        { key = "Inner Focus",       conditions = {{ type = "spec_option_enabled", optionKey = "ifInsert.enabled" }, { type = "option_gated_classification", optionKey = "ifInsert.onlyForBoss", classification = "boss" }, { type = "cooldown_ready", spellKey = "Inner Focus" }, { type = "buff_property_compare", buff = "Inner Focus", property = "stacks", op = "==", value = 0 }}, insertBeforeKey = "ifInsert.before" },
+        { key = "Vampiric Touch",       conditions = {
+          { type = "projected_dot_time_left_lt", spellKey = "Vampiric Touch" },
           { type = "state_compare",              subject = "target_ttd", op = ">=", value = "vtMinTTD" },
-          { type = "other_targets_with_debuff_lt", spellKey = "VT", count = "multidotMaxVTTargets", seconds = 2, minTTD = "vtMinTTD" },
+          { type = "other_targets_with_debuff_lt", spellKey = "Vampiric Touch", count = "multidotMaxVTTargets", seconds = 2, minTTD = "vtMinTTD" },
         } },
-        { key = "SWP",      conditions = {
-          { type = "projected_dot_time_left_lt", spellKey = "SWP", seconds = "gcd + swpTravel + SAFETY" },
+        { key = "Shadow Word: Pain",      conditions = {
+          { type = "projected_dot_time_left_lt", spellKey = "Shadow Word: Pain" },
           { type = "state_compare",              subject = "target_ttd", op = ">=", value = "swpMinTTD" },
-          { type = "other_targets_with_debuff_lt", spellKey = "SWP", count = "multidotMaxSWPTargets", seconds = 2, minTTD = "swpMinTTD" },
+          { type = "other_targets_with_debuff_lt", spellKey = "Shadow Word: Pain", count = "multidotMaxSWPTargets", seconds = 2, minTTD = "swpMinTTD" },
         } },
-        { key = "MB",       conditions = {{ type = "cooldown_ready", spellKey = "MB" }} },
-        { key = "SF",       conditions = {{ type = "spec_option_enabled", optionKey = "use_SF" }, { type = "in_combat" }, { type = "target_valid" }, { type = "state_compare", subject = "player_mana_pct", op = "<", value = "sfManaThreshold" }, { type = "cooldown_ready", spellKey = "SF" }} },
-        { key = "SWD",      conditions = {{ type = "spec_option_enabled", optionKey = "use_SWD" }, { type = "content_mode_allow", dbKey = "swd" }, { type = "cooldown_ready", spellKey = "SWD" }} },
-        { key = "DP",       conditions = {{ type = "spec_option_enabled", optionKey = "use_DP" }, { type = "debuff_property_compare", debuff = "Devouring Plague", source = "player", property = "remaining", op = "==", value = 0 }, { type = "cooldown_ready", spellKey = "DP" }} },
+        { key = "Mind Blast",       conditions = {{ type = "cooldown_ready", spellKey = "Mind Blast" }} },
+        { key = "Shadowfiend",       conditions = {{ type = "spec_option_enabled", optionKey = "use_SF" }, { type = "in_combat" }, { type = "target_valid" }, { type = "state_compare", subject = "player_mana_pct", op = "<", value = "sfManaThreshold" }, { type = "cooldown_ready", spellKey = "Shadowfiend" }} },
+        { key = "Shadow Word: Death",      conditions = {
+          { type = "spec_option_enabled", optionKey = "use_SWD" },
+          { type = "cooldown_ready", spellKey = "Shadow Word: Death" },
+          { type = "any_of", conditions = {
+            -- World: check swdWorld setting
+            { type = "all_of", conditions = {
+              { type = "content_type", contentType = "world" },
+              { type = "any_of", conditions = {
+                { type = "setting_compare", optionKey = "swdWorld", op = "==", value = "always" },
+                { type = "all_of", conditions = {
+                  { type = "setting_compare", optionKey = "swdWorld", op = "==", value = "execute" },
+                  { type = "spell_can_kill_target", spellKey = "Shadow Word: Death", safetyKey = "swdSafetyPct" },
+                }},
+              }},
+            }},
+            -- Dungeon: check swdDungeon setting
+            { type = "all_of", conditions = {
+              { type = "content_type", contentType = "dungeon" },
+              { type = "any_of", conditions = {
+                { type = "setting_compare", optionKey = "swdDungeon", op = "==", value = "always" },
+                { type = "all_of", conditions = {
+                  { type = "setting_compare", optionKey = "swdDungeon", op = "==", value = "execute" },
+                  { type = "spell_can_kill_target", spellKey = "Shadow Word: Death", safetyKey = "swdSafetyPct" },
+                }},
+              }},
+            }},
+            -- Raid: check swdRaid setting
+            { type = "all_of", conditions = {
+              { type = "content_type", contentType = "raid" },
+              { type = "any_of", conditions = {
+                { type = "setting_compare", optionKey = "swdRaid", op = "==", value = "always" },
+                { type = "all_of", conditions = {
+                  { type = "setting_compare", optionKey = "swdRaid", op = "==", value = "execute" },
+                  { type = "spell_can_kill_target", spellKey = "Shadow Word: Death", safetyKey = "swdSafetyPct" },
+                }},
+              }},
+            }},
+          }},
+        } },
+        { key = "Devouring Plague",       conditions = {{ type = "spec_option_enabled", optionKey = "use_DP" }, { type = "debuff_property_compare", debuff = "Devouring Plague", source = "player", property = "remaining", op = "==", value = 0 }, { type = "cooldown_ready", spellKey = "Devouring Plague" }} },
         { key = "POTION",   conditions = {{ type = "spec_option_enabled", optionKey = "suggestPot" }, { type = "state_compare", subject = "player_mana_pct", op = "<", value = "potManaThreshold" }, { type = "item_ready_and_owned" }} },
         { key = "RUNE",     conditions = {{ type = "spec_option_enabled", optionKey = "suggestRune" }, { type = "state_compare", subject = "player_mana_pct", op = "<", value = "runeManaThreshold" }, { type = "item_ready_and_owned" }} },
-        { key = "MF",       conditions = {{ type = "always" }} },
+        { key = "Mind Flay",       conditions = {{ type = "always" }} },
     },
+
+    -------------------------------------------------------------------
+    -- Class-specific context extension for the rotation engine.
+    -- Populates Shadow Priest fields used by condition evaluators and
+    -- the SpecUI debug panel. Called by RE:BuildContext after the
+    -- generic fields are built, so ctx.trackedDebuffs etc. are ready.
+    -------------------------------------------------------------------
+    buildContext = function(ctx, spec)
+        local constants = (spec and spec.constants) or {}
+        local hasteMul  = ctx.hasteMul or 1
+        local castRem   = ctx.castRemaining or 0
+
+        -- Convenience short-name aliases for tracked debuffs
+        local vtState  = ctx.trackedDebuffsBySpellKey and ctx.trackedDebuffsBySpellKey["Vampiric Touch"]
+        local swpState = ctx.trackedDebuffsBySpellKey and ctx.trackedDebuffsBySpellKey["Shadow Word: Pain"]
+        ctx.vtRem    = (vtState  and vtState.remaining)  or 0
+        ctx.swpRem   = (swpState and swpState.remaining) or 0
+        ctx.vtAfter  = math.max(ctx.vtRem  - castRem, 0)
+        ctx.swpAfter = math.max(ctx.swpRem - castRem, 0)
+
+        -- Per-spell cooldowns (projected past current cast)
+        local function CooldownProj(spellKey)
+            local spell = A.SPELLS and A.SPELLS[spellKey]
+            if not spell or not spell.id then return 999 end
+            if not (A.KnowsSpell and A.KnowsSpell(spell.id)) then return 999 end
+            return math.max((A.GetSpellCDReal and A.GetSpellCDReal(spell.id) or 0) - castRem, 0)
+        end
+        ctx.mbCD  = CooldownProj("Mind Blast")
+        ctx.swdCD = CooldownProj("Shadow Word: Death")
+        ctx.sfCD  = CooldownProj("Shadowfiend")
+        ctx.dpCD  = CooldownProj("Devouring Plague")
+
+        -- Clearcasting (from generic trackedBuffs already built in ctx)
+        local ccState    = ctx.trackedBuffs and ctx.trackedBuffs["clearcasting"]
+        ctx.clearcasting = (ccState and ccState.active) or false
+
+        -- Haste-adjusted cast times for key spells
+        local VT_CAST_TIME = constants.VT_CAST_TIME
+            or (A.GetSpellDefinition and A.GetSpellDefinition("Vampiric Touch")
+                and A.GetSpellDefinition("Vampiric Touch").castTime)
+            or 1.5
+        local MF_CAST_TIME = constants.MF_CAST_TIME
+            or (A.GetSpellDefinition and A.GetSpellDefinition("Mind Flay")
+                and A.GetSpellDefinition("Mind Flay").castTime)
+            or 3.0
+        ctx.vtCastEff = VT_CAST_TIME / hasteMul
+        ctx.mfCastEff = MF_CAST_TIME / hasteMul
+        ctx.minMfEff  = (constants.MIN_MF_DURATION or 1.0) / hasteMul
+
+        -- Talent-adjusted SWP duration (Improved Shadow Word: Pain: tab 3, index 4)
+        local rank = 0
+        if A.RotationEngine and A.RotationEngine.GetTalentRank then
+            rank = A.RotationEngine.GetTalentRank(3, 4)
+        end
+        ctx.swpDuration = 18 + rank * 3
+    end,
 }
 
 -- Register with SpecManager

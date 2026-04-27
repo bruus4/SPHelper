@@ -60,164 +60,64 @@ local spec = {
     },
 
     trackedDebuffs = {
-        { key = "rip",    spellKey = "RIP",       color = "SWP", isDot = true  },  -- duration from SpellDatabase (RIP.duration = 12)
-        { key = "mangle", spellKey = "MANGLE_CAT", color = "MB",  isDot = false },  -- duration from SpellDatabase (MANGLE_CAT.duration = 12)
+        { key = "rip",          spellKey = "Rip",          color = "SWP", isDot = true  },  -- duration from SpellDatabase (Rip.duration = 12)
+        { key = "mangle_cat",   spellKey = "Mangle (Cat)", name = "Mangle (Cat)", source = "any", color = "MB",  isDot = false },  -- Mangle (Bear) and Mangle (Cat) both apply this debuff
+        { key = "faerie_fire",  spellKey = "Faerie Fire (Feral)", name = "Faerie Fire", source = "any", duration = 40, color = "FF", isDot = false },  -- FF (Feral) applies the shared "Faerie Fire" debuff
     },
 
-    uiOptions = {
-        {
-            key     = "use_rip",
-            type    = "checkbox",
-            label   = "Use Rip",
-            default = true,
-            tooltip = "Apply Rip as the primary sustained finisher when the target will live long enough.",
-        },
-        {
-            key     = "use_mangle",
-            type    = "checkbox",
-            label   = "Use Mangle",
-            default = true,
-            tooltip = "Maintain Mangle debuff on target for 30% physical bonus.",
-        },
-        {
-            key     = "use_shred",
-            type    = "checkbox",
-            label   = "Use Shred",
-            default = true,
-            tooltip = "Use Shred as primary combo-point generator.",
-        },
-        {
-            key     = "fade_primary_icon",
-            type    = "checkbox",
-            label   = "Fade primary icon",
-            default = true,
-            tooltip = "Crossfade the top two ready recommendations when they share the same explicitPriority bucket.",
-        },
-        {
-            key     = "use_faerie_fire",
-            type    = "checkbox",
-            label   = "Use Faerie Fire",
-            default = true,
-            tooltip = "Maintain Faerie Fire (Feral) when the armor debuff is missing or about to expire.",
-        },
-        {
-            key     = "faerie_fire_refresh_seconds",
-            type    = "slider",
-            label   = "Faerie Fire refresh window",
-            min     = 1,
-            max     = 6,
-            step    = 1,
-            default = 2,
-            tooltip = "Refresh Faerie Fire when any armor-reduction debuff copy has this many seconds or less remaining.",
-        },
-        {
-            key     = "use_ferocious_bite",
-            type    = "checkbox",
-            label   = "Use Ferocious Bite",
-            default = true,
-            tooltip = "Use Ferocious Bite when target is dying fast or for trash/execute.",
-        },
-        {
-            key     = "use_tigers_fury",
-            type    = "checkbox",
-            label   = "Use Tiger's Fury",
-            default = true,
-            tooltip = "Use Tiger's Fury as a pre-pull opener when starting out of stealth and at full energy.",
-        },
-        {
-            key     = "use_powershift",
-            type    = "checkbox",
-            label   = "Suggest powershift",
-            default = true,
-            tooltip = "Suggest Cat Form again when energy is low enough to justify a powershift.",
-        },
-        {
-            key     = "powershift_min_mana_pct",
-            type    = "slider",
-            label   = "Powershift minimum mana %",
-            min     = 0,
-            max     = 100,
-            step    = 1,
-            default = 0,
-            tooltip = "Only suggest powershift when player mana percent is above this value (0 = disabled).",
-        },
-        {
-            key     = "use_bear_form",
-            type    = "checkbox",
-            label   = "Emergency Bear Form",
-            default = true,
-            tooltip = "Suggest Bear Form when health drops below the bear threshold.",
-        },
-        {
-            key     = "bear_form_hp_pct",
-            type    = "slider",
-            label   = "Bear Form health threshold",
-            min     = 5,
-            max     = 100,
-            step    = 1,
-            default = 35,
-            tooltip = "Switch to Bear Form when player health drops below this percentage.",
-        },
-        {
-            key     = "bear_fr_hp_pct",
-            type    = "slider",
-            label   = "Frenzied Regen health threshold",
-            min     = 10,
-            max     = 100,
-            step    = 1,
-            default = 55,
-            tooltip = "Use Frenzied Regeneration when in Bear Form and health drops below this percentage.",
-        },
-        {
-            key     = "rip_min_cp",
-            type    = "slider",
-            label   = "Rip minimum combo points",
-            min     = 3,
-            max     = 5,
-            step    = 1,
-            default = 4,
-            tooltip = "Minimum combo points required before applying Rip.",
-        },
-        {
-            key     = "rip_min_ttd",
-            type    = "slider",
-            label   = "Rip minimum target TTD",
-            min     = 0,
-            max     = 20,
-            step    = 1,
-            default = 10,
-            tooltip = "Only suggest Rip when the target is expected to live at least this many seconds. Set to 0 to disable.",
-        },
-        {
-            key     = "mangle_refresh_seconds",
-            type    = "slider",
-            label   = "Mangle refresh window",
-            min     = 1,
-            max     = 6,
-            step    = 1,
-            default = 2,
-            tooltip = "Refresh Mangle when the debuff has this many seconds or less remaining.",
-        },
-        {
-            key     = "dying_fast_pct",
-            type    = "slider",
-            label   = "Dying fast threshold (%HP/sec)",
-            min     = 1,
-            max     = 20,
-            step    = 1,
-            default = 5,
-            tooltip = "Use Ferocious Bite instead of Rip when target loses this % HP per second.",
-        },
-        {
-            key     = "ferocious_bite_hp_threshold",
-            type    = "slider",
-            label   = "Ferocious Bite HP threshold (absolute)",
-            min     = 0,
-            max     = 100000,
-            step    = 1,
-            default = 0,
-            tooltip = "Suggest Ferocious Bite when target HP is <= this absolute amount (0 = disabled).",
-        },
+    trackedBuffs = {
+        { key = "clearcasting",    name = "Clearcasting",    spellKey = "Clearcasting" },
+        { key = "cat_form",        name = "Cat Form",        spellKey = "Cat Form" },
+        { key = "bear_form",       name = "Bear Form",       spellKey = "Bear Form" },
+        { key = "dire_bear_form",  name = "Dire Bear Form",  spellKey = "Dire Bear Form" },
+        { key = "stealth",         name = "Prowl",           spellKey = "Prowl" },
+    },
+
+    settingDefs = {
+        use_rip                    = { type = "checkbox", label = "Use Rip",                default = true,
+                                       tooltip = "Apply Rip as the primary sustained finisher when the target will live long enough." },
+        use_mangle                 = { type = "checkbox", label = "Use Mangle",             default = true,
+                                       tooltip = "Maintain Mangle debuff on target for 30% physical bonus." },
+        use_shred                  = { type = "checkbox", label = "Use Shred",              default = true,
+                                       tooltip = "Use Shred as primary combo-point generator." },
+        fade_primary_icon          = { type = "checkbox", label = "Fade primary icon",      default = true,
+                                       tooltip = "Crossfade the top two ready recommendations when they share the same explicitPriority bucket." },
+        use_faerie_fire            = { type = "checkbox", label = "Use Faerie Fire",        default = true,
+                                       tooltip = "Maintain Faerie Fire (Feral) when the armor debuff is missing or about to expire." },
+        faerie_fire_refresh_seconds= { type = "slider",   label = "Faerie Fire refresh window",  default = 2, min = 1, max = 6, step = 1,
+                                       tooltip = "Refresh Faerie Fire when any armor-reduction debuff copy has this many seconds or less remaining." },
+        use_ferocious_bite         = { type = "checkbox", label = "Use Ferocious Bite",     default = true,
+                                       tooltip = "Use Ferocious Bite when target is dying fast or for trash/execute." },
+        use_tigers_fury            = { type = "checkbox", label = "Use Tiger's Fury",       default = true,
+                                       tooltip = "Use Tiger's Fury as a pre-pull opener when starting out of stealth and at full energy." },
+        use_powershift             = { type = "checkbox", label = "Suggest powershift",     default = true,
+                                       tooltip = "Suggest Cat Form again when energy is low enough to justify a powershift." },
+        powershift_min_mana_pct    = { type = "slider",   label = "Powershift minimum mana %",   default = 0, min = 0, max = 100, step = 1,
+                                       tooltip = "Only suggest powershift when player mana percent is above this value (0 = disabled)." },
+        powershift_energy_after    = { type = "slider",   label = "Powershift energy after shift", default = 40, min = 0, max = 100, step = 5,
+                                       tooltip = "Energy expected immediately after a powershift (Furor 5/5 = 40, +20 with Wolfshead Helm = 60)." },
+        use_bear_form              = { type = "checkbox", label = "Emergency Bear Form",    default = true,
+                                       tooltip = "Suggest Bear Form when health drops below the bear threshold." },
+        bear_form_hp_pct           = { type = "slider",   label = "Bear Form health threshold",   default = 35, min = 5, max = 100, step = 1,
+                                       tooltip = "Switch to Bear Form when player health drops below this percentage." },
+        bear_fr_hp_pct             = { type = "slider",   label = "Frenzied Regen health threshold", default = 55, min = 10, max = 100, step = 1,
+                                       tooltip = "Use Frenzied Regeneration when in Bear Form and health drops below this percentage." },
+        rip_min_cp                 = { type = "slider",   label = "Rip minimum combo points",    default = 4, min = 3, max = 5, step = 1,
+                                       tooltip = "Minimum combo points required before applying Rip." },
+        rip_min_ttd                = { type = "slider",   label = "Rip minimum target TTD",      default = 10, min = 0, max = 20, step = 1,
+                                       tooltip = "Only suggest Rip when the target is expected to live at least this many seconds. 0 = disabled." },
+        mangle_refresh_seconds     = { type = "slider",   label = "Mangle refresh window",       default = 2, min = 1, max = 6, step = 1,
+                                       tooltip = "Refresh Mangle when the debuff has this many seconds or less remaining." },
+        dying_fast_pct             = { type = "slider",   label = "Dying fast threshold (%HP/sec)", default = 5, min = 1, max = 20, step = 1,
+                                       tooltip = "Use Ferocious Bite instead of Rip when target loses this % HP per second." },
+        ferocious_bite_hp_threshold= { type = "slider",   label = "Ferocious Bite HP threshold (absolute)", default = 0, min = 0, max = 100000, step = 1,
+                                       tooltip = "Suggest Ferocious Bite when target HP is <= this absolute amount (0 = disabled)." },
+    },
+
+    -- Settings consumed by engine/display logic that aren't directly
+    -- referenced in rotation conditions via optionKey / string value fields.
+    generalSettings = {
+        "fade_primary_icon",  -- controls icon crossfade in the preview display
     },
 
     castBarOptions = {},
@@ -233,7 +133,7 @@ local spec = {
 
         -- Emergency Bear Form fallback when health drops and the mode is enabled.
         {
-            key        = "BEAR_FORM",
+            key        = "Bear Form",
             conditions = {
                 { type = "spec_option_enabled", optionKey = "use_bear_form" },
                 { type = "state_compare",       subject = "player_hp_pct", op = "<", value = "bear_form_hp_pct" },
@@ -244,9 +144,9 @@ local spec = {
         -- ── Ensure Cat Form ───────────────────────────────────────
         -- Suggest Cat Form when the player is not currently in Cat Form.
         {
-            key        = "CAT_FORM",
+            key        = "Cat Form",
             conditions = {
-                { type = "buff_property_compare", buff = (A.SPELLS and A.SPELLS.CAT_FORM and A.SPELLS.CAT_FORM.name) or "Cat Form", property = "stacks", op = "==", value = 0 },
+                { type = "buff_property_compare", buff = "Cat Form", property = "stacks", op = "==", value = 0 },
                 { type = "any_of", conditions = {
                     { type = "not", condition = { type = "spec_option_enabled", optionKey = "use_bear_form" } },
                     { type = "state_compare", subject = "player_hp_pct", op = ">", value = "bear_form_hp_pct" },
@@ -258,7 +158,7 @@ local spec = {
         -- ── BEAR FORM ────────────────────────────────────────────
         -- When already in bear form, keep the suggestions on self-sustain for solo play or on threat tools for dungeon/raid tanking.
         {
-            key        = "FRENZIED_REGENERATION",
+            key        = "Frenzied Regeneration",
             conditions = {
                 { type = "bear_form" },
                 { type = "state_compare", subject = "player_hp_pct", op = "<", value = "bear_fr_hp_pct" },
@@ -267,7 +167,7 @@ local spec = {
         },
 
         {
-            key        = "BASH",
+            key        = "Bash",
             conditions = {
                 { type = "bear_form" },
                 { type = "target_valid" },
@@ -278,7 +178,7 @@ local spec = {
         },
 
         {
-            key        = "DEMORALIZING_ROAR",
+            key        = "Demoralizing Roar",
             conditions = {
                 { type = "bear_form" },
                 { type = "target_valid" },
@@ -288,27 +188,27 @@ local spec = {
         },
 
         {
-            key        = "FAERIE_FIRE",
+            key        = "Faerie Fire (Feral)",
             conditions = {
                 { type = "bear_form" },
                 { type = "target_valid" },
-                { type = "cooldown_ready", spellKey = "FAERIE_FIRE" },
-                { type = "debuff_property_compare", debuff = (A.SPELLS and A.SPELLS.FAERIE_FIRE and A.SPELLS.FAERIE_FIRE.name) or "Faerie Fire (Feral)", source = "any", property = "remaining", op = "<", value = "faerie_fire_refresh_seconds" },
+                { type = "cooldown_ready", spellKey = "Faerie Fire (Feral)" },
+                { type = "debuff_property_compare", debuff = "Faerie Fire", source = "any", property = "remaining", op = "<", value = "faerie_fire_refresh_seconds" },
             },
         },
 
         {
-            key        = "MANGLE_BEAR",
+            key        = "Mangle (Bear)",
             conditions = {
                 { type = "bear_form" },
                 { type = "target_valid" },
-                { type = "cooldown_ready", spellKey = "MANGLE_BEAR" },
+                { type = "cooldown_ready", spellKey = "Mangle (Bear)" },
                 { type = "resource_gte", amount = 20 },
             },
         },
 
         {
-            key        = "LACERATE",
+            key        = "Lacerate",
             conditions = {
                 { type = "bear_form" },
                 { type = "target_valid" },
@@ -325,7 +225,7 @@ local spec = {
         },
 
         {
-            key        = "SWIPE_BEAR",
+            key        = "Swipe",
             conditions = {
                 { type = "bear_form" },
                 { type = "target_valid" },
@@ -338,7 +238,7 @@ local spec = {
         },
 
         {
-            key        = "MAUL",
+            key        = "Maul",
             conditions = {
                 { type = "bear_form" },
                 { type = "target_valid" },
@@ -349,20 +249,20 @@ local spec = {
         -- ── PRE-PULL / MAINTENANCE ────────────────────────────────
         -- Pre-pull Tiger's Fury when starting visible and energy-capped.
         {
-            key        = "TIGERS_FURY",
+            key        = "Tiger's Fury",
             conditions = {
                 { type = "spec_option_enabled", optionKey = "use_tigers_fury" },
                 { type = "cat_form" },
                 { type = "precombat" },
                 { type = "not_stealthed" },
                 { type = "resource_required_gte",        amount = 100 },
-                { type = "cooldown_ready",      spellKey  = "TIGERS_FURY" },
+                { type = "cooldown_ready",      spellKey  = "Tiger's Fury" },
             },
         },
 
         -- 2. Ravage – stealth opener when behind target
         {
-            key        = "RAVAGE",
+            key        = "Ravage",
             explicitPriority = 200,
             conditions = {
                 { type = "cat_form" },
@@ -375,7 +275,7 @@ local spec = {
 
         -- 3. Pounce – stealth opener when not behind target
         {
-            key        = "POUNCE",
+            key        = "Pounce",
             explicitPriority = 200,
             conditions = {
                 { type = "cat_form" },
@@ -388,21 +288,21 @@ local spec = {
 
         -- Maintain Faerie Fire using any-source debuff timing so we do not reapply over another druid's copy.
         {
-            key        = "FAERIE_FIRE",
+            key        = "Faerie Fire (Feral)",
             conditions = {
                 { type = "spec_option_enabled", optionKey = "use_faerie_fire" },
                 { type = "cat_form" },
                 { type = "not_stealthed" },
                 { type = "target_valid" },
-                { type = "cooldown_ready", spellKey = "FAERIE_FIRE" },
-                { type = "debuff_property_compare", debuff = (A.SPELLS and A.SPELLS.FAERIE_FIRE and A.SPELLS.FAERIE_FIRE.name) or "Faerie Fire (Feral)", source = "any", property = "remaining", op = "<", value = "faerie_fire_refresh_seconds" },
+                { type = "cooldown_ready", spellKey = "Faerie Fire (Feral)" },
+                { type = "debuff_property_compare", debuff = "Faerie Fire", source = "any", property = "remaining", op = "<", value = "faerie_fire_refresh_seconds" },
             },
         },
 
         -- ── FINISHERS ─────────────────────────────────────────────
         -- Ferocious Bite only when the target is dying fast / within execute rules, and only when Bite is actually castable.
         {
-            key        = "FEROCIOUS_BITE",
+            key        = "Ferocious Bite",
             conditions = {
                 { type = "cat_form" },
                 { type = "target_valid" },
@@ -422,7 +322,7 @@ local spec = {
 
         -- 4 CP Bite fallback on dying targets.
         {
-            key        = "FEROCIOUS_BITE",
+            key        = "Ferocious Bite",
             conditions = {
                 { type = "cat_form" },
                 { type = "target_valid" },
@@ -442,7 +342,7 @@ local spec = {
 
         -- Rip on targets that will live long enough to justify it. Never clip; suppress immediate re-suggest after a cast.
         {
-            key        = "RIP",
+            key        = "Rip",
             conditions = {
                 { type = "cat_form" },
                 { type = "target_valid" },
@@ -454,14 +354,14 @@ local spec = {
                     { type = "state_compare", subject = "resource", op = ">=", value = 30 },
                     { type = "clearcasting" },
                 }},
-                { type = "not_recently_cast", spellKey = "RIP", window = 0.6 },
-                { type = "dot_missing",         spellKey  = "RIP" },
+                { type = "not_recently_cast", spellKey = "Rip", window = 0.6 },
+                { type = "dot_missing",         spellKey  = "Rip" },
             },
         },
 
         -- Refresh Mangle before dropping the debuff.
         {
-            key        = "MANGLE_CAT",
+            key        = "Mangle (Cat)",
             conditions = {
                 { type = "cat_form" },
                 { type = "target_valid" },
@@ -478,7 +378,7 @@ local spec = {
         -- ── BUILDERS ──────────────────────────────────────────────
         -- Split builder pair: Shred is the preferred builder; Mangle is the paired fallback when Shred is not the practical choice.
         {
-            key        = "SHRED",
+            key        = "Shred",
             explicitPriority = 10,
             conditions = {
                 { type = "cat_form" },
@@ -493,7 +393,7 @@ local spec = {
         },
 
         {
-            key        = "MANGLE_CAT",
+            key        = "Mangle (Cat)",
             explicitPriority = 10,
             conditions = {
                 { type = "cat_form" },
@@ -509,13 +409,19 @@ local spec = {
 
         -- Powershift only when we are still in Cat Form, have mana to spare, and do not currently have a free cast.
         {
-            key        = "CAT_FORM",
+            key        = "Cat Form",
+            -- After powershifting we re-enter Cat Form with energy refunded
+            -- by Furor (and optionally +20 from Wolfshead Helm). Declare it
+            -- so the engine projects the post-shift resource state into the
+            -- queue ETAs (Shred / Mangle then show "ready in <gcd>" rather
+            -- than "wait N seconds for energy regen").
+            postCast   = { resource = "energy", set = "powershift_energy_after" },
             conditions = {
                 { type = "cat_form" },
                 { type = "not_stealthed" },
                 { type = "spec_option_enabled", optionKey = "use_powershift" },
                 { type = "in_combat" },
-                { type = "buff_property_compare", buff = (A.SPELLS and A.SPELLS.CAT_FORM and A.SPELLS.CAT_FORM.name) or "Cat Form", property = "stacks", op = ">", value = 0 },
+                { type = "buff_property_compare", buff = "Cat Form", property = "stacks", op = ">", value = 0 },
                 { type = "state_compare", subject = "player_base_mana_pct", op = ">", value = "powershift_min_mana_pct" },
                 { type = "not", condition = { type = "clearcasting" } },
                 { type = "any_of", conditions = {

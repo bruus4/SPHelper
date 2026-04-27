@@ -142,6 +142,11 @@ function A:InitDotTracker()
     end)
     anchor:SetScript("OnDragStop", function(self) self:StopMovingOrSizing() end)
     A.CreateBackdrop(anchor, 0.12, 0.10, 0.18, 0.9)
+    -- Persist position across /reload.
+    if A.RegisterMovableFrame then
+        A.RegisterMovableFrame(anchor, "dotTracker",
+            { point = "CENTER", relPoint = "CENTER", x = 220, y = -100 })
+    end
 
     local title = anchor:CreateFontString(nil, "OVERLAY")
     title:SetFont("Fonts\\FRIZQT__.TTF", 9, "OUTLINE")

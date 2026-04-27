@@ -124,6 +124,10 @@ function A:InitRotation()
     f:SetScript("OnDragStop", function(self) self:StopMovingOrSizing() end)
     f:Show()
     A.rotFrame = f
+    if A.RegisterMovableFrame then
+        A.RegisterMovableFrame(f, "rotation",
+            { point = "CENTER", relPoint = "CENTER", x = 0, y = -240 })
+    end
 
     
 
@@ -846,9 +850,22 @@ function A:InitRotation()
         -- Use eta from the rotation engine: this is "time until cast window opens" for all
         -- spell types (DoT hold time, cooldown remaining, 0 = ready now). This avoids
         -- showing the full DoT remaining time (e.g. 5s) when what matters is "wait 2s more".
-        local primaryLive = (p and p.eta and p.eta > 0) and p.eta or 0
+        --
+        -- For live, ticking countdowns (so timers don't freeze during a cast/channel)
+        -- we prefer the absolute `cooldownEnd` timestamp anchored at evaluation time
+        -- and fall back to the eta when no anchor was provided.
+        local nowLive = GetTime()
+        local function LiveRemaining(ent)
+            if not ent then return 0 end
+            if ent.cooldownEnd then
+                return math.max(ent.cooldownEnd - nowLive, 0)
+            end
+            return (ent.eta and ent.eta > 0) and ent.eta or 0
+        end
+
+        local primaryLive = LiveRemaining(p)
         local inRangePrimary = p and IsKeyInRange(p.key)
-        local secondaryLive = (p2 and p2.eta and p2.eta > 0) and p2.eta or 0
+        local secondaryLive = LiveRemaining(p2)
         local inRangeSecondary = p2 and IsKeyInRange(p2.key)
 
         local primaryShown = UpdatePrimaryVisual(primary, p and p.key, p2 and p2.key, primaryFade, GetDisplayIcon, {
@@ -857,7 +874,7 @@ function A:InitRotation()
         }, {
             live = secondaryLive,
             inRange = inRangeSecondary,
-        }, now)
+        }, nowLive)
 
         local primarySignature = tostring(p and p.key or "nil")
         if primaryShown and p2 then
@@ -910,18 +927,39 @@ function A:InitRotation()
             local ent = prio[i + queueStart - 1]
             if ent then
                 q.icon:SetTexture(GetDisplayIcon(ent.key))
+                -- Mirror the primary icon: drive the cooldown sweep from the
+                -- live spell cooldown so queue swirls keep ticking too.
+                if q.cdOverlay then
+                    local qspell = A.SPELLS[ent.key]
+                    if qspell and qspell.id then
+                        local qstart, qdur = GetSpellCooldown(qspell.id)
+                        if qstart and qdur and qdur > 0 then
+                            pcall(CooldownFrame_Set, q.cdOverlay, qstart, qdur, 1)
+                        else
+                            pcall(CooldownFrame_Set, q.cdOverlay, 0, 0, 0)
+                        end
+                    else
+                        pcall(CooldownFrame_Set, q.cdOverlay, 0, 0, 0)
+                    end
+                end
                 if ent.clip then
                     q.cdText:SetText("Clip")
                     q.icon:SetVertexColor(1, 1, 1)
                 else
-                    -- Recompute a live remaining time so countdowns tick during casts
-                    local live = (ent.eta and ent.eta > 0) and ent.eta or 0
+                    -- Use the same live-anchored countdown as the primary icon
+                    -- so queue timers tick smoothly even mid-cast/channel.
+                    local live = LiveRemaining(ent)
                     local inRangeQ = IsKeyInRange(ent.key)
                     if live and live > 0 then
                         q.cdText:SetText(A.FormatTime(live))
                         if not inRangeQ then
                             q.icon:SetVertexColor(0.8, 0.2, 0.2)
+                        elseif ent.chained then
+                            -- Chained: queued in cast sequence, not actually blocked.
+                            -- Keep bright so the player can see it's coming up soon.
+                            q.icon:SetVertexColor(1, 1, 1)
                         else
+                            -- Blocked by CD / resource: dim to signal unavailable.
                             q.icon:SetVertexColor(0.6, 0.6, 0.6)
                         end
                     else

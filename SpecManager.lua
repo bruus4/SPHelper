@@ -92,16 +92,23 @@ function SM:RegisterSpec(spec)
         spec.loadConditions = A.db.specs[spec.meta.id].loadConditionsOverride
     end
 
-    self._available[spec.meta.id] = spec
-    print("|cff8882d5SPHelper|r: Spec registered: " .. tostring(spec.meta.id))
-    -- Log effective loadConditions
-    local lc = spec.loadConditions or {}
-    local parts = {}
-    for k, v in pairs(lc) do parts[#parts + 1] = tostring(k) .. "=" .. tostring(v) end
-    if #parts > 0 then
-        print("|cff8882d5SPHelper|r: LoadConditions: " .. table.concat(parts, ", "))
+    local id = spec.meta.id
+    local wasRegistered = self._available[id] ~= nil
+    self._available[id] = spec
+    if not wasRegistered then
+        print("|cff8882d5SPHelper|r: Spec registered: " .. tostring(id))
+        -- Log effective loadConditions
+        local lc = spec.loadConditions or {}
+        local parts = {}
+        for k, v in pairs(lc) do parts[#parts + 1] = tostring(k) .. "=" .. tostring(v) end
+        if #parts > 0 then
+            print("|cff8882d5SPHelper|r: LoadConditions: " .. table.concat(parts, ", "))
+        else
+            print("|cff8882d5SPHelper|r: LoadConditions: (none)")
+        end
     else
-        print("|cff8882d5SPHelper|r: LoadConditions: (none)")
+        -- Avoid duplicate user-facing prints on re-registration; record debug entry
+        if A and A.DebugLog then pcall(A.DebugLog, "SPEC", "Spec re-registered: " .. tostring(id)) end
     end
     return true
 end
@@ -199,13 +206,9 @@ local function LoadConditionSpecificity(spec)
 end
 
 function SM:ReEvaluate()
-    -- Deactivate ALL specs first, then pick the best match
-    for id in pairs(self._active) do
-        self:DeactivateSpec(id)
-    end
-    A._activeSpecID = nil
-
-    -- Find all specs that pass load conditions, grouped by class
+    -- Determine desired active specs but avoid deactivating/re-activating
+    -- everything on every reevaluation. Compute the set of specs that
+    -- should be active, then only apply the diff against `self._active`.
     local candidates = {}  -- list of { id, spec, specificity }
     local _, playerClass = UnitClass("player")
     for id, spec in pairs(self._available) do
@@ -229,13 +232,43 @@ function SM:ReEvaluate()
     -- Sort by specificity descending — most specific match wins
     table.sort(candidates, function(a, b) return a.specificity > b.specificity end)
 
-    -- Activate only the most specific matching spec (one per class)
-    local activatedClasses = {}
+    -- Pick the most specific per class
+    local desiredByClass = {}
+    local desiredList = {}
     for _, c in ipairs(candidates) do
         local cls = c.spec.meta and c.spec.meta.class or "UNKNOWN"
-        if not activatedClasses[cls] then
-            activatedClasses[cls] = true
-            self:ActivateSpec(c.id)
+        if not desiredByClass[cls] then
+            desiredByClass[cls] = true
+            desiredList[#desiredList + 1] = c.id
+        end
+    end
+
+    local desiredSet = {}
+    for _, id in ipairs(desiredList) do desiredSet[id] = true end
+
+    -- Deactivate specs that are active but not desired
+    for id in pairs(self._active) do
+        if not desiredSet[id] then
+            self:DeactivateSpec(id)
+        end
+    end
+
+    -- Activate desired specs that are not already active
+    for _, id in ipairs(desiredList) do
+        if not self._active[id] then
+            self:ActivateSpec(id)
+        end
+    end
+
+    -- Ensure A._activeSpecID points at an active spec (or nil)
+    if next(self._active) == nil then
+        A._activeSpecID = nil
+    else
+        if not A._activeSpecID or not self._active[A._activeSpecID] then
+            for id in pairs(self._active) do
+                A._activeSpecID = id
+                break
+            end
         end
     end
 end

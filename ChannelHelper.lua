@@ -779,15 +779,71 @@ end
 -- at the optimal moment.
 ------------------------------------------------------------------------
 
-function CH:FakeQueue()
-    if not self._state.active then return end
+function CH:FakeQueue(spellArg)
+    local maxWaitMs = self:GetEffectiveFakeQueueMaxMs()
+    local maxWait = maxWaitMs / 1000
+    if maxWait <= 0 then return end
+
+    -- ------------------------------------------------------------------
+    -- DoT-refresh mode
+    -- When SPH_FQ is invoked with a spell name (or while no channel is
+    -- active and a hint exists for the spell currently queued via macro),
+    -- busy-wait until the ideal cast-start moment computed by the
+    -- RotationEngine. Capped at the same script safety budget as the
+    -- channel FQ. This eliminates the SAFETY margin on DoT reapplication
+    -- without risking a clipped tick.
+    -- ------------------------------------------------------------------
+    local hint = nil
+    if spellArg and A.DotRefreshHints then
+        hint = A.DotRefreshHints[spellArg]
+        if not hint then
+            -- Allow callers to pass a spell key (e.g. "VT") instead of the name.
+            local spell = A.SPELLS and A.SPELLS[spellArg]
+            if spell and spell.name then
+                hint = A.DotRefreshHints[spell.name]
+            end
+        end
+    end
+
+    if not self._state.active then
+        if hint and hint.fireAt then
+            local now = GetTime()
+            local needed = hint.fireAt - now
+            if needed <= 0 or needed > maxWait then
+                if self._config and self._config.fqDiag and needed > maxWait then
+                    if not self._lastDotFQSkipPrint or (now - self._lastDotFQSkipPrint) >= 2.0 then
+                        self._lastDotFQSkipPrint = now
+                        print(string.format(
+                            "|cff8882d5SPHelper|r: DoT FQ skipped — wait |cffffcc00%dms|r exceeds budget |cffffcc00%dms|r",
+                            math.floor(needed * 1000 + 0.5), maxWaitMs))
+                    end
+                end
+                return
+            end
+            local needed_ms = needed * 1000
+            local start_dbp = debugprofilestop()
+            A._fqBlocking = true
+            repeat until (debugprofilestop() - start_dbp) >= needed_ms
+            A._fqBlocking = false
+            if self._config and self._config.fqDiag then
+                local now2 = GetTime()
+                if not self._lastDotFQPrint or (now2 - self._lastDotFQPrint) >= 2.0 then
+                    self._lastDotFQPrint = now2
+                    print(string.format("|cff8882d5SPHelper|r: DoT FQ held |cffffcc00%dms|r (%s)",
+                        math.floor(needed_ms + 0.5), spellArg or "?"))
+                end
+            end
+        end
+        return
+    end
+
+    -- ------------------------------------------------------------------
+    -- Channel-clip mode (original behaviour)
+    -- ------------------------------------------------------------------
     if not self._config.fakeQueueEnabled then return end
     if self._activeChannelInfo and self._activeChannelInfo.fakeQueue == false then return end
 
     local s = self._state
-    local maxWaitMs = self:GetEffectiveFakeQueueMaxMs()
-    local maxWait = maxWaitMs / 1000
-    if maxWait <= 0 then return end
 
     -- ---------------------------------------------------------------
     -- Compute the next upcoming tick time we should wait for.
@@ -871,9 +927,9 @@ function CH:FakeQueue()
 end
 
 -- Expose global function for macros
-SPH_FQ = function()
+SPH_FQ = function(spellArg)
     if A.ChannelHelper then
-        A.ChannelHelper:FakeQueue()
+        A.ChannelHelper:FakeQueue(spellArg)
     end
 end
 
@@ -885,7 +941,11 @@ function CH:GetMacroText(spellName)
     if not spellName and self._channelSpellDefs and self._channelSpellDefs[1] then
         spellName = self._channelSpellDefs[1].spellName
     end
-    return "/run SPH_FQ()\n/cast " .. (spellName or "Mind Blast")
+    -- Pass the spell name into SPH_FQ so DoT-refresh hints can be looked up.
+    -- For channel spells the argument is harmless (channel mode ignores it).
+    local sn = spellName or "Mind Flay"
+    local escaped = sn:gsub('"', '\\"')
+    return '/run SPH_FQ("' .. escaped .. '")\n/cast ' .. sn
 end
 
 function CH:PrintMacros()
@@ -898,31 +958,60 @@ function CH:PrintMacros()
 end
 
 --- Get the list of spell names that should have FQ macros for the active spec.
+-- Returns channel spells PLUS any DoT-refresh spells (those with a
+-- `projected_dot_time_left_lt` condition) so the FQ helper can also smooth
+-- out DoT reapplication timing.
 function CH:GetMacroSpells()
     local spells = {}
+    local seen = {}
+    local function add(name)
+        if not name or seen[name] then return end
+        seen[name] = true
+        spells[#spells + 1] = name
+    end
+
     if self._channelSpellDefs and #self._channelSpellDefs > 0 then
         for _, cs in ipairs(self._channelSpellDefs) do
-            if cs.spellName then
-                spells[#spells + 1] = cs.spellName
-            end
+            add(cs.spellName)
         end
     elseif self.KNOWN_CHANNELS then
         for spellName in pairs(self.KNOWN_CHANNELS) do
-            spells[#spells + 1] = spellName
+            add(spellName)
         end
-        table.sort(spells)
     end
+
+    -- DoT-refresh spells from the active spec's rotation.
+    if A.SpecManager and A.SpecManager.GetActiveSpecs then
+        local activeSpecs = A.SpecManager:GetActiveSpecs() or {}
+        for _, spec in pairs(activeSpecs) do
+            local rotation = spec and spec.rotation
+            if rotation then
+                for _, entry in ipairs(rotation) do
+                    if entry.key and entry.conditions then
+                        for _, cond in ipairs(entry.conditions) do
+                            if cond and cond.type == "projected_dot_time_left_lt" then
+                                local spell = A.SPELLS and A.SPELLS[entry.key]
+                                if spell and spell.name then
+                                    add(spell.name)
+                                end
+                                break
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
     if #spells == 0 then
         if self.GetChannelSpellDefinitions then
             local defs = self:GetChannelSpellDefinitions(nil)
             for _, cs in ipairs(defs or {}) do
-                if cs.spellName then
-                    spells[#spells + 1] = cs.spellName
-                end
+                add(cs.spellName)
             end
         end
         if #spells == 0 then
-            spells = { "Mind Flay" }
+            add("Mind Flay")
         end
     end
     return spells

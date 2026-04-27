@@ -51,7 +51,7 @@ DB.catalog = {
     ------------------------------------------------------------------------
     -- PRIEST – Shadow
     ------------------------------------------------------------------------
-    VT = {
+    ["Vampiric Touch"] = {
         class = "PRIEST",
         spec = "SHADOW",
         name = "Vampiric Touch",
@@ -74,7 +74,7 @@ DB.catalog = {
         damage = { estimateBase = 650, perTickBase = 130 },
         talentModifiers = {},
     },
-    SWP = {
+    ["Shadow Word: Pain"] = {
         class = "PRIEST",
         spec = "SHADOW",
         name = "Shadow Word: Pain",
@@ -94,10 +94,10 @@ DB.catalog = {
         coefficients = { spellPower = 1.10 },
         damage = { estimateBase = 1236, perTickBase = 206 },
         talentModifiers = {
-            { name = "Improved SWP",  tab = 3, index = 4,  maxRank = 2, perRank = 3,    affects = "duration" },
+            { name = "Improved Shadow Word: Pain",  tab = 3, index = 4,  maxRank = 2, perRank = 3,    affects = "duration" },
         },
     },
-    MB = {
+    ["Mind Blast"] = {
         class = "PRIEST",
         spec = "SHADOW",
         name = "Mind Blast",
@@ -114,11 +114,11 @@ DB.catalog = {
         coefficients = { spellPower = 0.429 },
         damage = { estimateBase = 731 },
         talentModifiers = {
-            { name = "Improved MB",   tab = 3, index = 12, maxRank = 5, perRank = -0.5,  affects = "cooldown" },
+            { name = "Improved Mind Blast",   tab = 3, index = 12, maxRank = 5, perRank = -0.5,  affects = "cooldown" },
             { name = "Shadow Power",  tab = 3, index = 20, maxRank = 5, perRank = 0.03,  affects = "crit_bonus" },
         },
     },
-    MF = {
+    ["Mind Flay"] = {
         class = "PRIEST",
         spec = "SHADOW",
         name = "Mind Flay",
@@ -133,6 +133,7 @@ DB.catalog = {
         duration = 3,
         ticks = 3,
         tickInterval = 1,
+        allowClipping = true,
         range = 20,
         critMultiplier = 1.5,
         debuffId = 15407,
@@ -143,7 +144,7 @@ DB.catalog = {
             { name = "Shadow Power",  tab = 3, index = 20, maxRank = 5, perRank = 0.03,  affects = "crit_bonus" },
         },
     },
-    SWD = {
+    ["Shadow Word: Death"] = {
         class = "PRIEST",
         spec = "SHADOW",
         name = "Shadow Word: Death",
@@ -163,7 +164,7 @@ DB.catalog = {
             { name = "Shadow Power",  tab = 3, index = 20, maxRank = 5, perRank = 0.03,  affects = "crit_bonus" },
         },
     },
-    DP = {
+    ["Devouring Plague"] = {
         class = "PRIEST",
         spec = "SHADOW",
         name = "Devouring Plague",
@@ -184,7 +185,7 @@ DB.catalog = {
         damage = { estimateBase = 1216, perTickBase = 152 },
         talentModifiers = {},
     },
-    SF = {
+    ["Shadowfiend"] = {
         class = "PRIEST",
         spec = "SHADOW",
         name = "Shadowfiend",
@@ -199,7 +200,7 @@ DB.catalog = {
         flags = { cooldown = true, summon = true, offensive = true },
         talentModifiers = {},
     },
-    VE = {
+    ["Vampiric Embrace"] = {
         class = "PRIEST",
         spec = "SHADOW",
         name = "Vampiric Embrace",
@@ -215,7 +216,7 @@ DB.catalog = {
         flags = { buff = true, magical = true },
         talentModifiers = {},
     },
-    SFORM = {
+    ["Shadowform"] = {
         class = "PRIEST",
         spec = "SHADOW",
         name = "Shadowform",
@@ -234,9 +235,9 @@ DB.catalog = {
             { name = "Darkness",       tab = 3, index = 16, maxRank = 5, perRank = 0.02, affects = "damage" },
         },
     },
-    IF = {
+    ["Inner Focus"] = {
         class = "PRIEST",
-        spec = "SHADOW",
+        spec = "DISCIPLINE",
         name = "Inner Focus",
         baseId = 14751,
         minLevel = 20,
@@ -249,9 +250,9 @@ DB.catalog = {
         flags = { cooldown = true, buff = true },
         talentModifiers = {},
     },
-    MS = {
+    ["Mind Soothe"] = {
         class = "PRIEST",
-        spec = "SHADOW",
+        spec = "DISCIPLINE",
         name = "Mind Soothe",
         baseId = 453,
         minLevel = 20,
@@ -264,9 +265,9 @@ DB.catalog = {
         flags = { utility = true, debuff = true },
         talentModifiers = {},
     },
-    SU = {
+    ["Shackle Undead"] = {
         class = "PRIEST",
-        spec = "SHADOW",
+        spec = "DISCIPLINE",
         name = "Shackle Undead",
         baseId = 9484,
         minLevel = 20,
@@ -283,7 +284,7 @@ DB.catalog = {
         talentModifiers = {},
     },
     -- Priest class-wide utility
-    DISPEL_MAGIC = {
+    ["Dispel Magic"] = {
         class = "PRIEST",
         spec = nil,
         name = "Dispel Magic",
@@ -297,7 +298,7 @@ DB.catalog = {
         flags = { utility = true, magical = true },
         talentModifiers = {},
     },
-    FADE = {
+    ["Fade"] = {
         class = "PRIEST",
         spec = nil,
         name = "Fade",
@@ -316,7 +317,7 @@ DB.catalog = {
     ------------------------------------------------------------------------
     -- DRUID – Feral
     ------------------------------------------------------------------------
-    SHRED = {
+    ["Shred"] = {
         class = "DRUID",
         spec = "FERAL",
         name = "Shred",
@@ -332,7 +333,7 @@ DB.catalog = {
         damage = { bonusVsBleeding = 224 },
         talentModifiers = {},
     },
-    MANGLE_CAT = {
+    ["Mangle (Cat)"] = {
         class = "DRUID",
         spec = "FERAL",
         name = "Mangle (Cat)",
@@ -351,7 +352,7 @@ DB.catalog = {
         damage = { bleedBonusFlat = 159 },
         talentModifiers = {},
     },
-    RIP = {
+    ["Rip"] = {
         class = "DRUID",
         spec = "FERAL",
         name = "Rip",
@@ -370,7 +371,7 @@ DB.catalog = {
         comboScaling = { pointsPerComboPoint = 4 },
         talentModifiers = {},
     },
-    FAERIE_FIRE = {
+    ["Faerie Fire (Feral)"] = {
         class = "DRUID",
         spec = "FERAL",
         name = "Faerie Fire (Feral)",
@@ -385,7 +386,7 @@ DB.catalog = {
         flags = { offensive = true, debuff = true, armorReduction = true, requiresForm = true },
         talentModifiers = {},
     },
-    FEROCIOUS_BITE = {
+    ["Ferocious Bite"] = {
         class = "DRUID",
         spec = "FERAL",
         name = "Ferocious Bite",
@@ -401,7 +402,7 @@ DB.catalog = {
         comboScaling = { pointsPerComboPoint = 36 },
         talentModifiers = {},
     },
-    RAKE = {
+    ["Rake"] = {
         class = "DRUID",
         spec = "FERAL",
         name = "Rake",
@@ -419,7 +420,7 @@ DB.catalog = {
         flags = { offensive = true, bleed = true, builder = true, requiresCatForm = true },
         talentModifiers = {},
     },
-    TIGERS_FURY = {
+    ["Tiger's Fury"] = {
         class = "DRUID",
         spec = "FERAL",
         name = "Tiger's Fury",
@@ -434,7 +435,7 @@ DB.catalog = {
         flags = { buff = true, requiresCatForm = true },
         talentModifiers = {},
     },
-    CLEARCASTING = {
+    ["Clearcasting"] = {
         class = "DRUID",
         spec = "FERAL",
         name = "Clearcasting",
@@ -447,7 +448,7 @@ DB.catalog = {
         flags = { buff = true, proc = true },
         talentModifiers = {},
     },
-    CAT_FORM = {
+    ["Cat Form"] = {
         class = "DRUID",
         spec = "FERAL",
         name = "Cat Form",
@@ -462,7 +463,7 @@ DB.catalog = {
         flags = { form = true, stance = true },
         talentModifiers = {},
     },
-    BEAR_FORM = {
+    ["Bear Form"] = {
         class = "DRUID",
         spec = "FERAL",
         name = "Bear Form",
@@ -478,7 +479,7 @@ DB.catalog = {
         flags = { form = true, stance = true },
         talentModifiers = {},
     },
-    DIRE_BEAR_FORM = {
+    ["Dire Bear Form"] = {
         class = "DRUID",
         spec = "FERAL",
         name = "Dire Bear Form",
@@ -493,7 +494,7 @@ DB.catalog = {
         flags = { form = true, stance = true },
         talentModifiers = {},
     },
-    MANGLE_BEAR = {
+    ["Mangle (Bear)"] = {
         class = "DRUID",
         spec = "FERAL",
         name = "Mangle (Bear)",
@@ -510,7 +511,7 @@ DB.catalog = {
         flags = { offensive = true, builder = true, debuff = true, requiresBearForm = true },
         talentModifiers = {},
     },
-    LACERATE = {
+    ["Lacerate"] = {
         class = "DRUID",
         spec = "FERAL",
         name = "Lacerate",
@@ -528,7 +529,7 @@ DB.catalog = {
         flags = { offensive = true, bleed = true, builder = true, requiresBearForm = true },
         talentModifiers = {},
     },
-    SWIPE_BEAR = {
+    ["Swipe"] = {
         class = "DRUID",
         spec = "FERAL",
         name = "Swipe",
@@ -542,7 +543,7 @@ DB.catalog = {
         flags = { offensive = true, builder = true, requiresBearForm = true },
         talentModifiers = {},
     },
-    MAUL = {
+    ["Maul"] = {
         class = "DRUID",
         spec = "FERAL",
         name = "Maul",
@@ -556,7 +557,7 @@ DB.catalog = {
         flags = { offensive = true, builder = true, requiresBearForm = true },
         talentModifiers = {},
     },
-    DEMORALIZING_ROAR = {
+    ["Demoralizing Roar"] = {
         class = "DRUID",
         spec = "FERAL",
         name = "Demoralizing Roar",
@@ -571,7 +572,7 @@ DB.catalog = {
         flags = { debuff = true, utility = true, requiresBearForm = true },
         talentModifiers = {},
     },
-    FRENZIED_REGENERATION = {
+    ["Frenzied Regeneration"] = {
         class = "DRUID",
         spec = "FERAL",
         name = "Frenzied Regeneration",
@@ -586,7 +587,7 @@ DB.catalog = {
         flags = { buff = true, cooldown = true, defensive = true, requiresBearForm = true },
         talentModifiers = {},
     },
-    BASH = {
+    ["Bash"] = {
         class = "DRUID",
         spec = "FERAL",
         name = "Bash",
@@ -601,7 +602,7 @@ DB.catalog = {
         flags = { offensive = true, control = true, cooldown = true, requiresBearForm = true },
         talentModifiers = {},
     },
-    INNERVATE = {
+    ["Innervate"] = {
         class = "DRUID",
         spec = nil,
         name = "Innervate",
@@ -616,7 +617,7 @@ DB.catalog = {
         flags = { buff = true, cooldown = true, utility = true },
         talentModifiers = {},
     },
-    PROWL = {
+    ["Prowl"] = {
         class = "DRUID",
         spec = "FERAL",
         name = "Prowl",
@@ -631,7 +632,7 @@ DB.catalog = {
         flags = { stealth = true, buff = true, requiresCatForm = true },
         talentModifiers = {},
     },
-    POUNCE = {
+    ["Pounce"] = {
         class = "DRUID",
         spec = "FERAL",
         name = "Pounce",
@@ -647,7 +648,7 @@ DB.catalog = {
         damage = { triggerSpellId = 9007 },
         talentModifiers = {},
     },
-    RAVAGE = {
+    ["Ravage"] = {
         class = "DRUID",
         spec = "FERAL",
         name = "Ravage",
@@ -667,7 +668,7 @@ DB.catalog = {
     ------------------------------------------------------------------------
     -- DRUID – Balance
     ------------------------------------------------------------------------
-    HURRICANE = {
+    ["Hurricane"] = {
         class = "DRUID",
         spec = "BALANCE",
         name = "Hurricane",
@@ -688,7 +689,7 @@ DB.catalog = {
         damage = { estimateBase = 1140, perTickBase = 114 },
         talentModifiers = {},
     },
-    MOONFIRE = {
+    ["Moonfire"] = {
         class = "DRUID",
         spec = "BALANCE",
         name = "Moonfire",
@@ -712,7 +713,7 @@ DB.catalog = {
             { name = "Improved Moonfire", tab = 1, index = 4, maxRank = 2, perRank = 0.05, affects = "crit_bonus" },
         },
     },
-    INSECT_SWARM = {
+    ["Insect Swarm"] = {
         class = "DRUID",
         spec = "BALANCE",
         name = "Insect Swarm",
@@ -733,10 +734,10 @@ DB.catalog = {
         coefficients = { spellPower = 0.122 },
         damage = { estimateBase = 444, perTickBase = 74 },
         talentModifiers = {
-            { name = "Improved IS",  tab = 1, index = 11, maxRank = 3, perRank = 0.1, affects = "damage" },
+            { name = "Improved Insect Swarm",  tab = 1, index = 11, maxRank = 3, perRank = 0.1, affects = "damage" },
         },
     },
-    STARFIRE = {
+    ["Starfire"] = {
         class = "DRUID",
         spec = "BALANCE",
         name = "Starfire",
@@ -757,7 +758,7 @@ DB.catalog = {
             { name = "Starlightening",tab = 1, index = 16, maxRank = 3, perRank = 0.02, affects = "crit_bonus" },
         },
     },
-    WRATH = {
+    ["Wrath"] = {
         class = "DRUID",
         spec = "BALANCE",
         name = "Wrath",
@@ -777,7 +778,7 @@ DB.catalog = {
             { name = "Moonfury",   tab = 1, index = 15, maxRank = 5, perRank = 0.02, affects = "damage" },
         },
     },
-    FAERIE_FIRE_BALANCE = {
+    ["Faerie Fire"] = {
         class = "DRUID",
         spec = "BALANCE",
         name = "Faerie Fire",
@@ -793,7 +794,7 @@ DB.catalog = {
         flags = { offensive = true, debuff = true, armorReduction = true },
         talentModifiers = {},
     },
-    MOONKIN_FORM = {
+    ["Moonkin Form"] = {
         class = "DRUID",
         spec = "BALANCE",
         name = "Moonkin Form",
@@ -809,7 +810,7 @@ DB.catalog = {
         flags = { form = true, stance = true, buff = true },
         talentModifiers = {},
     },
-    BARKSKIN = {
+    ["Barkskin"] = {
         class = "DRUID",
         spec = nil,
         name = "Barkskin",
@@ -824,7 +825,7 @@ DB.catalog = {
         flags = { buff = true, cooldown = true, defensive = true },
         talentModifiers = {},
     },
-    NATURE_SWIFTNESS = {
+    ["Nature's Swiftness"] = {
         class = "DRUID",
         spec = nil,
         name = "Nature's Swiftness",
@@ -839,7 +840,7 @@ DB.catalog = {
         flags = { buff = true, cooldown = true, utility = true },
         talentModifiers = {},
     },
-    ENTANGLING_ROOTS = {
+    ["Entangling Roots"] = {
         class = "DRUID",
         spec = nil,
         name = "Entangling Roots",
@@ -856,7 +857,7 @@ DB.catalog = {
         flags = { control = true, magical = true },
         talentModifiers = {},
     },
-    FORCE_OF_NATURE = {
+    ["Force of Nature"] = {
         class = "DRUID",
         spec = "BALANCE",
         name = "Force of Nature",
@@ -871,6 +872,61 @@ DB.catalog = {
         talentModifiers = {},
     },
 }
+
+DB.legacyKeys = DB.legacyKeys or {
+    VT = "Vampiric Touch",
+    SWP = "Shadow Word: Pain",
+    MB = "Mind Blast",
+    MF = "Mind Flay",
+    SWD = "Shadow Word: Death",
+    DP = "Devouring Plague",
+    SF = "Shadowfiend",
+    VE = "Vampiric Embrace",
+    SFORM = "Shadowform",
+    IF = "Inner Focus",
+    MS = "Mind Soothe",
+    SU = "Shackle Undead",
+    DISPEL_MAGIC = "Dispel Magic",
+    FADE = "Fade",
+    SHRED = "Shred",
+    MANGLE_CAT = "Mangle (Cat)",
+    RIP = "Rip",
+    FAERIE_FIRE = "Faerie Fire (Feral)",
+    FEROCIOUS_BITE = "Ferocious Bite",
+    RAKE = "Rake",
+    TIGERS_FURY = "Tiger's Fury",
+    CLEARCASTING = "Clearcasting",
+    CAT_FORM = "Cat Form",
+    BEAR_FORM = "Bear Form",
+    DIRE_BEAR_FORM = "Dire Bear Form",
+    MANGLE_BEAR = "Mangle (Bear)",
+    LACERATE = "Lacerate",
+    SWIPE_BEAR = "Swipe",
+    MAUL = "Maul",
+    DEMORALIZING_ROAR = "Demoralizing Roar",
+    FRENZIED_REGENERATION = "Frenzied Regeneration",
+    BASH = "Bash",
+    INNERVATE = "Innervate",
+    PROWL = "Prowl",
+    POUNCE = "Pounce",
+    RAVAGE = "Ravage",
+    HURRICANE = "Hurricane",
+    MOONFIRE = "Moonfire",
+    INSECT_SWARM = "Insect Swarm",
+    STARFIRE = "Starfire",
+    WRATH = "Wrath",
+    FAERIE_FIRE_BALANCE = "Faerie Fire",
+    MOONKIN_FORM = "Moonkin Form",
+    BARKSKIN = "Barkskin",
+    NATURE_SWIFTNESS = "Nature's Swiftness",
+    ENTANGLING_ROOTS = "Entangling Roots",
+    FORCE_OF_NATURE = "Force of Nature",
+}
+
+DB.legacyAliasesByCanonical = DB.legacyAliasesByCanonical or {}
+for legacyKey, canonicalKey in pairs(DB.legacyKeys) do
+    DB.legacyAliasesByCanonical[canonicalKey] = legacyKey
+end
 
 DB.byBaseId = {}
 DB.byName = {}
@@ -1018,12 +1074,22 @@ local function ResolveKnownSpell(def)
     return nil
 end
 
+local function ResolveCatalogKey(spellRef)
+    if type(spellRef) ~= "string" then
+        return spellRef
+    end
+    return DB.legacyKeys[spellRef] or spellRef
+end
+
 function A.GetSpellDefinition(spellRef)
     if spellRef == nil then return nil end
 
     if type(spellRef) == "table" then
-        if spellRef.key and DB.catalog[spellRef.key] then
-            return DB.catalog[spellRef.key]
+        if spellRef.key then
+            local canonicalKey = ResolveCatalogKey(spellRef.key)
+            if DB.catalog[canonicalKey] then
+                return DB.catalog[canonicalKey]
+            end
         end
         if spellRef.meta then
             return spellRef.meta
@@ -1032,12 +1098,13 @@ function A.GetSpellDefinition(spellRef)
     end
 
     if type(spellRef) == "string" then
-        local direct = DB.catalog[spellRef]
+        local canonicalKey = ResolveCatalogKey(spellRef)
+        local direct = DB.catalog[canonicalKey]
         if direct then
             return direct
         end
 
-        local spell = A.SPELLS and A.SPELLS[spellRef]
+        local spell = A.SPELLS and (A.SPELLS[canonicalKey] or A.SPELLS[spellRef])
         if spell and spell.meta then
             return spell.meta
         end
@@ -1076,7 +1143,8 @@ function A.ResolveSpellID(spellRef)
     end
 
     if type(spellRef) == "string" then
-        local spell = A.SPELLS and A.SPELLS[spellRef]
+        local canonicalKey = ResolveCatalogKey(spellRef)
+        local spell = A.SPELLS and (A.SPELLS[canonicalKey] or A.SPELLS[spellRef])
         if spell then
             return spell.id or spell.baseId
         end
@@ -1085,7 +1153,7 @@ function A.ResolveSpellID(spellRef)
         if numeric then
             spellRef = numeric
         else
-            local def = DB.byName[spellRef]
+            local def = DB.byName[spellRef] or DB.byName[canonicalKey]
             if not def then return nil end
             ScanPlayerSpellbook(false)
             local resolved = ResolveKnownSpell(def)
@@ -1111,6 +1179,7 @@ end
 
 function A.RebuildSpellCatalog()
     A.SPELLS = A.SPELLS or {}
+    local spellAliases = {}
 
     for _, key in ipairs(DB.sortedKeys) do
         local def = DB.catalog[key]
@@ -1131,7 +1200,35 @@ function A.RebuildSpellCatalog()
         spell.meta = def
 
         A.SPELLS[key] = spell
+
+        local legacyKey = DB.legacyAliasesByCanonical and DB.legacyAliasesByCanonical[key] or nil
+        if legacyKey and A.COLORS and A.COLORS[legacyKey] then
+            A.COLORS[key] = A.COLORS[legacyKey]
+        end
+        if def.name then
+            spellAliases[def.name] = spell
+            if A.COLORS and A.COLORS[key] then
+                A.COLORS[def.name] = A.COLORS[key]
+            end
+        end
+        if spell.name and spell.name ~= def.name then
+            spellAliases[spell.name] = spell
+            if A.COLORS and A.COLORS[key] then
+                A.COLORS[spell.name] = A.COLORS[key]
+            end
+        end
+        if legacyKey then
+            spellAliases[legacyKey] = spell
+        end
     end
+
+    A.SPELLS_BY_NAME = spellAliases
+    local spellMeta = getmetatable(A.SPELLS)
+    if not spellMeta then
+        spellMeta = {}
+        setmetatable(A.SPELLS, spellMeta)
+    end
+    spellMeta.__index = spellAliases
 
     if A.SpellData and A.SpellData.RebuildCoefficientIndex then
         A.SpellData:RebuildCoefficientIndex()
