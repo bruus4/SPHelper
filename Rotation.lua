@@ -88,17 +88,21 @@ local function FadeRamp(phase, startPhase, endPhase, curve)
     return ApplyFadeCurve(value, curve)
 end
 
+-- Returns (primaryAlpha, secondaryAlpha) for the crossfade animation.
+-- cycle ∈ [0,2): first half fades primary→secondary; second half reverses.
 local function GetFadeAlphas(cfg, cycle)
     local firstHalf = cycle < 1
     local phase = firstHalf and cycle or (cycle - 1)
-    f:SetScript("OnHide", function(self)
-        self.fadeSpeed = self.fadeSpeed or 1
-    end)
-
-    A._splitIconTestFrame = f
-    UpdateFadeTestFrame(f, GetTime())
-    f:Show()
-    return f
+    if firstHalf then
+        local primaryAlpha   = 1 - FadeRamp(phase, cfg.primaryOutStart,   cfg.primaryOutEnd,   cfg.curve)
+        local secondaryAlpha =     FadeRamp(phase, cfg.secondaryInStart,  cfg.secondaryInEnd,  cfg.curve)
+        return primaryAlpha, secondaryAlpha
+    else
+        -- Mirror: secondary (now leading) fades out; primary fades back in.
+        local primaryAlpha   =     FadeRamp(phase, cfg.secondaryInStart,  cfg.secondaryInEnd,  cfg.curve)
+        local secondaryAlpha = 1 - FadeRamp(phase, cfg.primaryOutStart,   cfg.primaryOutEnd,   cfg.curve)
+        return primaryAlpha, secondaryAlpha
+    end
 end
 
 function A:InitRotation()
@@ -206,6 +210,17 @@ function A:InitRotation()
         frame.fadeKey2 = nil
     end
 
+    -- Returns true if the spell is blocked by its own cooldown (> 1.5 s),
+    -- i.e. not just a GCD but a real multi-second spell CD.  Used by
+    -- UseFadePrimary to decide whether the two paired spells are genuinely
+    -- interchangeable right now (energy / GCD blocks are fine; a 6-second
+    -- Mangle CD means it's NOT interchangeable at this moment).
+    local function IsSpellCDBlocking(key)
+        local spell = A.SPELLS and A.SPELLS[key]
+        if not spell or not spell.id then return false end
+        return A.GetSpellCDReal and (A.GetSpellCDReal(spell.id) or 0) > 0
+    end
+
     local function UseFadePrimary(spec, firstRec, secondRec)
         if not spec or not firstRec or not secondRec then return false end
         if not A.SpecVal then return false end
@@ -223,10 +238,14 @@ function A:InitRotation()
         if type(firstRec) == "table" and type(secondRec) == "table" then
             local bucket1 = firstRec.priorityBucket
             local bucket2 = secondRec.priorityBucket
+            -- Fade whenever both spells share a priority bucket and neither is
+            -- blocked by a real spell cooldown.  Energy / GCD blocks are
+            -- intentionally allowed so the fade is visible during active combat
+            -- (not only after standing still for 1.5 s waiting for energy regen).
             return bucket1 ~= nil
                 and bucket2 ~= nil
-                and (firstRec.eta or 0) <= 0
-                and (secondRec.eta or 0) <= 0
+                and not IsSpellCDBlocking(key1)
+                and not IsSpellCDBlocking(key2)
                 and tostring(bucket1) == tostring(bucket2)
         end
         return false
@@ -562,6 +581,48 @@ function A:InitRotation()
         return nil, nil
     end
 
+    local function FindRotationEntry(spec, key)
+        if not spec or not key or not spec.rotation then return nil end
+        for _, entry in ipairs(spec.rotation) do
+            if entry and entry.key == key then
+                return entry
+            end
+        end
+        return nil
+    end
+
+    local function IsChannelSpell(spellRef, spec)
+        if A.ChannelHelper and A.ChannelHelper.IsChannelSpell then
+            return A.ChannelHelper:IsChannelSpell(spellRef, spec)
+        end
+        local def = A.GetSpellDefinition and A.GetSpellDefinition(spellRef) or nil
+        return def and (def.castType == "channel" or def.channel == true or (def.flags and def.flags.channel)) or false
+    end
+
+    local function GetChannelDisplayPolicy(spec, spellRef)
+        if not spellRef then return "default" end
+
+        local policy = nil
+        local entry = FindRotationEntry(spec, spellRef)
+        if entry then
+            policy = entry.channelPolicy
+        end
+
+        if not policy and A.GetSpellDefinition then
+            local def = A.GetSpellDefinition(spellRef)
+            policy = def and def.channelPolicy or nil
+        end
+
+        if not policy and A.SPELLS and A.SPELLS[spellRef] then
+            policy = A.SPELLS[spellRef].channelPolicy
+        end
+
+        if policy == "keep_current" or policy == "replace_current" then
+            return policy
+        end
+        return "default"
+    end
+
     local function PromoteRecommendationsForDisplay(prio, firstKey, secondKey)
         if not prio or not firstKey then return prio end
 
@@ -666,12 +727,19 @@ function A:InitRotation()
         A.CreateBackdrop(primary, 0, 0, 0, 0.85)
         lastPriSignature = nil
         ResetRecommendationHysteresis()
+        A._rotDisplayState = nil
         for _, q in ipairs(f.queue) do q:Hide() end
         f:Hide()
     end
 
     local function Refresh()
         if previewActive then return end
+
+        local hasValidTarget = UnitExists("target") and not UnitIsDead("target") and UnitCanAttack("player", "target")
+        if A._visible == false or (not inCombat and not hasValidTarget) then
+            ClearDisplay()
+            return
+        end
 
         local prio, activeSpec = GetPriority()
 
@@ -706,37 +774,31 @@ function A:InitRotation()
             if castName then
                 local castKey = nameToKey[castName]
                 if castKey and prio[1] and prio[1].key == castKey then
-                    -- For channel spells (e.g. Mind Flay) keep the entry: the advisor
-                    -- projects to the moment the current cast finishes, so the same spell
-                    -- in slot 1 represents the NEXT cast. For other spells remove so the
-                    -- display shows the actual NEXT cast.
-                    local isChannelKey = A.ChannelHelper and A.ChannelHelper.KNOWN_CHANNELS
-                        and (function()
-                            for _, info in pairs(A.ChannelHelper.KNOWN_CHANNELS) do
-                                if info.spellKey == castKey then return true end
-                            end
-                            -- also check by spell name
-                            local spell = A.SPELLS[castKey]
-                            if spell and spell.name and A.ChannelHelper.KNOWN_CHANNELS[spell.name] then return true end
-                            return false
-                        end)()
-                    if not isChannelKey then
+                    -- Channel behavior is policy-driven now: default keeps the
+                    -- current channel in slot 1 and can still promote instant
+                    -- spells mid-channel.
+                    local channelRef = castKey or castName
+                    local isChannelKey = IsChannelSpell(channelRef, activeSpec)
+                    local channelPolicy = GetChannelDisplayPolicy(activeSpec, channelRef)
+                    if not isChannelKey or channelPolicy == "replace_current" then
                         A.DebugLog("ROT", "filter: casting " .. castKey .. ", removing from pos 1")
                         table.remove(prio, 1)
                     else
-                        -- Channeling this spell — check if a high-priority instant is available
-                        -- (e.g. execute-range SWD on a normal mob). If so, promote it.
-                        for idx = 2, #prio do
-                            local ent = prio[idx]
-                            if ent and ent.eta == 0 then
-                                local class = UnitClassification("target") or ""
-                                if class == "normal" or class == "minus" then
-                                    A.DebugLog("ROT", "filter: mid-channel promote " .. ent.key)
-                                    table.remove(prio, idx)
-                                    table.insert(prio, 1, ent)
-                                    lastPriSignature = nil
+                        if channelPolicy ~= "keep_current" then
+                            -- Channeling this spell — check if a high-priority instant is available
+                            -- (e.g. execute-range SWD on a normal mob). If so, promote it.
+                            for idx = 2, #prio do
+                                local ent = prio[idx]
+                                if ent and ent.eta == 0 then
+                                    local class = UnitClassification("target") or ""
+                                    if class == "normal" or class == "minus" then
+                                        A.DebugLog("ROT", "filter: mid-channel promote " .. ent.key)
+                                        table.remove(prio, idx)
+                                        table.insert(prio, 1, ent)
+                                        lastPriSignature = nil
+                                    end
+                                    break
                                 end
-                                break
                             end
                         end
                         A.DebugLog("ROT", "filter: channeling " .. castKey .. " — keep suggestion")
@@ -790,7 +852,9 @@ function A:InitRotation()
             return true
         end
 
-        -- Recompute live remaining times for keys so primary can display live CD and dimming
+        -- Recompute visible countdowns for keys so only DoT refresh entries
+        -- show timer text. Regular spell icons stay clean; real cooldowns are
+        -- represented by the gray sweep overlay instead.
         local function GetRemainingNowForKey(key)
             local now = GetTime()
             if key == "POTION" then
@@ -843,6 +907,11 @@ function A:InitRotation()
             return 0
         end
 
+        local function VisibleRemaining(ent)
+            if not ent or not ent.showTimer then return 0 end
+            return math.max(ent.timerRemaining or 0, 0)
+        end
+
         local p = prio[1]
         local p2 = prio[2]
         local primaryFade = UseFadePrimary(activeSpec, p, p2)
@@ -863,9 +932,9 @@ function A:InitRotation()
             return (ent.eta and ent.eta > 0) and ent.eta or 0
         end
 
-        local primaryLive = LiveRemaining(p)
+        local primaryLive = VisibleRemaining(p)
         local inRangePrimary = p and IsKeyInRange(p.key)
-        local secondaryLive = LiveRemaining(p2)
+        local secondaryLive = VisibleRemaining(p2)
         local inRangeSecondary = p2 and IsKeyInRange(p2.key)
 
         local primaryShown = UpdatePrimaryVisual(primary, p and p.key, p2 and p2.key, primaryFade, GetDisplayIcon, {
@@ -881,26 +950,46 @@ function A:InitRotation()
             primarySignature = primarySignature .. "|" .. tostring(p2.key)
         end
 
-        -- GCD / spell cooldown sweep on primary icon
+        -- GCD / spell cooldown sweep on primary icon.
+        -- Suppress the overlay when the fade is active: CooldownFrameTemplate
+        -- renders at OVERLAY and would hide the ARTWORK fade textures.
+        -- Include GCDs (dur > 0) so the GCD sweep is visible after every cast.
+        -- Track whether the overlay is showing so we can suppress our custom
+        -- cdText in that case — on TBC Anniversary, SetHideCountdownNumbers is
+        -- unavailable, so CooldownFrameTemplate always renders its own countdown
+        -- number.  Showing our cdText simultaneously would produce two numbers.
+        local primaryOverlayActive = false
         if primary.cdOverlay then
-            local spell = p and A.SPELLS[p.key]
-            if spell then
-                local start, dur = GetSpellCooldown(spell.id)
-                if start and dur and dur > 0 then
-                    pcall(CooldownFrame_Set, primary.cdOverlay, start, dur, 1)
+            if primaryShown then
+                pcall(CooldownFrame_Set, primary.cdOverlay, 0, 0, 0)
+            else
+                local spell = p and A.SPELLS[p.key]
+                if spell then
+                    local start, dur = GetSpellCooldown(spell.id)
+                    if start and dur and dur > 0 then
+                        pcall(CooldownFrame_Set, primary.cdOverlay, start, dur, 1)
+                        primaryOverlayActive = true
+                    else
+                        pcall(CooldownFrame_Set, primary.cdOverlay, 0, 0, 0)
+                    end
                 else
                     pcall(CooldownFrame_Set, primary.cdOverlay, 0, 0, 0)
                 end
-            else
-                pcall(CooldownFrame_Set, primary.cdOverlay, 0, 0, 0)
             end
         end
 
-        if primaryLive and primaryLive > 0 then
+        if primaryOverlayActive then
+            -- CooldownFrameTemplate shows its own countdown; suppress our cdText
+            -- to avoid two overlapping numbers on the same icon.
+            primary.cdText:SetText("")
+            if not inRangePrimary then
+                if not primaryShown then primary.icon:SetVertexColor(0.7, 0.2, 0.2) end
+            end
+        elseif primaryLive and primaryLive > 0 then
             primary.cdText:SetText(A.FormatTime(primaryLive))
             -- Dim the icon while it's still on cooldown; if out of range tint red
             if not inRangePrimary then
-                if not primarySplit then primary.icon:SetVertexColor(0.7, 0.2, 0.2) end
+                if not primaryShown then primary.icon:SetVertexColor(0.7, 0.2, 0.2) end
             end
         else
             if p.clip then
@@ -909,7 +998,7 @@ function A:InitRotation()
                 primary.cdText:SetText("")
             end
             if not inRangePrimary then
-                if not primarySplit then primary.icon:SetVertexColor(0.8, 0.2, 0.2) end
+                if not primaryShown then primary.icon:SetVertexColor(0.8, 0.2, 0.2) end
             end
         end
         if lastPriSignature ~= primarySignature then
@@ -918,8 +1007,9 @@ function A:InitRotation()
             lastPriSignature = primarySignature
         end
 
-        -- GetRemainingNowForKey moved above so primary can use it
-
+        -- queueStart must be defined before the display state block and the
+        -- queue rendering loop. When fade is active both prio[1] and prio[2]
+        -- are consumed by the primary icon, so queue icons start at prio[3].
         local queueStart = primaryShown and 3 or 2
 
         for i = 1, 3 do
@@ -927,14 +1017,17 @@ function A:InitRotation()
             local ent = prio[i + queueStart - 1]
             if ent then
                 q.icon:SetTexture(GetDisplayIcon(ent.key))
-                -- Mirror the primary icon: drive the cooldown sweep from the
-                -- live spell cooldown so queue swirls keep ticking too.
+                -- Drive the cooldown sweep only from real spell CDs (dur > 1.5 s).
+                -- Showing the GCD sweep on queue icons creates a confusing spinning
+                -- overlay that competes with the energy countdown text.
+                local qHasRealCD = false
                 if q.cdOverlay then
                     local qspell = A.SPELLS[ent.key]
                     if qspell and qspell.id then
                         local qstart, qdur = GetSpellCooldown(qspell.id)
-                        if qstart and qdur and qdur > 0 then
+                        if qstart and qdur and qdur > 1.5 then
                             pcall(CooldownFrame_Set, q.cdOverlay, qstart, qdur, 1)
+                            qHasRealCD = true
                         else
                             pcall(CooldownFrame_Set, q.cdOverlay, 0, 0, 0)
                         end
@@ -948,10 +1041,16 @@ function A:InitRotation()
                 else
                     -- Use the same live-anchored countdown as the primary icon
                     -- so queue timers tick smoothly even mid-cast/channel.
-                    local live = LiveRemaining(ent)
+                    -- When the overlay is already displaying a real spell-CD sweep,
+                    -- suppress cdText to avoid two numbers on the same icon.
+                    local live = VisibleRemaining(ent)
                     local inRangeQ = IsKeyInRange(ent.key)
                     if live and live > 0 then
-                        q.cdText:SetText(A.FormatTime(live))
+                        if qHasRealCD then
+                            q.cdText:SetText("")
+                        else
+                            q.cdText:SetText(A.FormatTime(live))
+                        end
                         if not inRangeQ then
                             q.icon:SetVertexColor(0.8, 0.2, 0.2)
                         elseif ent.chained then
@@ -976,6 +1075,28 @@ function A:InitRotation()
                 q:Hide()
             end
         end
+
+        -- Expose current display state so the Troubleshooter can report what
+        -- the player is actually seeing vs. what the engine recommends.
+        -- Written after the queue loop so the queue entries are accurate.
+        do
+            local qs = {}
+            for i = 1, 3 do
+                local ent = prio[i + queueStart - 1]
+                if ent then
+                    qs[i] = { key = ent.key, live = VisibleRemaining(ent) }
+                end
+            end
+            A._rotDisplayState = {
+                primaryKey    = p and p.key or nil,
+                secondaryKey  = (primaryShown and p2) and p2.key or nil,
+                primaryLive   = primaryLive,
+                primaryTimer  = primary.cdText:GetText(),
+                fadeActive    = primaryShown,
+                queue         = qs,
+                updatedAt     = GetTime(),
+            }
+        end
     end
 
     ----------------------------------------------------------------
@@ -990,7 +1111,7 @@ function A:InitRotation()
         acc = 0
         local ok, err = pcall(Refresh)
         if not ok then
-            A.DebugLog("ERR", "Refresh: " .. tostring(err))
+            A.ReportError("ROT", "Refresh", err, { source = "ticker" })
         end
     end)
 
@@ -1032,7 +1153,7 @@ function A:InitRotation()
         acc = 0
         local ok, err = pcall(Refresh)
         if not ok then
-            A.DebugLog("ERR", "Refresh(event=" .. event .. "): " .. tostring(err))
+            A.ReportError("ROT", "Refresh", err, { source = "event", event = event })
         end
     end)
 end

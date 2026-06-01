@@ -60,9 +60,9 @@ local spec = {
     },
 
     trackedDebuffs = {
-        { key = "rip",          spellKey = "Rip",          color = "SWP", isDot = true  },  -- duration from SpellDatabase (Rip.duration = 12)
-        { key = "mangle_cat",   spellKey = "Mangle (Cat)", name = "Mangle (Cat)", source = "any", color = "MB",  isDot = false },  -- Mangle (Bear) and Mangle (Cat) both apply this debuff
-        { key = "faerie_fire",  spellKey = "Faerie Fire (Feral)", name = "Faerie Fire", source = "any", duration = 40, color = "FF", isDot = false },  -- FF (Feral) applies the shared "Faerie Fire" debuff
+        { key = "rip",          spellKey = "Rip",          color = "SWP", isDot = true  },
+        { key = "mangle_cat",   spellKey = "Mangle (Cat)", source = "any", color = "MB",  isDot = false },  -- debuffAura/siblings resolved from SpellDatabase
+        { key = "faerie_fire",  spellKey = "Faerie Fire (Feral)", source = "any", duration = 40, color = "FF", isDot = false },  -- debuffAura/siblings resolved from SpellDatabase
     },
 
     trackedBuffs = {
@@ -92,10 +92,8 @@ local spec = {
                                        tooltip = "Use Tiger's Fury as a pre-pull opener when starting out of stealth and at full energy." },
         use_powershift             = { type = "checkbox", label = "Suggest powershift",     default = true,
                                        tooltip = "Suggest Cat Form again when energy is low enough to justify a powershift." },
-        powershift_min_mana_pct    = { type = "slider",   label = "Powershift minimum mana %",   default = 0, min = 0, max = 100, step = 1,
-                                       tooltip = "Only suggest powershift when player mana percent is above this value (0 = disabled)." },
-        powershift_energy_after    = { type = "slider",   label = "Powershift energy after shift", default = 40, min = 0, max = 100, step = 5,
-                                       tooltip = "Energy expected immediately after a powershift (Furor 5/5 = 40, +20 with Wolfshead Helm = 60)." },
+        powershift_min_mana_pct    = { type = "slider",   label = "Powershift minimum mana %",   default = 20, min = 0, max = 100, step = 1,
+                                       tooltip = "Only suggest powershift when the player's mana bar is above this percentage of max mana. Set to 0 to allow powershifting at any mana level." },
         use_bear_form              = { type = "checkbox", label = "Emergency Bear Form",    default = true,
                                        tooltip = "Suggest Bear Form when health drops below the bear threshold." },
         bear_form_hp_pct           = { type = "slider",   label = "Bear Form health threshold",   default = 35, min = 5, max = 100, step = 1,
@@ -109,9 +107,9 @@ local spec = {
         mangle_refresh_seconds     = { type = "slider",   label = "Mangle refresh window",       default = 2, min = 1, max = 6, step = 1,
                                        tooltip = "Refresh Mangle when the debuff has this many seconds or less remaining." },
         dying_fast_pct             = { type = "slider",   label = "Dying fast threshold (%HP/sec)", default = 5, min = 1, max = 20, step = 1,
-                                       tooltip = "Use Ferocious Bite instead of Rip when target loses this % HP per second." },
+                                       tooltip = "(Legacy – no longer used in rotation; kept for saved-data compatibility.)" },
         ferocious_bite_hp_threshold= { type = "slider",   label = "Ferocious Bite HP threshold (absolute)", default = 0, min = 0, max = 100000, step = 1,
-                                       tooltip = "Suggest Ferocious Bite when target HP is <= this absolute amount (0 = disabled)." },
+                                       tooltip = "(Legacy – no longer used in rotation; kept for saved-data compatibility.)" },
     },
 
     -- Settings consumed by engine/display logic that aren't directly
@@ -129,11 +127,9 @@ local spec = {
     -- Each entry is evaluated top-to-bottom; the first entry where ALL
     -- conditions pass becomes the suggested spell.
     -- ---------------------------------------------------------------
-    rotation = {
-
+    legacyRotation = {
         -- Emergency Bear Form fallback when health drops and the mode is enabled.
         {
-            key        = "Bear Form",
             conditions = {
                 { type = "spec_option_enabled", optionKey = "use_bear_form" },
                 { type = "state_compare",       subject = "player_hp_pct", op = "<", value = "bear_form_hp_pct" },
@@ -193,7 +189,7 @@ local spec = {
                 { type = "bear_form" },
                 { type = "target_valid" },
                 { type = "cooldown_ready", spellKey = "Faerie Fire (Feral)" },
-                { type = "debuff_property_compare", debuff = "Faerie Fire", source = "any", property = "remaining", op = "<", value = "faerie_fire_refresh_seconds" },
+                { type = "debuff_property_compare", spellKey = "Faerie Fire (Feral)", source = "any", property = "remaining", op = "<", value = "faerie_fire_refresh_seconds" },
             },
         },
 
@@ -260,7 +256,7 @@ local spec = {
             },
         },
 
-        -- 2. Ravage – stealth opener when behind target
+        -- 2. Ravage – stealth opener when behind target (costs 60 energy)
         {
             key        = "Ravage",
             explicitPriority = 200,
@@ -270,10 +266,11 @@ local spec = {
                 { type = "precombat" },
                 { type = "is_stealthed" },
                 { type = "behind_target" },
+                { type = "resource_gte", amount = 60 },
             },
         },
 
-        -- 3. Pounce – stealth opener when not behind target
+        -- 3. Pounce – stealth opener when not behind target (costs 50 energy)
         {
             key        = "Pounce",
             explicitPriority = 200,
@@ -283,6 +280,7 @@ local spec = {
                 { type = "precombat" },
                 { type = "is_stealthed" },
                 { type = "not_behind_target" },
+                { type = "resource_gte", amount = 50 },
             },
         },
 
@@ -295,12 +293,15 @@ local spec = {
                 { type = "not_stealthed" },
                 { type = "target_valid" },
                 { type = "cooldown_ready", spellKey = "Faerie Fire (Feral)" },
-                { type = "debuff_property_compare", debuff = "Faerie Fire", source = "any", property = "remaining", op = "<", value = "faerie_fire_refresh_seconds" },
+                { type = "debuff_property_compare", spellKey = "Faerie Fire (Feral)", source = "any", property = "remaining", op = "<", value = "faerie_fire_refresh_seconds" },
             },
         },
 
         -- ── FINISHERS ─────────────────────────────────────────────
-        -- Ferocious Bite only when the target is dying fast / within execute rules, and only when Bite is actually castable.
+        -- Ferocious Bite at 5 CP when:
+        --   a) target TTD is shorter than rip_min_ttd (not worth applying Rip), OR
+        --   b) the estimated hit will outright kill the target.
+        -- At 5 CP we always go for it in either case.
         {
             key        = "Ferocious Bite",
             conditions = {
@@ -313,14 +314,16 @@ local spec = {
                     { type = "state_compare", subject = "resource", op = ">=", value = 35 },
                     { type = "clearcasting" },
                 }},
+                -- Target dying too fast for Rip to tick out, OR FB will kill it outright.
                 { type = "any_of", conditions = {
-                    { type = "target_dying_fast",   pctPerSec = "dying_fast_pct", direction = "faster" },
-                    { type = "state_compare", subject = "target_hp", op = "<=", value = "ferocious_bite_hp_threshold" },
+                    { type = "state_compare", subject = "target_ttd", op = "<", value = "rip_min_ttd" },
+                    { type = "spell_can_kill_target", spellKey = "Ferocious Bite" },
                 }},
             },
         },
 
-        -- 4 CP Bite fallback on dying targets.
+        -- Ferocious Bite at 4 CP — only when FB is predicted to kill the target.
+        -- (If target is dying fast but FB can't kill at 4 CP, fall through to Shred/Mangle.)
         {
             key        = "Ferocious Bite",
             conditions = {
@@ -333,10 +336,7 @@ local spec = {
                     { type = "state_compare", subject = "resource", op = ">=", value = 35 },
                     { type = "clearcasting" },
                 }},
-                { type = "any_of", conditions = {
-                    { type = "target_dying_fast",   pctPerSec = "dying_fast_pct", direction = "faster" },
-                    { type = "state_compare", subject = "target_hp", op = "<=", value = "ferocious_bite_hp_threshold" },
-                }},
+                { type = "spell_can_kill_target", spellKey = "Ferocious Bite" },
             },
         },
 
@@ -362,12 +362,13 @@ local spec = {
         -- Refresh Mangle before dropping the debuff.
         {
             key        = "Mangle (Cat)",
+            explicitPriority = 10,  -- same bucket as builders so crossfade works when refresh fires
             conditions = {
                 { type = "cat_form" },
                 { type = "target_valid" },
                 { type = "spec_option_enabled", optionKey = "use_mangle" },
                 { type = "not_stealthed" },
-                { type = "debuff_property_compare", debuff = "Mangle (Cat)", source = "any", property = "remaining", op = "<", value = "mangle_refresh_seconds" },
+                { type = "debuff_property_compare", spellKey = "Mangle (Cat)", source = "any", property = "remaining", op = "<", value = "mangle_refresh_seconds" },
                 { type = "any_of", conditions = {
                     { type = "state_compare", subject = "resource", op = ">=", value = 40 },
                     { type = "clearcasting" },
@@ -376,7 +377,11 @@ local spec = {
         },
 
         -- ── BUILDERS ──────────────────────────────────────────────
-        -- Split builder pair: Shred is the preferred builder; Mangle is the paired fallback when Shred is not the practical choice.
+        -- Aggro-gated split: Shred when target is NOT attacking the player
+        -- (player can safely position behind); Mangle when player has aggro
+        -- (target is facing the player, Shred can't be used from the front)
+        -- or when Shred is disabled.  The two entries are mutually exclusive
+        -- so the fade animation is never needed for this pair.
         {
             key        = "Shred",
             explicitPriority = 10,
@@ -385,6 +390,9 @@ local spec = {
                 { type = "target_valid" },
                 { type = "spec_option_enabled", optionKey = "use_shred" },
                 { type = "not_stealthed" },
+                -- Only suggest Shred when target is not attacking the player,
+                -- since that means the player can safely position behind it.
+                { type = "not_has_aggro" },
                 { type = "any_of", conditions = {
                     { type = "state_compare", subject = "resource", op = ">=", value = 42 },
                     { type = "clearcasting" },
@@ -400,6 +408,12 @@ local spec = {
                 { type = "target_valid" },
                 { type = "spec_option_enabled", optionKey = "use_mangle" },
                 { type = "not_stealthed" },
+                -- Suggest Mangle when the target is attacking the player (can't
+                -- Shred from the front), or when Shred is disabled entirely.
+                { type = "any_of", conditions = {
+                    { type = "has_aggro" },
+                    { type = "not", condition = { type = "spec_option_enabled", optionKey = "use_shred" } },
+                }},
                 { type = "any_of", conditions = {
                     { type = "state_compare", subject = "resource", op = ">=", value = 40 },
                     { type = "clearcasting" },
@@ -415,21 +429,35 @@ local spec = {
             -- so the engine projects the post-shift resource state into the
             -- queue ETAs (Shred / Mangle then show "ready in <gcd>" rather
             -- than "wait N seconds for energy regen").
-            postCast   = { resource = "energy", set = "powershift_energy_after" },
+            postCast   = { resource = "energy", compute = "ComputePowershiftEnergy" },
             conditions = {
                 { type = "cat_form" },
                 { type = "not_stealthed" },
                 { type = "spec_option_enabled", optionKey = "use_powershift" },
                 { type = "in_combat" },
-                { type = "buff_property_compare", buff = "Cat Form", property = "stacks", op = ">", value = 0 },
-                { type = "state_compare", subject = "player_base_mana_pct", op = ">", value = "powershift_min_mana_pct" },
+                -- Use player_mana_pct (current / max mana, matching the UI mana bar)
+                -- so the threshold slider matches what the player sees.
+                -- The check prevents powershifting when mana is below the configured
+                -- minimum, which would leave too little mana to re-cast Cat Form.
+                { type = "state_compare", subject = "player_mana_pct", op = ">", value = "powershift_min_mana_pct" },
                 { type = "not", condition = { type = "clearcasting" } },
+                -- Only suggest powershift when current energy is low enough that
+                -- even after ONE energy tick the player still wouldn't have enough
+                -- to cast the next ability.  This means the player would have to
+                -- wait for at least 2 ticks — at which point powershifting is
+                -- faster than standing still.
+                --
+                -- Threshold = ability_cost - energy_per_tick (20):
+                --   Has aggro  → Mangle (40 cost) → threshold 20  (40 - 20)
+                --   No aggro   → Shred  (42 cost) → threshold 22  (42 - 20)
                 { type = "any_of", conditions = {
-                    { type = "state_compare", subject = "resource_at_gcd", op = "<", value = 10 },
                     { type = "all_of", conditions = {
-                        { type = "state_compare", subject = "resource_at_gcd", op = "<", value = 22 },
-                        { type = "state_compare", subject = "resource_at_gcd", op = ">", value = 10 },
-                        { type = "state_compare", subject = "next_power_tick_with_gcd", op = ">", value = 1.0 },
+                        { type = "has_aggro" },
+                        { type = "state_compare", subject = "resource", op = "<", value = 20 },
+                    }},
+                    { type = "all_of", conditions = {
+                        { type = "not_has_aggro" },
+                        { type = "state_compare", subject = "resource", op = "<", value = 22 },
                     }},
                 }},
             },
@@ -437,6 +465,8 @@ local spec = {
 
     },  -- end rotation
 }
+
+spec.rotation = A.SpecTemplates.BuildFeralDruidRotation(spec)
 
 ------------------------------------------------------------------------
 -- Register

@@ -133,7 +133,10 @@ local spec = {
             fakeQueue   = true,   -- enable FQ for this spell
             clipOverlay = true,   -- show green clip zone
         minDuration = 1.0,    -- minimum channel duration required before clipping
-        clipReasons = { "Mind Blast", "Vampiric Touch", "Shadow Word: Pain" },
+        -- Only DoT refreshes are allowed to clip Mind Flay here. Mind Blast is
+        -- intentionally excluded so it cannot preempt the channel before the
+        -- filler chain has actually finished.
+        clipReasons = { "Vampiric Touch", "Shadow Word: Pain" },
             tickSound   = true,   -- tick sound feedback
             tickFlash   = true,   -- tick flash feedback
             tickMarkers = true,   -- show tick markers on bar
@@ -175,7 +178,7 @@ local spec = {
     -- Rotation — core spells (Vampiric Touch, Shadow Word: Pain, Mind Blast, Mind Flay) are always on.
     -- Optional/situational spells (Devouring Plague, Shadow Word: Death, Shadowfiend) have enable toggles.
     -------------------------------------------------------------------
-    rotation = {
+    legacyRotation = {
         _fromFile = true,
         { key = "SWD_EXEC", conditions = {{ type = "spell_can_kill_target", spellKey = "Shadow Word: Death", safetyKey = "swdSafetyPct" }, { type = "cooldown_ready", spellKey = "Shadow Word: Death" }, { type = "spec_option_enabled", optionKey = "use_SWD" }} },
         { key = "Inner Focus",       conditions = {{ type = "spec_option_enabled", optionKey = "ifInsert.enabled" }, { type = "option_gated_classification", optionKey = "ifInsert.onlyForBoss", classification = "boss" }, { type = "cooldown_ready", spellKey = "Inner Focus" }, { type = "buff_property_compare", buff = "Inner Focus", property = "stacks", op = "==", value = 0 }}, insertBeforeKey = "ifInsert.before" },
@@ -233,7 +236,16 @@ local spec = {
         { key = "Devouring Plague",       conditions = {{ type = "spec_option_enabled", optionKey = "use_DP" }, { type = "debuff_property_compare", debuff = "Devouring Plague", source = "player", property = "remaining", op = "==", value = 0 }, { type = "cooldown_ready", spellKey = "Devouring Plague" }} },
         { key = "POTION",   conditions = {{ type = "spec_option_enabled", optionKey = "suggestPot" }, { type = "state_compare", subject = "player_mana_pct", op = "<", value = "potManaThreshold" }, { type = "item_ready_and_owned" }} },
         { key = "RUNE",     conditions = {{ type = "spec_option_enabled", optionKey = "suggestRune" }, { type = "state_compare", subject = "player_mana_pct", op = "<", value = "runeManaThreshold" }, { type = "item_ready_and_owned" }} },
-        { key = "Mind Flay",       conditions = {{ type = "always" }} },
+        -- Mind Flay is the filler.  `always` keeps it in the engine's candidate
+        -- list during the channel so the channel-clip machinery in
+        -- _BuildResultFromCandidates fires correctly: Mind Flay stays at
+        -- position 1 (with clip=true) while it channels, clip-reason spells
+        -- (MB, VT, SWP) surface at position 2 when they are ready, and the
+        -- rest of the queue populates with upcoming dot deadlines.
+        -- `isFiller = true` allows the engine to repeat Mind Flay in queue
+        -- slots 3 and 4 when no higher-priority spell is queued there,
+        -- so all four icon slots are always populated during a Mind Flay chain.
+        { key = "Mind Flay", isFiller = true, repeatLimit = 2, conditions = {{ type = "always" }} },
     },
 
     -------------------------------------------------------------------
@@ -291,7 +303,9 @@ local spec = {
         end
         ctx.swpDuration = 18 + rank * 3
     end,
-}
+  }
+
+  spec.rotation = A.SpecTemplates.BuildShadowPriestRotation(spec)
 
 -- Register with SpecManager
 if A.SpecManager then

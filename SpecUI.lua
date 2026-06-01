@@ -1201,6 +1201,12 @@ local COND_TYPES = {
     { type = "setting_compare",            label = "Setting Compare",       fields = { "optionKey", "op", "value" } },
 }
 
+local CHANNEL_POLICY_OPTIONS = {
+    "default",
+    "keep_current",
+    "replace_current",
+}
+
 -- Fields that should render as dropdowns instead of free-text edit boxes
 local function CollectSliderOptionKeys()
     local keys = {}
@@ -2305,6 +2311,12 @@ local function BuildRotationTab(container, spec)
         if entry.explicitPriority ~= nil then
             hdrText = hdrText .. string.format("  {P:%s}", tostring(entry.explicitPriority))
         end
+        if entry.repeatLimit ~= nil then
+            hdrText = hdrText .. string.format("  {Q:%s}", tostring(entry.repeatLimit))
+        end
+        if entry.channelPolicy then
+            hdrText = hdrText .. string.format("  {C:%s}", tostring(entry.channelPolicy))
+        end
         hdr:SetText(hdrText)
 
         -- Key edit (editbox + spell picker dropdown)
@@ -2481,6 +2493,70 @@ local function BuildRotationTab(container, spec)
         end)
         prEB:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
         y = y - 20
+
+        local qLbl = container:CreateFontString(nil, "OVERLAY")
+        qLbl:SetFont(FONT, 8)
+        qLbl:SetPoint("TOPLEFT", container, "TOPLEFT", 30, y)
+        qLbl:SetTextColor(0.6, 0.6, 0.6, 1)
+        qLbl:SetText("Queue copies:")
+        qLbl:SetScript("OnEnter", function(self)
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:SetText("Queue copies")
+            GameTooltip:AddLine("Controls how many visible copies of this entry the advisor may show. Leave blank for the default behavior.", 1, 1, 1, true)
+            GameTooltip:Show()
+        end)
+        qLbl:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+        local qEB = CreateFrame("EditBox", nil, container, "BackdropTemplate")
+        qEB:SetSize(40, 16)
+        qEB:SetPoint("LEFT", qLbl, "RIGHT", 4, 0)
+        qEB:SetFont(FONT, 9, "")
+        qEB:SetAutoFocus(false)
+        qEB:SetTextColor(1, 1, 1, 1)
+        A.CreateBackdrop(qEB, 0.1, 0.1, 0.1, 0.8, 0.3, 0.3, 0.3, 0.8)
+        qEB:SetTextInsets(4, 4, 0, 0)
+        qEB:SetText((entry.repeatLimit ~= nil) and tostring(entry.repeatLimit) or "")
+        qEB:SetScript("OnEnterPressed", function(self)
+            local raw = strtrim(self:GetText() or "")
+            if raw == "" then
+                entry.repeatLimit = nil
+                self:SetText("")
+            else
+                local num = tonumber(raw)
+                if num and num > 0 then
+                    entry.repeatLimit = math.floor(num + 0.5)
+                    self:SetText(tostring(entry.repeatLimit))
+                else
+                    self:SetText((entry.repeatLimit ~= nil) and tostring(entry.repeatLimit) or "")
+                end
+            end
+            editorDirty = true
+            self:ClearFocus()
+            if editorRefreshFn then editorRefreshFn() end
+        end)
+        qEB:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+        y = y - 20
+
+        local cpDD, cpLbl = SUIDropdown(container, "Channel mode:", CHANNEL_POLICY_OPTIONS,
+            function() return entry.channelPolicy or "default" end,
+            function(v)
+                if v == "default" then
+                    entry.channelPolicy = nil
+                else
+                    entry.channelPolicy = v
+                end
+                editorDirty = true
+                if editorRefreshFn then editorRefreshFn() end
+            end,
+            30, y)
+        cpLbl:SetScript("OnEnter", function(self)
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:SetText("Channel mode")
+            GameTooltip:AddLine("Controls how the advisor handles this entry while the player is channeling it. Default keeps the current channel and can still promote instant spells mid-channel.", 1, 1, 1, true)
+            GameTooltip:Show()
+        end)
+        cpLbl:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        y = y - 50
 
         -- Conditions
         if entry.conditions then
@@ -3924,6 +4000,8 @@ function SUI:Open(specID)
     closeBtn:SetScript("OnClick", function()
         f:Hide()
         if previewTicker then previewTicker:Cancel(); previewTicker = nil end
+        if troubleshooterTicker then troubleshooterTicker:Cancel(); troubleshooterTicker = nil end
+        A.SpecUI._troubleshooterCaptureFn = nil
     end)
 
     -- ESC to close
@@ -3965,7 +4043,7 @@ function SUI:Open(specID)
     self._scroll  = scroll
 
     -- Tabs
-    local tabNames = { "General", "Rotation", "Preview", "CastBar & FQ", "Load Cond.", "Import/Export" }
+    local tabNames = { "General", "Rotation", "Preview", "CastBar & FQ", "Load Cond.", "Import/Export", "Debug" }
     local tabCount = #tabNames
     local tabWidth = math.floor((FRAME_W - 8 - (tabCount - 1) * 4) / tabCount)
     local tabSpacing = tabWidth + 4
@@ -3980,6 +4058,510 @@ function SUI:Open(specID)
 
     self:SwitchTab(1, spec)
     f:Show()
+end
+
+------------------------------------------------------------------------
+-- Tab 7 – Troubleshooter
+-- Shows per-slot rotation diagnostics: which conditions passed/failed,
+-- simulated ctx values, and a copyable text capture for bug reports.
+------------------------------------------------------------------------
+
+local troubleshooterTicker  = nil
+
+-- Helper: get active form name from ctx (live or projected).
+local function TSH_FormStr(ctx, spec)
+    if not ctx then return "?" end
+    if ctx.trackedBuffs then
+        local tb = ctx.trackedBuffs
+        if tb["cat_form"]       and tb["cat_form"].active       then return "Cat"     end
+        if tb["dire_bear_form"] and tb["dire_bear_form"].active then return "DireBear" end
+        if tb["bear_form"]      and tb["bear_form"].active      then return "Bear"    end
+        return "none"
+    end
+    -- Projected ctx: trackedBuffs is nil, fall back to simBuffs + spec.trackedBuffs map.
+    if ctx.simBuffs and spec and spec.trackedBuffs then
+        for _, bd in ipairs(spec.trackedBuffs) do
+            local bname = bd.name
+            if bname and ctx.simBuffs[bname] and ctx.simBuffs[bname].active then
+                local k = bd.key
+                if k == "cat_form"                        then return "Cat"      end
+                if k == "bear_form" or k == "dire_bear_form" then return "Bear"  end
+            end
+        end
+    end
+    return "?"
+end
+
+-- Helper: get debuff remaining seconds from ctx (live or projected).
+local function TSH_DebuffRem(spellKey, ctx)
+    if not ctx or not spellKey then return nil end
+    local now = ctx.now or GetTime()
+    if ctx.trackedDebuffsBySpellKey then
+        local ds = ctx.trackedDebuffsBySpellKey[spellKey]
+        return ds and (ds.remaining or 0) or nil
+    end
+    -- Projected ctx: use simDebuffs.
+    if ctx.simDebuffs then
+        local def = A.GetSpellDefinition and A.GetSpellDefinition(spellKey)
+        local aura = def and (def.debuffAura or def.name)
+        if aura then
+            local sim = ctx.simDebuffs[aura]
+            if sim       then return math.max((sim.expiry or 0) - now, 0) end
+            if sim == false then return 0 end
+        end
+    end
+    return nil
+end
+
+-- Format one condition to a compact plain-text string with live values.
+local function TSH_Cond(cond, ctx)
+    if not cond then return "?" end
+    local t = cond.type or "?"
+
+    local function R(v)
+        if type(v) == "string" and A.SpecVal then
+            local r = A.SpecVal(v, v)
+            if r ~= v then return tostring(r) .. "[" .. v .. "]" end
+        end
+        return tostring(v)
+    end
+
+    if t == "state_compare" then
+        local sub = cond.subject or "?"
+        local op  = cond.op or "=="
+        local val = R(cond.value)
+        local act
+        if ctx then
+            if     sub == "combo_points"      then act = ctx.comboPoints
+            elseif sub == "resource"          then act = ctx.resourcePower and math.floor(ctx.resourcePower)
+            elseif sub == "resource_at_gcd"   then act = ctx.resourceAtGCD and math.floor(ctx.resourceAtGCD)
+            elseif sub == "target_ttd"        then act = ctx.targetTTD and string.format("%.1fs", ctx.targetTTD)
+            elseif sub == "player_hp_pct" then
+                act = ctx.playerHP and ctx.playerMaxHP and ctx.playerMaxHP > 0
+                      and string.format("%.0f%%", ctx.playerHP / ctx.playerMaxHP * 100)
+            elseif sub == "player_base_mana_pct" then
+                act = ctx.baseManaPct and string.format("%.0f%%", ctx.baseManaPct * 100)
+            end
+        end
+        return sub .. " " .. op .. " " .. val .. (act ~= nil and ("(=" .. tostring(act) .. ")") or "")
+
+    elseif t == "resource_gte" then
+        local req = cond.amount
+        local act = ctx and ctx.resourcePower and math.floor(ctx.resourcePower)
+        return "resource>=" .. tostring(req) .. (act ~= nil and ("(=" .. act .. ")") or "")
+
+    elseif t == "debuff_property_compare" then
+        local sk  = cond.spellKey or cond.debuff or "?"
+        local prop = cond.property or "?"
+        local op   = cond.op or "?"
+        local val  = R(cond.value)
+        local act
+        if ctx and prop == "remaining" then
+            local rem = TSH_DebuffRem(cond.spellKey, ctx)
+            if rem ~= nil then act = string.format("=%.1fs", rem) end
+        end
+        return sk .. "." .. prop .. " " .. op .. " " .. val .. (act or "")
+
+    elseif t == "dot_missing" then
+        local sk  = cond.spellKey or "?"
+        local rem = TSH_DebuffRem(cond.spellKey, ctx)
+        if rem ~= nil then
+            return "dot_missing " .. sk .. (rem > 0 and string.format("(on=%.1fs)", rem) or "(absent)")
+        end
+        return "dot_missing " .. sk
+
+    elseif t == "cat_form"  then return "cat_form"
+    elseif t == "bear_form" then return "bear_form"
+    elseif t == "is_stealthed"   then return "is_stealthed"
+    elseif t == "not_stealthed"  then return "not_stealthed"
+    elseif t == "clearcasting"   then return "clearcasting"
+    elseif t == "target_valid"   then return "target_valid"
+    elseif t == "in_combat"      then return "in_combat"
+    elseif t == "precombat"      then return "precombat"
+    elseif t == "target_dying_fast" then return "target_dying_fast(thresh=" .. R(cond.pctPerSec) .. ")"
+    elseif t == "cooldown_ready" then return "cd_ready:" .. tostring(cond.spellKey)
+    elseif t == "spec_option_enabled" then return "opt:" .. tostring(cond.optionKey)
+    elseif t == "not_recently_cast" then
+        return "not_recently:" .. tostring(cond.spellKey or cond.spellName)
+    elseif t == "buff_property_compare" then
+        return "buff:" .. tostring(cond.buff) .. "." .. tostring(cond.property) .. " " .. tostring(cond.op) .. " " .. R(cond.value)
+    elseif t == "any_of" then
+        local parts = {}
+        for _, sub in ipairs(cond.conditions or {}) do
+            parts[#parts + 1] = TSH_Cond(sub, ctx)
+            if #parts >= 3 then break end
+        end
+        local suffix = #(cond.conditions or {}) > 3 and ("…+" .. (#(cond.conditions) - 3)) or ""
+        return "any_of[" .. table.concat(parts, " | ") .. suffix .. "]"
+    elseif t == "all_of" then
+        return "all_of[" .. #(cond.conditions or {}) .. " conds]"
+    elseif t == "not" then
+        return "not{" .. TSH_Cond(cond.condition, ctx) .. "}"
+    else
+        return t
+    end
+end
+
+-- Format one entry's diagnostics as an array of plain-text lines.
+local function TSH_EntryLines(entryDiag, ctx, showAllConds)
+    if not entryDiag then return {} end
+    local lines = {}
+    local status = entryDiag.status or "fail"
+    local stag
+    if     status == "pass"         then stag = "PASS"
+    elseif status == "predict"      then stag = "PRED"
+    elseif status == "unknown_spell" then stag = "UNK"
+    elseif status == "no_target"    then stag = "SKIP"
+    else                                  stag = "fail"
+    end
+
+    -- Find first failing condition for the compact summary line.
+    local firstFail = ""
+    local firstFailCond
+    for _, cr in ipairs(entryDiag.conditionResults or {}) do
+        if not cr.pass then
+            firstFailCond = cr.cond
+            firstFail = " ← " .. TSH_Cond(cr.cond, ctx)
+            break
+        end
+    end
+
+    lines[1] = string.format("  [%s] %s%s", stag, entryDiag.key or "?", firstFail)
+
+    if showAllConds then
+        for _, cr in ipairs(entryDiag.conditionResults or {}) do
+            local icon = cr.pass and "✓" or "✗"
+            lines[#lines + 1] = "        " .. icon .. " " .. TSH_Cond(cr.cond, ctx)
+        end
+    end
+    return lines
+end
+
+-- Generate the context summary line for a slot.
+local function TSH_CtxLine(ctx, spec, label)
+    if not ctx then return label .. "ctx=nil" end
+    local energy = ctx.resourcePower and math.floor(ctx.resourcePower) or "?"
+    local cp     = ctx.comboPoints or "?"
+    local form   = TSH_FormStr(ctx, spec)
+    local parts  = { string.format("E=%s CP=%s Form=%s", tostring(energy), tostring(cp), form) }
+
+    local simElapsed = (ctx.builtAt and ctx.now) and math.max(ctx.now - ctx.builtAt, 0) or 0
+    if simElapsed > 0 then
+        parts[#parts + 1] = string.format("sim=%.1fs", simElapsed)
+    end
+
+    if ctx.mbCD ~= nil then
+        parts[#parts + 1] = string.format("mbCD=%.1fs", math.max((ctx.mbCD or 0) - simElapsed, 0))
+    end
+
+    -- Key debuffs from spec.trackedDebuffs
+    if spec and spec.trackedDebuffs then
+        for _, td in ipairs(spec.trackedDebuffs) do
+            local sk  = td.spellKey or td.key
+            local rem = sk and TSH_DebuffRem(sk, ctx)
+            if rem ~= nil then
+                parts[#parts + 1] = string.format("%s=%.1fs", td.key, rem)
+            end
+        end
+    end
+    return label .. table.concat(parts, "  ")
+end
+
+-- Generate full capture text (plain, no color codes) for the EditBox.
+local function TSH_GenCaptureText(debugData, spec)
+    if not debugData then return "(no data)" end
+    local L = {}
+    local function add(s) L[#L + 1] = s end
+
+    add("=== SPHelper Troubleshooter Snapshot ===")
+    add("Spec: " .. ((spec.meta and spec.meta.specName) or (spec.meta and spec.meta.id) or "?"))
+    local now = GetTime()
+    local secs = math.floor(now % 60)
+    local mins = math.floor((now / 60) % 60)
+    local hrs  = math.floor((now / 3600) % 24)
+    add(string.format("Uptime: %02d:%02d:%02d", hrs, mins, secs))
+    if UnitExists("target") then
+        local thp    = UnitHealth("target") or 0
+        local thpMax = UnitHealthMax("target") or 1
+        add(string.format("Target: %s  HP: %.0f%%", UnitName("target") or "?", (thp / math.max(thpMax, 1)) * 100))
+    else
+        add("Target: none")
+    end
+
+    -- ── What the advisor is actually showing ─────────────────────────────────
+    local ds = A._rotDisplayState
+    if ds then
+        local age = string.format("%.2fs ago", now - (ds.updatedAt or now))
+        local primary = ds.primaryKey or "(none)"
+        if ds.fadeActive and ds.secondaryKey then
+            primary = primary .. " ↔ " .. ds.secondaryKey .. " [fade]"
+        end
+        local timer = (ds.primaryTimer and ds.primaryTimer ~= "") and ("  timer=" .. ds.primaryTimer) or "  timer=(ready)"
+        add("")
+        add("--- Advisor display (updated " .. age .. ") ---")
+        add("  Primary: " .. primary .. timer)
+        if ds.queue and #ds.queue > 0 then
+            local qParts = {}
+            for i, q in ipairs(ds.queue) do
+                local live = q.live and q.live > 0 and string.format("%.1fs", q.live) or "rdy"
+                qParts[#qParts + 1] = string.format("Q%d=%s(%s)", i, q.key, live)
+            end
+            add("  Queue: " .. table.concat(qParts, "  "))
+        end
+        -- Flag mismatch between what is displayed and what engine recommends for slot 1
+        local engineSlot1 = debugData.slots and debugData.slots[1] and debugData.slots[1].entry
+        local engineKey = engineSlot1 and engineSlot1.key
+        if engineKey and ds.primaryKey and ds.primaryKey ~= engineKey
+           and not (ds.fadeActive and ds.secondaryKey == engineKey) then
+            add("  *** MISMATCH: engine says " .. engineKey .. " but display shows " .. ds.primaryKey .. " ***")
+        end
+    else
+        add("")
+        add("--- Advisor display: no display state (rotation advisor not running?) ---")
+    end
+    add("")
+
+    for i, slot in ipairs(debugData.slots) do
+        local entry = slot.entry
+        local ctx   = slot.ctx
+        local tag   = slot.isSimulated and "[SIM]" or "[LIVE]"
+        local spell = entry and entry.key or "(none)"
+        local eta   = entry and entry.eta and entry.eta > 0 and string.format(" eta=%.1fs", entry.eta) or ""
+
+        add(string.format("--- Slot %d %s → %s%s ---", i, tag, spell, eta))
+        if i > 1 and debugData.result and debugData.result[i - 1] then
+            add("  (projected after: " .. debugData.result[i - 1].key .. ")")
+        end
+        add(TSH_CtxLine(ctx, spec, "  "))
+        add("  Rotation entries:")
+
+        local entries = slot.diagnostics and slot.diagnostics.entries or {}
+        for _, eDiag in ipairs(entries) do
+            for _, line in ipairs(TSH_EntryLines(eDiag, ctx, true)) do
+                add(line)
+            end
+        end
+        add("")
+    end
+
+    return table.concat(L, "\n")
+end
+
+-- Compact chat-printable summary (for /sph capture command).
+function A.TroubleshooterChatCapture()
+    local RE = A.RotationEngine
+    local spec = A.SpecManager and A.SpecManager:GetSpecByID(A._activeSpecID or "")
+    if not RE or not spec then
+        print("|cff8882d5SPHelper|r: No active spec for capture.")
+        return
+    end
+    local ok, debugData = pcall(function() return RE:DebugEvaluateSlots(spec) end)
+    if not ok or not debugData then
+        print("|cff8882d5SPHelper|r: Capture error: " .. tostring(debugData))
+        return
+    end
+    print("|cff8882d5SPHelper|r Troubleshooter Capture:")
+    for i, slot in ipairs(debugData.slots) do
+        local entry = slot.entry
+        local spell = entry and entry.key or "(none)"
+        local tag   = slot.isSimulated and "[SIM]" or "[LIVE]"
+        local ctx   = slot.ctx
+        local energy = ctx and ctx.resourcePower and math.floor(ctx.resourcePower) or "?"
+        local cp     = ctx and ctx.comboPoints or "?"
+        print(string.format("  Slot %d %s: |cffffcc00%s|r  E=%s CP=%s", i, tag, spell, tostring(energy), tostring(cp)))
+        -- Show first blocked entry for this slot if it's not the winner
+        local entries = slot.diagnostics and slot.diagnostics.entries or {}
+        for _, eDiag in ipairs(entries) do
+            if eDiag.status == "fail" and eDiag.key ~= spell then
+                local firstFail = ""
+                for _, cr in ipairs(eDiag.conditionResults or {}) do
+                    if not cr.pass then firstFail = TSH_Cond(cr.cond, ctx); break end
+                end
+                print(string.format("    |cffff8844FAIL|r %s ← %s", eDiag.key, firstFail))
+                break
+            end
+        end
+    end
+    -- If SpecUI is open on Tab 7, also push to the capture box.
+    if A.SpecUI and A.SpecUI._activeTab == 7 and A.SpecUI._troubleshooterCaptureFn
+       and A.TroubleshooterGenText then
+        A.SpecUI._troubleshooterCaptureFn(A.TroubleshooterGenText(debugData, spec))
+    end
+end
+
+local function BuildTroubleshooterTab(container, spec)
+    local contentW = (container:GetWidth() or 640) - 24
+
+    -- Title
+    local title = container:CreateFontString(nil, "OVERLAY")
+    title:SetFont(FONT, 10, "OUTLINE")
+    title:SetPoint("TOPLEFT", container, "TOPLEFT", 12, -8)
+    title:SetTextColor(1, 0.85, 0.4, 1)
+    title:SetText("Rotation Troubleshooter")
+
+    -- Status label (LIVE / CAPTURED)
+    local statusLbl = container:CreateFontString(nil, "OVERLAY")
+    statusLbl:SetFont(FONT, 9)
+    statusLbl:SetPoint("TOPLEFT", container, "TOPLEFT", 180, -9)
+    statusLbl:SetText("|cff44ff44● LIVE|r")
+
+    -- Capture button
+    local capBtn = CreateFrame("Button", nil, container, "BackdropTemplate")
+    capBtn:SetSize(90, 20)
+    capBtn:SetPoint("TOPLEFT", container, "TOPLEFT", 260, -8)
+    A.CreateBackdrop(capBtn, 0.12, 0.10, 0.18, 0.9, 0.3, 0.25, 0.45, 1)
+    local capLbl = capBtn:CreateFontString(nil, "OVERLAY")
+    capLbl:SetFont(FONT, 9, "OUTLINE")
+    capLbl:SetPoint("CENTER")
+    capLbl:SetText("Capture")
+
+    -- Live display (FontString, updated by ticker)
+    local liveDisplay = container:CreateFontString(nil, "OVERLAY")
+    liveDisplay:SetFont(FONT, 8)
+    liveDisplay:SetPoint("TOPLEFT", container, "TOPLEFT", 12, -34)
+    liveDisplay:SetTextColor(0.85, 0.85, 0.85, 1)
+    liveDisplay:SetWidth(contentW)
+    liveDisplay:SetJustifyH("LEFT")
+    liveDisplay:SetText("Waiting for data…")
+
+    -- Separator / capture label
+    local sepLbl = container:CreateFontString(nil, "OVERLAY")
+    sepLbl:SetFont(FONT, 8, "OUTLINE")
+    sepLbl:SetTextColor(0.6, 0.6, 0.7, 1)
+    -- Positioned relative to liveDisplay dynamically
+
+    -- Capture EditBox (multi-line, selectable)
+    local captureFrame = CreateFrame("Frame", nil, container, "BackdropTemplate")
+    captureFrame:SetSize(contentW, 220)
+    A.CreateBackdrop(captureFrame, 0.05, 0.04, 0.08, 0.95, 0.2, 0.2, 0.3, 0.8)
+
+    local captureScroll = CreateFrame("ScrollFrame", nil, captureFrame, "UIPanelScrollFrameTemplate")
+    captureScroll:SetPoint("TOPLEFT",     captureFrame, "TOPLEFT",  4,  -4)
+    captureScroll:SetPoint("BOTTOMRIGHT", captureFrame, "BOTTOMRIGHT", -24, 4)
+
+    local captureBox = CreateFrame("EditBox", nil, captureScroll)
+    captureBox:SetMultiLine(true)
+    captureBox:SetAutoFocus(false)
+    captureBox:SetMaxLetters(0)
+    captureBox:SetFontObject("ChatFontNormal")
+    captureBox:SetWidth(captureScroll:GetWidth() or (contentW - 32))
+    captureBox:SetHeight(1000)
+    captureScroll:SetScrollChild(captureBox)
+    captureScroll:SetScript("OnSizeChanged", function(s, w, _)
+        captureBox:SetWidth(w)
+    end)
+
+    -- Expose the capture fill function so /sph capture can also push text here.
+    local function FillCaptureBox(text)
+        captureBox:SetText(text or "")
+        captureScroll:SetVerticalScroll(0)
+        statusLbl:SetText("|cffffcc00■ CAPTURED|r")
+    end
+    A.SpecUI._troubleshooterCaptureFn = FillCaptureBox
+    -- Expose the text generator so TroubleshooterChatCapture can fill this box.
+    A.TroubleshooterGenText = TSH_GenCaptureText
+
+    -- Helper: generate the live FontString content.
+    local function GenLiveLines(debugData)
+        if not debugData then return "No data." end
+        local L = {}
+        local function add(s) L[#L + 1] = s end
+        for i, slot in ipairs(debugData.slots) do
+            local entry  = slot.entry
+            local ctx    = slot.ctx
+            local tag    = slot.isSimulated and "|cff8888ff[SIM]|r" or "|cff44ff44[LIVE]|r"
+            local spell  = entry and ("|cffffcc00" .. entry.key .. "|r") or "|cff888888(none)|r"
+            local etaStr = entry and entry.eta and entry.eta > 0
+                           and string.format(" eta=%.1fs", entry.eta) or ""
+            add(string.format("|cff88aaff--- Slot %d %s → %s%s ---|r", i, tag, spell, etaStr))
+            add(TSH_CtxLine(ctx, spec, "  "))
+
+            local entries = slot.diagnostics and slot.diagnostics.entries or {}
+            for _, eDiag in ipairs(entries) do
+                local status = eDiag.status or "fail"
+                local stag, stColor
+                if     status == "pass"          then stag = "PASS"; stColor = "|cff44ff44"
+                elseif status == "predict"       then stag = "PRED"; stColor = "|cffffcc00"
+                elseif status == "unknown_spell" then stag = "UNK";  stColor = "|cff888888"
+                elseif status == "no_target"     then stag = "SKIP"; stColor = "|cff888888"
+                else                                  stag = "fail"; stColor = "|cffff5555"
+                end
+                local firstFail = ""
+                for _, cr in ipairs(eDiag.conditionResults or {}) do
+                    if not cr.pass then
+                        firstFail = " |cff888888← " .. TSH_Cond(cr.cond, ctx) .. "|r"
+                        break
+                    end
+                end
+                add(string.format("  [%s%s|r] %s%s", stColor, stag, eDiag.key or "?", firstFail))
+            end
+            add("")
+        end
+        return table.concat(L, "\n")
+    end
+
+    -- Update function called by ticker.
+    local lastDebugData = nil
+    local function UpdateLive()
+        local RE = A.RotationEngine
+        local activeSpec = A.SpecManager and A.SpecManager:GetSpecByID(A._activeSpecID or "")
+        if not RE or not activeSpec then
+            liveDisplay:SetText("|cffff4444No active spec.|r")
+            return
+        end
+        local ok, debugData = pcall(function() return RE:DebugEvaluateSlots(activeSpec) end)
+        if not ok or not debugData then
+            liveDisplay:SetText("|cffff4444Error: " .. tostring(debugData) .. "|r")
+            return
+        end
+        lastDebugData = debugData
+
+        local text = GenLiveLines(debugData)
+        liveDisplay:SetText(text)
+
+        -- Reposition the capture section below the live display.
+        local liveH = liveDisplay:GetStringHeight() or 200
+        local capY  = -(34 + liveH + 14)
+        sepLbl:ClearAllPoints()
+        sepLbl:SetPoint("TOPLEFT", container, "TOPLEFT", 12, capY)
+        sepLbl:SetText("── Capture text (click → Ctrl+A → Ctrl+C to copy) ──")
+        captureFrame:ClearAllPoints()
+        captureFrame:SetPoint("TOPLEFT", container, "TOPLEFT", 12, capY - 16)
+        container:SetHeight(math.max(400, 34 + liveH + 14 + 16 + 220 + 20))
+    end
+
+    -- Capture button: freeze current data into the EditBox.
+    capBtn:SetScript("OnClick", function()
+        local RE = A.RotationEngine
+        local activeSpec = A.SpecManager and A.SpecManager:GetSpecByID(A._activeSpecID or "")
+        if not RE or not activeSpec then return end
+        local ok, debugData = pcall(function() return RE:DebugEvaluateSlots(activeSpec) end)
+        -- Ensure the capture area is visible before filling it so repeated
+        -- captures always present the EditBox to the user.
+        if captureFrame and captureFrame.Show then captureFrame:Show() end
+        if ok and type(debugData) == "table" then
+            FillCaptureBox(TSH_GenCaptureText(debugData, activeSpec))
+            -- Highlight the box contents to make copy/paste easier.
+            if captureBox and captureBox.HighlightText then captureBox:HighlightText() end
+        else
+            FillCaptureBox("Error during capture: " .. tostring(debugData))
+            if captureBox and captureBox.HighlightText then captureBox:HighlightText() end
+        end
+    end)
+
+    -- Initial layout and start ticker.
+    UpdateLive()
+    if not troubleshooterTicker then
+        troubleshooterTicker = C_Timer.NewTicker(0.5, function()
+            if A.SpecUI and A.SpecUI.frame and A.SpecUI.frame:IsShown()
+               and A.SpecUI._activeTab == 7 then
+                UpdateLive()
+            else
+                troubleshooterTicker:Cancel()
+                troubleshooterTicker = nil
+            end
+        end)
+    end
 end
 
 function SUI:SwitchTab(idx, spec, preserveScroll)
@@ -4002,8 +4584,9 @@ function SUI:SwitchTab(idx, spec, preserveScroll)
     for _, r in ipairs(regions) do if r.Hide then r:Hide() end end
     content:SetHeight(400)
 
-    -- Reset ticker
+    -- Reset tickers
     if previewTicker then previewTicker:Cancel(); previewTicker = nil end
+    if troubleshooterTicker then troubleshooterTicker:Cancel(); troubleshooterTicker = nil end
 
     -- Always clear the cross-tab refresh functions before rebuilding.
     generalRefreshFn = nil
@@ -4036,6 +4619,8 @@ function SUI:SwitchTab(idx, spec, preserveScroll)
         BuildLoadConditionsTab(content, spec)
     elseif idx == 6 then
         BuildImportExportTab(content, spec)
+    elseif idx == 7 then
+        BuildTroubleshooterTab(content, spec)
     end
 
     -- Reset scroll

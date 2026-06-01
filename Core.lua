@@ -452,6 +452,49 @@ function A.GetLatency()
     return (latencyWorld or 50) / 1000
 end
 
+------------------------------------------------------------------------
+-- Compute energy gained when powershifting into Cat Form.
+-- The actual arithmetic is shared so other post-cast resource formulas can
+-- reuse the same modifier structure from SpellDatabase.
+------------------------------------------------------------------------
+function A.ComputeResourceFromCalc(calc, fallbackValue)
+    if not calc then return fallbackValue or 0 end
+
+    local energy = tonumber(calc.base) or 0
+
+    -- Talent modifiers
+    if calc.talentModifiers then
+        for _, mod in ipairs(calc.talentModifiers) do
+            if mod.tab and mod.index then
+                local ok, _, _, _, _, rank = pcall(GetTalentInfo, mod.tab, mod.index)
+                if ok and rank and rank > 0 then
+                    energy = energy + rank * (tonumber(mod.energyPerRank) or 0)
+                end
+            end
+        end
+    end
+
+    -- Item modifiers (check equipped item in given inventory slot)
+    if calc.itemModifiers then
+        for _, mod in ipairs(calc.itemModifiers) do
+            if mod.slot and mod.itemId then
+                local ok, equipped = pcall(GetInventoryItemID, "player", mod.slot)
+                if ok and equipped == mod.itemId then
+                    energy = energy + (tonumber(mod.bonus) or 0)
+                end
+            end
+        end
+    end
+
+    return energy
+end
+
+function A.ComputePowershiftEnergy()
+    local def = A.GetSpellDefinition and A.GetSpellDefinition("Cat Form")
+    local calc = def and def.powershiftCalc
+    return A.ComputeResourceFromCalc(calc, 40)
+end
+
 -- Remaining cooldown on a spell (0 if ready)
 function A.GetSpellCD(spellId)
     if A.ResolveSpellID then
@@ -728,7 +771,9 @@ function A.RegisterMovableFrame(frame, key, defaultPoint)
         if prevStop and prevStop ~= self.StopMovingOrSizing then
             -- Run any extra handler the caller had registered.
             local ok, err = pcall(prevStop, self, ...)
-            if not ok then A.DebugLog("ERR", "RegisterMovableFrame stop hook: " .. tostring(err)) end
+            if not ok then
+                A.ReportError("CORE", "RegisterMovableFrame stop hook", err, { frame = key })
+            end
         end
     end)
 end
@@ -866,6 +911,79 @@ function A.DebugLog(module, msg)
     if debugCfg and debugCfg.echo then
         pcall(print, string.format("|cff8882d5SPHelper|r [%s] %s", key, entry.msg))
     end
+end
+
+local function FormatErrorContext(context)
+    if context == nil then return nil end
+    if type(context) ~= "table" then
+        return tostring(context)
+    end
+
+    local keys = {}
+    for key in pairs(context) do
+        keys[#keys + 1] = key
+    end
+    table.sort(keys, function(a, b)
+        return tostring(a) < tostring(b)
+    end)
+
+    local parts = {}
+    for _, key in ipairs(keys) do
+        local value = context[key]
+        if value ~= nil then
+            parts[#parts + 1] = tostring(key) .. "=" .. tostring(value)
+        end
+    end
+    return table.concat(parts, " ")
+end
+
+function A.ReportError(module, action, err, context)
+    local key = NormalizeDebugModule(module or "ERR")
+    local now = GetTime()
+    local errText = tostring(err or "unknown error")
+    local contextText = FormatErrorContext(context)
+    local signature = table.concat({ key, tostring(action or "error"), errText, contextText or "" }, "\n")
+
+    A._chatErrorThrottle = A._chatErrorThrottle or {}
+    local lastSent = A._chatErrorThrottle[signature]
+    if lastSent and (now - lastSent) < 5 then
+        return false
+    end
+    A._chatErrorThrottle[signature] = now
+
+    local stack = (debugstack and debugstack(2, 12, 12)) or ""
+    local header = string.format("|cffff4444[SPHelper][%s]|r %s: %s", key, tostring(action or "error"), errText)
+    if contextText and contextText ~= "" then
+        header = header .. " | " .. contextText
+    end
+    if #header > 380 then
+        header = header:sub(1, 377) .. "..."
+    end
+
+    pcall(print, header)
+    if stack ~= "" then
+        local compactStack = stack:gsub("\n", " | ")
+        if #compactStack > 500 then
+            compactStack = compactStack:sub(1, 497) .. "..."
+        end
+        pcall(print, "|cffaa6666" .. compactStack .. "|r")
+    end
+
+    if not SPHelperDB then SPHelperDB = {} end
+    SPHelperDB.recentErrors = SPHelperDB.recentErrors or {}
+    table.insert(SPHelperDB.recentErrors, 1, {
+        time = now,
+        msg = header,
+        stack = stack,
+        module = key,
+        action = tostring(action or "error"),
+        context = contextText or "",
+    })
+    while #SPHelperDB.recentErrors > 80 do
+        table.remove(SPHelperDB.recentErrors)
+    end
+
+    return true
 end
 
 function A.DumpDebugLog(module)
@@ -1443,9 +1561,10 @@ function A.DumpRecentErrors()
     end
     print("SPHelper: recent errors (most recent first):")
     for i, e in ipairs(SPHelperDB.recentErrors) do
-        local t = e.time or 0
-        local msg = e.msg or ""
-        print(string.format("[%d] %s", i, msg))
+        print(string.format("[%d] %s", i, e.msg or ""))
+        if e.context and e.context ~= "" then
+            print("    context: " .. e.context)
+        end
         if e.stack and e.stack ~= "" then
             print(e.stack)
         end

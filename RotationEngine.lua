@@ -151,14 +151,27 @@ end
 
 local function GetProjectedSpellCooldown(spellKey, ctx)
     if not spellKey then return nil end
+    local simElapsed = 0
+    if ctx and ctx.builtAt and ctx.now then
+        simElapsed = math.max((ctx.now or 0) - (ctx.builtAt or 0), 0)
+    end
+
+    local spell = A.SPELLS and A.SPELLS[spellKey]
+    if ctx and ctx.simulatedCooldowns and spell and spell.id then
+        local cdEnd = ctx.simulatedCooldowns[spell.id]
+        if cdEnd then
+            return math.max(cdEnd - (ctx.now or GetTime()), 0)
+        end
+    end
+
     local cdKey = spellKey:lower() .. "CD"
     if ctx and ctx[cdKey] ~= nil then
-        return ctx[cdKey]
+        return math.max((ctx[cdKey] or 0) - simElapsed, 0)
     end
 
     local spellId = ResolveSpellId(spellKey)
     if not spellId then return nil end
-    return math.max((A.GetSpellCDReal and A.GetSpellCDReal(spellId) or 0) - ((ctx and ctx.castRemaining) or 0), 0)
+    return math.max(((A.GetSpellCDReal and A.GetSpellCDReal(spellId) or 0) - ((ctx and ctx.castRemaining) or 0)) - simElapsed, 0)
 end
 
 local function GetEffectiveSpellCastTime(spellKey, ctx)
@@ -212,8 +225,17 @@ local function GetSpellTravelTimeValue(spellKey)
     return nil
 end
 
-local function GetUnitBuffInfo(unit, buffName)
+local function GetUnitBuffInfo(unit, buffName, ctx)
     if not unit or not buffName then return nil end
+    -- Projected simulation: check simBuffs table first.
+    if ctx and ctx.simBuffs and ctx.simBuffs[buffName] then
+        local sim = ctx.simBuffs[buffName]
+        if sim.active then
+            return buffName, sim.count or 1, sim.duration or 0, sim.expiry or math.huge
+        else
+            return nil
+        end
+    end
     for i = 1, 40 do
         local name, _, count, _, duration, expirationTime = UnitBuff(unit, i)
         if not name then break end
@@ -226,6 +248,18 @@ end
 
 local function GetUnitDebuffInfo(unit, debuffName, sourceMode)
     if not unit or not debuffName then return nil end
+
+    -- Table of names: check all, return the entry with the most time remaining.
+    if type(debuffName) == "table" then
+        local bestName, bestCount, bestDur, bestExp
+        for _, dName in ipairs(debuffName) do
+            local n, c, d, e = GetUnitDebuffInfo(unit, dName, sourceMode)
+            if n and (not bestExp or (e and e > bestExp)) then
+                bestName, bestCount, bestDur, bestExp = n, c, d, e
+            end
+        end
+        return bestName, bestCount, bestDur, bestExp
+    end
 
     if sourceMode == "any" then
         if not A.FindDebuff then return nil end
@@ -242,6 +276,31 @@ local function GetUnitDebuffInfo(unit, debuffName, sourceMode)
         return name, count or 0, duration or 0, expirationTime or 0
     end
     return nil
+end
+
+-- Get all in-game debuff names to scan for a spell (primary + exclusive siblings).
+-- Used by source="any" checks so e.g. Faerie Fire (Feral) also catches a Balance
+-- druid's "Faerie Fire" copy and vice-versa.
+local function GetDebuffAuraNames(spellKey)
+    if not spellKey then return nil end
+    local def = A.GetSpellDefinition and A.GetSpellDefinition(spellKey)
+    if not def then return nil end
+    local primary = def.debuffAura or def.name
+    if not primary then return nil end
+    if not (def.debuffExclusive and def.debuffSiblings) then
+        return { primary }
+    end
+    local names = { primary }
+    local seen  = { [primary] = true }
+    for _, sibKey in ipairs(def.debuffSiblings) do
+        local sibDef = A.GetSpellDefinition and A.GetSpellDefinition(sibKey)
+        local sibName = sibDef and (sibDef.debuffAura or sibDef.name)
+        if sibName and not seen[sibName] then
+            names[#names + 1] = sibName
+            seen[sibName] = true
+        end
+    end
+    return names
 end
 
 local function GetTrackedDebuffDefinition(spec, spellKey)
@@ -392,7 +451,35 @@ local function GetTrackedDebuffState(spec, ctx, spellKey)
     if not def then return nil end
 
     local now = (ctx and ctx.now) or GetTime()
-    local spellName = def.name or GetSpellDisplayName(def.spellKey or spellKey)
+    -- Projected simulation: check simDebuffs table first so forward-simulated
+    -- debuffs (e.g. Mangle applied during cast-chain prediction) resolve correctly.
+    if ctx and ctx.simDebuffs then
+        local debuffAura = def.name  -- the trackedDef may have a name override
+        local spellDef = A.GetSpellDefinition and A.GetSpellDefinition(def.spellKey or spellKey)
+        if spellDef and spellDef.debuffAura then debuffAura = spellDef.debuffAura end
+        local sim = debuffAura and ctx.simDebuffs[debuffAura]
+        if sim ~= nil then
+            -- sim = { expiry = N } or false (explicitly absent)
+            local remaining = sim and math.max((sim.expiry or 0) - now, 0) or 0
+            local castRem = (ctx.castRemaining or 0)
+            local duration = GetTrackedDebuffDuration(spec, spellKey)
+            return {
+                key = def.key or spellKey,
+                spellKey = def.spellKey or spellKey,
+                name = debuffAura,
+                remaining = remaining,
+                after = math.max(remaining - castRem, 0),
+                duration = duration,
+            }
+        end
+    end
+    -- Prefer the SpellDatabase's debuffAura (exact in-game name) over the spell name.
+    -- For source="any" with exclusive debuffs, also scan sibling variants (e.g. Faerie
+    -- Fire Feral + Balance Faerie Fire are mutually exclusive but use different names).
+    local spellDef = A.GetSpellDefinition and A.GetSpellDefinition(def.spellKey or spellKey)
+    local spellName = def.name
+                   or (spellDef and (spellDef.debuffAura or spellDef.name))
+                   or GetSpellDisplayName(def.spellKey or spellKey)
     local remaining = 0
     local sourceMode = def.source or "player"
 
@@ -400,6 +487,19 @@ local function GetTrackedDebuffState(spec, ctx, spellKey)
         local name, _, _, _, _, expirationTime
         if sourceMode == "any" and A.FindDebuff then
             name, _, _, _, _, expirationTime = A.FindDebuff("target", spellName)
+            -- Also check sibling exclusive debuffs (e.g. Balance Faerie Fire vs Feral).
+            if (not name) and spellDef and spellDef.debuffExclusive and spellDef.debuffSiblings then
+                for _, sibKey in ipairs(spellDef.debuffSiblings) do
+                    local sibDef = A.GetSpellDefinition and A.GetSpellDefinition(sibKey)
+                    local sibName = sibDef and (sibDef.debuffAura or sibDef.name)
+                    if sibName then
+                        local n2, _, _, _, _, e2 = A.FindDebuff("target", sibName)
+                        if n2 and e2 and (not expirationTime or e2 > expirationTime) then
+                            name, expirationTime = n2, e2
+                        end
+                    end
+                end
+            end
         elseif A.FindPlayerDebuff then
             name, _, _, _, _, expirationTime = A.FindPlayerDebuff("target", spellName)
         end
@@ -449,7 +549,13 @@ local function GetTrackedBuffState(spec, ctx, alias)
     for _, def in ipairs((spec and spec.trackedBuffs) or {}) do
         if def.key == alias or def.spellKey == alias then
             local buffName = def.name or GetSpellDisplayName(def.spellKey or alias)
-            local active = buffName and PlayerHasBuff(buffName) or false
+            -- Projected simulation: check simBuffs before hitting the live WoW API.
+            local active
+            if ctx and ctx.simBuffs and buffName and ctx.simBuffs[buffName] ~= nil then
+                active = ctx.simBuffs[buffName] and ctx.simBuffs[buffName].active or false
+            else
+                active = buffName and PlayerHasBuff(buffName) or false
+            end
             return {
                 key = def.key or alias,
                 spellKey = def.spellKey or alias,
@@ -644,7 +750,7 @@ local function ResolveSpellPropertyValue(cond, ctx, spec, db)
 end
 
 local function ResolveBuffPropertyValue(cond, ctx, spec, db)
-    local name, count, _, expirationTime = GetUnitBuffInfo("player", cond.buff)
+    local name, count, _, expirationTime = GetUnitBuffInfo("player", cond.buff, ctx)
     if cond.property == "remaining" then
         return name and math.max((expirationTime or 0) - (ctx.now or GetTime()), 0) or 0
     elseif cond.property == "stacks" then
@@ -655,11 +761,22 @@ local function ResolveBuffPropertyValue(cond, ctx, spec, db)
 end
 
 local function ResolveDebuffPropertyValue(cond, ctx, spec, db)
+    local source = cond.source or "player"
     local debuffName = cond.debuff
-    if not debuffName and cond.spellKey and A.SPELLS and A.SPELLS[cond.spellKey] then
-        debuffName = A.SPELLS[cond.spellKey].name
+    -- When a spellKey is provided, resolve the exact in-game debuff name via SpellDatabase.
+    -- For source="any" with exclusive debuffs, GetDebuffAuraNames also returns sibling
+    -- names so e.g. "Faerie Fire (Feral)" correctly catches a Balance "Faerie Fire" too.
+    if cond.spellKey then
+        local resolvedNames = (source == "any") and GetDebuffAuraNames(cond.spellKey)
+        if resolvedNames then
+            debuffName = (#resolvedNames == 1) and resolvedNames[1] or resolvedNames
+        elseif not debuffName then
+            local spellDef = A.GetSpellDefinition and A.GetSpellDefinition(cond.spellKey)
+            debuffName = (spellDef and (spellDef.debuffAura or spellDef.name))
+                      or (A.SPELLS and A.SPELLS[cond.spellKey] and A.SPELLS[cond.spellKey].name)
+        end
     end
-    local name, count, _, expirationTime = GetUnitDebuffInfo("target", debuffName, cond.source or "player")
+    local name, count, _, expirationTime = GetUnitDebuffInfo("target", debuffName, source)
     if cond.property == "remaining" then
         return name and math.max((expirationTime or 0) - (ctx.now or GetTime()), 0) or 0
     elseif cond.property == "stacks" then
@@ -935,6 +1052,8 @@ function RE:BuildContext(spec)
     -- Build the base generic context
     local ctx = {
         now            = now,
+        builtAt        = now,  -- Snapshot time; sim contexts inherit this via __index so
+                               -- cooldown evaluators can compute simElapsed = ctx.now - ctx.builtAt.
         castingSpell   = castingSpell,
         castRemaining  = castRemaining,
         hastePct       = hastePct,
@@ -1062,7 +1181,7 @@ function RE:BuildContext(spec)
     if spec and type(spec.buildContext) == "function" then
         local ok, err = pcall(spec.buildContext, ctx, spec)
         if not ok then
-            A.DebugLog("ERR", "spec.buildContext: " .. tostring(err))
+            A.ReportError("ENGINE", "spec.buildContext", err, { spec = spec and spec.meta and spec.meta.id or "?" })
         end
     end
 
@@ -1070,8 +1189,194 @@ function RE:BuildContext(spec)
 end
 
 ------------------------------------------------------------------------
--- Condition evaluators (dispatch table)
+-- Forward-simulation context projection.
+--
+-- Creates a lightweight projected ctx that reflects game state AFTER a
+-- given spell is cast.  Used by _BuildResultFromCandidates to predict
+-- positions 2–4 in the queue without any spec-specific logic.
+--
+-- What is projected from SpellDatabase data:
+--   now              — advanced by max(castTime, GCD)
+--   resourcePower    — cost subtracted, regen added
+--   comboPoints      — incremented (builders) or cleared (finishers)
+--   simBuffs         — form buffs granted/removed; other buffs granted
+--   simDebuffs       — debuffs applied to target with full duration
+--   simulatedCooldowns — spell placed on cooldown
+--   castingSpell / castRemaining — cleared (cast finished)
+--
+-- The returned ctx uses metatable inheritance so unchanged fields
+-- read through to the parent ctx.
 ------------------------------------------------------------------------
+function RE:SimulateSpellEffect(ctx, spellKey, spec)
+    if not ctx or not spellKey then return ctx end
+
+    local def = A.GetSpellDefinition and A.GetSpellDefinition(spellKey)
+    local now = ctx.now or GetTime()
+    local gcd = ctx.gcd or 1.5
+
+    -- Time advance: GCD (instants) or cast time, whichever is longer.
+    -- For channeled spells GetEffectiveSpellCastTime returns 0 (they only
+    -- cost one GCD to start), but the player is fully occupied for the
+    -- entire channel duration.  Use def.duration so the forward simulation
+    -- correctly places subsequent spells (e.g. Mind Blast coming off CD
+    -- after two full Mind Flay channels).
+    local castEff = GetEffectiveSpellCastTime(spellKey, ctx) or 0
+    if def and def.castType == "channel" and (def.duration or def.castTime) then
+        local haste = (ctx and ctx.hasteMul) or 1
+        if haste <= 0 then haste = 1 end
+        castEff = ((def.duration or def.castTime) or 0) / haste
+    end
+    local advance = math.max(castEff, gcd)
+
+    -- Build projected ctx inheriting everything from parent.
+    local p = setmetatable({}, { __index = ctx })
+    p.now           = now + advance
+    p.castRemaining = 0
+    p.gcdRemaining  = 0
+    -- Use explicit non-nil sentinels so that __index does NOT fall through to
+    -- the live parent ctx's values (assigning nil to a proxy table field just
+    -- deletes it, which then exposes the parent value via __index).
+    p.castingSpell          = false   -- false is falsy like nil but blocks __index
+    p.isChanneling          = false   -- channeling evaluator checks this in sim ctx
+    p.clipCastRemaining     = 0       -- must be numeric (used in arithmetic)
+    p.activeChannelSpellKey = false   -- no longer mid-channel after simulated cast
+
+    -- Resource (energy/rage/mana)
+    local cost  = (def and (def.resourceCost or 0)) or 0
+    local regen = (ctx.resourceRegen or 0) * advance
+    local maxR  = UnitPowerMax("player") or 100
+    if maxR <= 0 then maxR = 100 end
+    p.resourcePower  = math.max(0, math.min(maxR, (ctx.resourcePower or 0) - cost + regen))
+    p.resourceAtGCD  = p.resourcePower
+
+    -- Combo points
+    local cp = ctx.comboPoints or 0
+    if def then
+        if def.comboPointsGenerated then
+            cp = math.min(5, cp + def.comboPointsGenerated)
+        elseif def.comboPointsConsumed == "all" then
+            cp = 0
+        end
+    end
+    p.comboPoints = cp
+
+    -- Simulated cooldowns: copy parent table and mark this spell.
+    local simCDs = {}
+    for k, v in pairs(ctx.simulatedCooldowns or {}) do simCDs[k] = v end
+    if def and def.baseId then
+        local cooldown = def.cooldown
+        if not cooldown then
+            -- Instant spells share the GCD; spells with explicit CD use that.
+            local spId = def.baseId
+            if spId and A.GetSpellCDReal then
+                local liveCd = A.GetSpellCDReal(spId) or 0
+                if liveCd > gcd then cooldown = liveCd end
+            end
+        end
+        if cooldown and cooldown > 0 then
+            simCDs[def.baseId] = p.now + cooldown
+        end
+    end
+    p.simulatedCooldowns = simCDs
+
+    -- Simulated buffs: copy parent simBuffs (or empty) then apply changes.
+    local simB = {}
+    for k, v in pairs(ctx.simBuffs or {}) do simB[k] = v end
+    if def then
+        -- Remove forms that this spell replaces.
+        if def.removesFormKeys then
+            for _, fkey in ipairs(def.removesFormKeys) do
+                -- Map form key back to buff name via trackedBuffs spec definition.
+                for _, bd in ipairs((spec and spec.trackedBuffs) or {}) do
+                    if bd.key == fkey then
+                        local bname = bd.name or GetSpellDisplayName(bd.spellKey or fkey)
+                        if bname then simB[bname] = { active = false } end
+                    end
+                end
+            end
+        end
+        -- Grant the buff this spell applies.
+        if def.grantsFormKey or (def.buffId and def.flags and def.flags.form) then
+            local grantKey = def.grantsFormKey
+            -- Find the spec trackedBuffs entry for this key.
+            for _, bd in ipairs((spec and spec.trackedBuffs) or {}) do
+                local match = (grantKey and bd.key == grantKey)
+                           or (def.buffId and bd.spellKey and A.SPELLS and A.SPELLS[bd.spellKey]
+                               and A.SPELLS[bd.spellKey].id == def.buffId)
+                if match then
+                    local bname = bd.name or GetSpellDisplayName(bd.spellKey or bd.key)
+                    if bname then
+                        simB[bname] = { active = true, count = 1,
+                                        duration = def.duration or -1,
+                                        expiry   = def.duration and def.duration > 0
+                                                   and (p.now + def.duration) or math.huge }
+                    end
+                    break
+                end
+            end
+        end
+        -- Generic non-form buffs (e.g. Tiger's Fury, Inner Focus).
+        if def.buffId and not (def.flags and def.flags.form) then
+            local bname = def.name
+            if bname then
+                simB[bname] = { active = true, count = 1,
+                                duration = def.duration or 0,
+                                expiry   = (def.duration and def.duration > 0)
+                                           and (p.now + def.duration) or math.huge }
+            end
+        end
+    end
+    p.simBuffs = simB
+
+    -- Replace the trackedBuffs caches with empty tables rather than nil.
+    -- Setting a metatable-proxy field to nil does NOT mask the parent table;
+    -- __index would fall through to the live ctx's populated caches and return
+    -- the real game state instead of the simulated one.
+    -- An empty table causes cache lookups to miss and fall through to the
+    -- spec.trackedBuffs loop, which then reads simBuffs correctly.
+    p.trackedBuffs           = {}
+    p.trackedBuffsBySpellKey = {}
+
+    -- Simulated debuffs: copy parent simDebuffs then apply what this spell applies.
+    local simD = {}
+    for k, v in pairs(ctx.simDebuffs or {}) do simD[k] = v end
+    if def then
+        local auraName = def.debuffAura or (def.debuffId and def.name)
+        if auraName and def.duration and def.duration > 0 then
+            simD[auraName] = { expiry = p.now + def.duration }
+            -- Also register sibling names for exclusive debuffs so the
+            -- "remaining" check resolves correctly (e.g. Faerie Fire vs FF Feral).
+            if def.debuffExclusive and def.debuffSiblings then
+                for _, sibKey in ipairs(def.debuffSiblings) do
+                    local sibDef = A.GetSpellDefinition and A.GetSpellDefinition(sibKey)
+                    local sibName = sibDef and (sibDef.debuffAura or sibDef.name)
+                    if sibName and sibName ~= auraName then
+                        -- Sibling is the same debuff — mark absent so the engine
+                        -- doesn't double-count from the live API.
+                        simD[sibName] = false
+                    end
+                end
+            end
+        end
+    end
+    p.simDebuffs = simD
+
+    -- Same fix for debuff caches: use empty tables so cache misses fall through
+    -- to GetTrackedDebuffState → simDebuffs.
+    p.trackedDebuffs           = {}
+    p.trackedDebuffsBySpellKey = {}
+
+    -- recentCast: mark this spell as recently cast so not_recently_cast conditions
+    -- correctly block re-queuing the same spell in positions 2–4.
+    local newRecentCast = {}
+    for k, v in pairs(ctx.recentCast or {}) do newRecentCast[k] = v end
+    if def and def.name then
+        newRecentCast[def.name] = p.now
+    end
+    p.recentCast = newRecentCast
+
+    return p
+end
 
 RE._condEval = {}
 
@@ -1097,12 +1402,9 @@ end
 RE._condEval["cooldown_ready"] = function(cond, ctx, spec, db)
     local key = cond.spellKey
     if not key then return false end
-    -- Context keys are lowerCamelCase; rotation keys remain UPPER spell keys.
-    local cdKey = key:lower() .. "CD"
-    local cd = ctx[cdKey]
+    local cd = GetProjectedSpellCooldown(key, ctx)
     if cd ~= nil then return cd == 0 end
-    -- Try direct lookup via SPELLS table
-    local spell = A.SPELLS[key]
+    local spell = A.SPELLS and A.SPELLS[key]
     if spell then
         return A.KnowsSpell(spell.id) and A.GetSpellCDReal(spell.id) == 0
     end
@@ -1278,6 +1580,7 @@ RE._condEval["not_recently_cast"] = function(cond, ctx, spec, db)
 end
 
 RE._condEval["precombat"] = function(cond, ctx, spec, db)
+    if ctx and ctx.simInCombat ~= nil then return not ctx.simInCombat end
     return not UnitAffectingCombat("player")
 end
 
@@ -1528,7 +1831,15 @@ RE._condEval["spell_can_kill_target"] = function(cond, ctx, spec, db)
         elseif apCoeff > 0 then
             -- Physical: use attack power.
             local ap = (A.GetSchoolPower and A.GetSchoolPower(1)) or 0
-            power = ap * apCoeff
+            -- For AP-scaling finishers, multiply per combo point (e.g. Ferocious Bite is ~0.07/CP).
+            local cp = (def.comboScaling and ctx and ctx.comboPoints) and math.max(ctx.comboPoints, 1) or 1
+            power = ap * apCoeff * cp
+        end
+
+        -- Additive combo-point scaling (e.g. Ferocious Bite: +36 flat damage per combo point).
+        if def.comboScaling and def.comboScaling.pointsPerComboPoint then
+            local cp = ctx and math.max(ctx.comboPoints or 1, 1) or 1
+            baseDmg = baseDmg + tonumber(def.comboScaling.pointsPerComboPoint) * cp
         end
     end
 
@@ -1569,11 +1880,32 @@ RE._condEval["spec_option_value"] = function(cond, ctx, spec, db)
 end
 
 RE._condEval["in_combat"] = function(cond, ctx, spec, db)
+    if ctx and ctx.simInCombat ~= nil then return ctx.simInCombat end
     return UnitAffectingCombat("player")
 end
 
 RE._condEval["not_in_combat"] = function(cond, ctx, spec, db)
     return not UnitAffectingCombat("player")
+end
+
+------------------------------------------------------------------------
+-- has_aggro / not_has_aggro
+-- True when the target is currently attacking the player.
+-- Primary signal: target's current target is the player.
+-- Secondary signal: UnitThreatSituation level >= 2 (tanking).
+------------------------------------------------------------------------
+RE._condEval["has_aggro"] = function(cond, ctx, spec, db)
+    if not UnitExists("target") then return false end
+    if UnitIsUnit("targettarget", "player") then return true end
+    local threat = UnitThreatSituation and UnitThreatSituation("player", "target")
+    return threat ~= nil and threat >= 2
+end
+
+RE._condEval["not_has_aggro"] = function(cond, ctx, spec, db)
+    if not UnitExists("target") then return true end
+    if UnitIsUnit("targettarget", "player") then return false end
+    local threat = UnitThreatSituation and UnitThreatSituation("player", "target")
+    return not (threat ~= nil and threat >= 2)
 end
 
 RE._condEval["not_behind_target"] = function(cond, ctx, spec, db)
@@ -1585,7 +1917,25 @@ RE._condEval["not_behind_target"] = function(cond, ctx, spec, db)
 end
 
 RE._condEval["channeling"] = function(cond, ctx, spec, db)
-    return ctx.castingSpell ~= nil and UnitChannelInfo("player") ~= nil
+    -- ctx.isChanneling is explicitly set to false by SimulateSpellEffect for
+    -- projected sim contexts, so conditions like not{channeling} correctly
+    -- pass in queue slots 2-4 even while the player is physically channeling.
+    -- For the live context isChanneling is nil (not set), so we fall through
+    -- to the WoW API to read real game state.
+    local isChanneling = ctx.isChanneling
+    if isChanneling == nil then
+        isChanneling = (UnitChannelInfo("player") ~= nil)
+    end
+    if cond.spellKey then
+        if not isChanneling then return false end
+        local channelingSpell = UnitChannelInfo("player")
+        if not channelingSpell then return false end
+        local def = A.GetSpellDefinition and A.GetSpellDefinition(cond.spellKey)
+        local spellName = def and def.name or cond.spellKey
+        return channelingSpell == spellName
+    end
+    -- Without spellKey: true when any channel is active and we have its name.
+    return isChanneling and ctx.castingSpell ~= nil and ctx.castingSpell ~= false
 end
 
 RE._condEval["cooldown_lt"] = function(cond, ctx, spec, db)
@@ -2069,10 +2419,6 @@ function RE._resolveExpr(expr, ctx, spec)
         channelMinEff  = ctx.channelMinEff or 0,
         gcd           = ctx.gcd or 1.5,
         lat           = ctx.lat or 0.05,
-        vtTravel      = math.max(GetSpellTravelTimeValue("Vampiric Touch") or 0, ctx.lat or 0),
-        swpTravel     = math.max(GetSpellTravelTimeValue("Shadow Word: Pain") or 0, ctx.lat or 0),
-        mbTravel      = math.max(GetSpellTravelTimeValue("Mind Blast") or 0, ctx.lat or 0),
-        swdTravel     = math.max(GetSpellTravelTimeValue("Shadow Word: Death") or 0, ctx.lat or 0),
         channelTickInterval = ctx.channelTickInterval or 0,
         channelToNextTick = ctx.channelTimeToNextTick or 0,
         channelTicksRemaining = ctx.channelTicksRemaining or 0,
@@ -2132,19 +2478,40 @@ local function ResolveDebuffRemaining(spec, ctx, cond)
         end
     end
 
+    local source   = cond and cond.source or "player"
     local debuffName = cond and cond.debuff or nil
-    if not debuffName and spellKey then
-        local def = A.GetSpellDefinition and A.GetSpellDefinition(spellKey) or nil
-        debuffName = def and def.name or nil
+    -- Use SpellDatabase debuffAura and sibling resolution for accurate in-game names.
+    if spellKey then
+        if source == "any" then
+            local names = GetDebuffAuraNames(spellKey)
+            if names then
+                debuffName = (#names == 1) and names[1] or names
+            end
+        end
+        if not debuffName then
+            local def = A.GetSpellDefinition and A.GetSpellDefinition(spellKey) or nil
+            debuffName = (def and (def.debuffAura or def.name)) or nil
+        end
     end
     if not debuffName then return 0 end
 
-    local source = cond and cond.source or "player"
+    local now = (ctx and ctx.now) or GetTime()
+    if type(debuffName) == "table" then
+        local maxRem = 0
+        for _, dName in ipairs(debuffName) do
+            local fn = (source == "any" and A.FindDebuff) or A.FindPlayerDebuff
+            if fn then
+                local _, _, _, _, _, exp = fn("target", dName)
+                if exp then maxRem = math.max(maxRem, exp - now) end
+            end
+        end
+        return math.max(maxRem, 0)
+    end
     local fn = (source == "any" and A.FindDebuff) or A.FindPlayerDebuff
     if not fn then return 0 end
     local _, _, _, _, _, exp = fn("target", debuffName)
     if not exp then return 0 end
-    return math.max(exp - (ctx.now or GetTime()), 0)
+    return math.max(exp - now, 0)
 end
 
 function RE._ComputeEntryRefreshETA(entry, ctx, spec)
@@ -2531,10 +2898,10 @@ function RE:_EvaluateEntry(entry, index, ctx, spec, db, hasTarget, wantDiagnosti
     local eta = 0
     local spell = A.SPELLS[entry.key]
     if spell and spell.id then
-        -- Time-from-now until spell is off cooldown. (See note in
-        -- _ComputeEntryRefreshETA: do NOT subtract castRemaining here or
-        -- the displayed countdown freezes during a cast.)
-        eta = math.max(A.GetSpellCDReal(spell.id) or 0, 0)
+        -- Time-from-now until spell is off cooldown.  Use the projected
+        -- helper so simulated contexts can move cooldowns forward as the
+        -- queue advances through channel/cast time.
+        eta = math.max(GetProjectedSpellCooldown(entry.key, ctx) or 0, 0)
     end
     if resourceBlock then
         local req = resourceBlock.required
@@ -2547,19 +2914,39 @@ function RE:_EvaluateEntry(entry, index, ctx, spec, db, hasTarget, wantDiagnosti
         else
             local have = ctx.resourcePower or 0
             local need = math.max(0, req - have)
-            local regen = ctx.resourceRegen or 0
-            if regen > 0.001 then
-                local t = need / regen
-                if ctx.nextPowerTick and ctx.nextPowerTick > 0 then
-                    local ticks = math.ceil(t / math.max(0.001, ctx.nextPowerTick))
-                    t = ticks * ctx.nextPowerTick
-                end
-                eta = math.max(eta, t)
+            -- For energy (power type 3) use a tick-based formula instead of the
+            -- continuous EMA rate.  Energy in WoW regenerates as discrete 20-unit
+            -- ticks every ~2 seconds.  The EMA rate (_powerState.rate) is unstable:
+            -- it briefly goes negative or spikes every time the player spends energy,
+            -- which caused the displayed countdown to jump several seconds per cycle.
+            -- The tick-based formula is stable: as `now` advances by dt,
+            -- `ctx.nextPowerTick` decreases by dt, so `now + eta` is constant
+            -- between evaluations (changes only when a tick actually fires).
+            local isPowerTypeEnergy = (ctx.powerType == 3) or
+                (Enum and Enum.PowerType and ctx.powerType == Enum.PowerType.Energy)
+            if isPowerTypeEnergy and ctx.nextPowerTick then
+                local energyPerTick = 20
+                local tickInterval  = math.max(_powerState.tickInterval or 2.0, 0.1)
+                local ticksNeeded   = math.max(math.ceil(need / energyPerTick), 1)
+                -- nextPowerTick = time to first tick.  Nth tick is at:
+                --   nextPowerTick + (N-1) * tickInterval
+                local timeToNthTick = ctx.nextPowerTick + (ticksNeeded - 1) * tickInterval
+                eta = math.max(eta, timeToNthTick)
             else
-                if ctx.nextPowerTick then
-                    eta = math.max(eta, ctx.nextPowerTick)
+                local regen = ctx.resourceRegen or 0
+                if regen > 0.001 then
+                    local t = need / regen
+                    if ctx.nextPowerTick and ctx.nextPowerTick > 0 then
+                        local ticks = math.ceil(t / math.max(0.001, ctx.nextPowerTick))
+                        t = ticks * ctx.nextPowerTick
+                    end
+                    eta = math.max(eta, t)
                 else
-                    eta = math.max(eta, 1.0)
+                    if ctx.nextPowerTick then
+                        eta = math.max(eta, ctx.nextPowerTick)
+                    else
+                        eta = math.max(eta, 1.0)
+                    end
                 end
             end
         end
@@ -2590,6 +2977,18 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
     local result = {}
     local seen   = {}
 
+    local function GetEntryRepeatLimit(entry)
+        local limit = entry and (entry.repeatLimit or entry.queueRepeatLimit)
+        limit = tonumber(limit)
+        if limit and limit > 0 then
+            return math.max(1, math.floor(limit + 0.5))
+        end
+        if entry and entry.isFiller then
+            return 2
+        end
+        return 1
+    end
+
     -- Add a result entry with both an `eta` (used for ordering / "next cast"
     -- semantics) and a `cooldownEnd` absolute timestamp so the UI can render
     -- a smoothly-ticking countdown without stalling when the player is in
@@ -2598,20 +2997,29 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
     -- but not castable yet because something else is being cast first) vs
     -- entries that are genuinely blocked by a cooldown or resource deficit.
     -- Chained entries are rendered bright; blocked entries are dimmed.
-    local function Add(key, eta, clip, priorityBucket, cooldownEnd, isChained)
-        if seen[key] then return end
-        eta = eta or 0
-        local entry = { key = key, eta = eta }
-        if cooldownEnd and cooldownEnd > now then
-            entry.cooldownEnd = cooldownEnd
-        elseif eta > 0 then
-            entry.cooldownEnd = now + eta
+    local function Add(entry, key, eta, clip, priorityBucket, cooldownEnd, isChained)
+        local repeatLimit = GetEntryRepeatLimit(entry)
+        if not key then return end
+        if seen[key] then
+            if repeatLimit <= 1 then return end
+            local count = tonumber(seen[key]) or 1
+            if count >= repeatLimit then return end
+            seen[key] = count + 1
+        else
+            seen[key] = (repeatLimit > 1) and 1 or true
         end
-        if clip then entry.clip = true end
-        if isChained then entry.chained = true end
-        if priorityBucket ~= nil then entry.priorityBucket = priorityBucket end
-        result[#result + 1] = entry
-        seen[key] = true
+        eta = eta or 0
+        local resultEntry = { key = key, eta = eta }
+        if cooldownEnd and cooldownEnd > now then
+            resultEntry.cooldownEnd = cooldownEnd
+        elseif eta > 0 then
+            resultEntry.cooldownEnd = now + eta
+        end
+        if clip then resultEntry.clip = true end
+        if isChained then resultEntry.chained = true end
+        if priorityBucket ~= nil then resultEntry.priorityBucket = priorityBucket end
+        result[#result + 1] = resultEntry
+        -- Note: seen[key] is already set above, before the early-return checks.
         local base = key:match("^([A-Z]+)_")
         if base and A.SPELLS[base] then
             seen[base] = true
@@ -2629,13 +3037,9 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
     local readyCands = {}
     local blockedCands = {}
     for _, cand in ipairs(candidates) do
-        local spell = A.SPELLS[cand.key]
-        local rawCD = 0
-        if spell and spell.id then
-            rawCD = A.GetSpellCDReal(spell.id) or 0
-        end
         local candEta = cand.eta or 0
-        local readyIn = math.max(candEta, rawCD)
+        local projectedCD = GetProjectedSpellCooldown(cand.key, ctx) or 0
+        local readyIn = math.max(candEta, projectedCD)
         local cooldownEnd = (readyIn > 0) and (now + readyIn) or nil
 
         if cand.key then
@@ -2773,7 +3177,7 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
             -- `now + s.deadline` = absolute "must-start-by" timestamp.
             -- Stable across re-evaluations because dotExpiry is fixed by the API.
             local cd = (s.deadline > READY_EPSILON) and (now + s.deadline) or nil
-            Add(s.key, 0, false, ResolveEntryPriorityBucket(s.entry), cd)
+            Add(s.entry, s.key, 0, false, ResolveEntryPriorityBucket(s.entry), cd)
             accTime = accTime + ChainStepTime(s.key)
         end
     end
@@ -2840,41 +3244,44 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
 
         if channelClip and channelClipKey then
             local clipCd = (channelClipTime and channelClipTime > READY_EPSILON) and (now + channelClipTime) or nil
-            Add(channelClipKey, 0, false, channelClipBucket, clipCd, true)
-            Add(c.cand.key, 0, true, c.cand.priorityBucket, nil, true)
+            Add(reasonEntry, channelClipKey, 0, false, channelClipBucket, clipCd, true)
+            Add(c.cand.entry, c.cand.key, 0, true, c.cand.priorityBucket, nil, true)
         else
-            -- Compute chain-position cooldownEnd so every queued spell shows
-            -- a timer reflecting when it will actually be cast:
-            --   accTime = castRemaining + sum of cast times of all prior chain items.
-            -- This equals (now + accTime) = a stable absolute timestamp that
-            -- ticks naturally as the cast progresses (now increases, castRemaining
-            -- decreases by the same amount, so now+accTime is constant).
-            -- If a real spell cooldown is longer, that takes priority.
+            -- Chain-position cooldownEnd: only meaningful while something is
+            -- actively casting.  When not casting, accTime is just "position N
+            -- in the priority queue" — nothing is actually blocking these
+            -- spells, so showing a timer (1.5 / 3.0 / 4.5 s) is misleading
+            -- and will appear frozen because it gets re-anchored every cycle.
+            -- Only set a cooldownEnd when there is a real cast in flight that
+            -- makes these spells genuinely unavailable for accTime seconds.
             local chainCooldownEnd
             if c.cooldownEnd and c.cooldownEnd > now then
-                -- Actual rawCD dominates (edge case: rawCD just at READY_EPSILON boundary).
+                -- Actual rawCD dominates.
                 chainCooldownEnd = c.cooldownEnd
-            elseif accTime > READY_EPSILON then
-                -- Chain position: won't be cast until accTime seconds from now.
+            elseif accTime > READY_EPSILON and ctx.castingSpell then
+                -- Actively casting: accTime = castRemaining + prior-spell GCDs.
+                -- now + accTime is a stable absolute timestamp that ticks as
+                -- castRemaining decreases (now advances at the same rate).
                 chainCooldownEnd = now + accTime
             end
-            Add(c.cand.key, 0, c.clip, c.cand.priorityBucket, chainCooldownEnd, true)
+            -- When chainCooldownEnd is nil the icon shows no timer (ready, just
+            -- sequenced) — bright icon, no number.
+            Add(c.cand.entry, c.cand.key, 0, c.clip, c.cand.priorityBucket, chainCooldownEnd, true)
         end
         accTime = accTime + step
     end
 
     -- Tail synths: show any synth whose deadline falls within the chain
-    -- horizon PLUS a lookahead of (N_VISIBLE_SLOTS * gcd). This gives the
-    -- player advance notice of upcoming dot refreshes even when the active
-    -- chain is short (e.g. only MF as the filler). Without the lookahead,
-    -- a dot with 4.5s remaining on a 3s chain wouldn't appear until the
-    -- last 4.5s, which feels "late". Using 3 extra GCDs ≈ 4.5s extra lead.
-    local tailHorizon = accTime + (ctx.gcd or 1.5) * 3
+    -- horizon PLUS a lookahead to give the player advance notice of upcoming
+    -- dot refreshes.  We use 8 extra GCDs (≈12 s at 1.5 s/GCD) so that dots
+    -- with long remaining times (VT ~12 s, SWP ~21 s) appear in the queue
+    -- as "coming up" rather than only when they are about to expire.
+    local tailHorizon = accTime + (ctx.gcd or 1.5) * 8
     while si <= #synths do
         local s = synths[si]; si = si + 1
         if s.deadline <= tailHorizon then
             local cd = (s.deadline > READY_EPSILON) and (now + s.deadline) or nil
-            Add(s.key, 0, false, ResolveEntryPriorityBucket(s.entry), cd)
+            Add(s.entry, s.key, 0, false, ResolveEntryPriorityBucket(s.entry), cd)
         end
     end
 
@@ -2896,7 +3303,16 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
         if maxR <= 0 then maxR = 100 end
 
         local newVal
-        if postCast.set ~= nil then
+        if postCast.compute ~= nil then
+            -- Dynamic: call a named function on A (e.g. A.ComputePowershiftEnergy)
+            -- so the result is always calculated at evaluation time rather than
+            -- stored as a user-editable setting.
+            local fn = type(postCast.compute) == "string" and A[postCast.compute]
+            if type(fn) == "function" then
+                local ok, v = pcall(fn)
+                newVal = ok and tonumber(v) or nil
+            end
+        elseif postCast.set ~= nil then
             local v = postCast.set
             if type(v) == "string" then
                 v = (A.SpecVal and tonumber(A.SpecVal(v, v))) or tonumber(v) or 0
@@ -2922,6 +3338,7 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
             -- Anchor projection just past the GCD finish so blocked entries
             -- compute their post-GCD readiness against the boosted resource.
             local gcd = ctx.gcd or 1.5
+            pCtx.now = now + gcd
             pCtx.castRemaining = gcd
             pCtx.readyIn = gcd
 
@@ -2929,11 +3346,8 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
             for _, b in ipairs(blockedCands) do
                 local newCand = self:_EvaluateEntry(b.cand.entry, b.cand.index, pCtx, spec, db, hasTarget, false)
                 if newCand then
-                    local spell = A.SPELLS[b.cand.key]
-                    local rawCD = (spell and spell.id and (A.GetSpellCDReal(spell.id) or 0)) or 0
-                    local readyIn = math.max(newCand.eta or 0, math.max(rawCD - (ctx.castRemaining or 0), 0))
-                    -- Add the GCD time we will spend casting the top entry.
-                    readyIn = readyIn + gcd
+                    local projectedCD = GetProjectedSpellCooldown(b.cand.key, pCtx) or 0
+                    local readyIn = math.max(newCand.eta or 0, projectedCD)
                     recomputed[#recomputed + 1] = {
                         cand = b.cand,
                         readyIn = readyIn,
@@ -2952,7 +3366,7 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
     -- imminent next cast above slower fallbacks.
     table.sort(blockedCands, function(a, b) return (a.readyIn or 0) < (b.readyIn or 0) end)
     for _, c in ipairs(blockedCands) do
-        Add(c.cand.key, c.readyIn, c.clip, c.cand.priorityBucket, c.cooldownEnd)
+        Add(c.cand.entry, c.cand.key, c.readyIn, c.clip, c.cand.priorityBucket, c.cooldownEnd)
     end
 
     if #result == 0 then
@@ -3025,9 +3439,9 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
                     -- Use the same generic refresh-ETA helper that powers
                     -- predictive timers for DoT/cooldown/refresh windows.
                     local eta = RE._ComputeEntryRefreshETA(rEntry, ctx, spec)
-                    if eta == nil and spell and spell.id and A.GetSpellCDReal then
-                        local cd = math.max((A.GetSpellCDReal(spell.id) or 0) - (ctx.castRemaining or 0), 0)
-                        if cd > 0 then eta = cd end
+                    if eta == nil then
+                        local cd = GetProjectedSpellCooldown(key, ctx)
+                        if cd and cd > 0 then eta = cd end
                     end
                     if eta and eta > 0 then
                         upcoming[#upcoming + 1] = {
@@ -3044,6 +3458,146 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
         table.sort(upcoming, function(a, b) return a.eta < b.eta end)
         for _, v in ipairs(upcoming) do
             Add(v.key, v.eta, false, v.priorityBucket, v.cooldownEnd)
+        end
+    end
+
+    -- ------------------------------------------------------------------
+    -- Forward simulation: predict positions 2–4 in the queue by projecting
+    -- game-state changes from each preceding cast and re-evaluating the
+    -- priority list.  This lets the queue show "what happens next" rather
+    -- than just repeating the current best candidate.
+    --
+    -- Simulated entries replace positions 2-4.  If simulation produces zero
+    -- predictions (e.g. unknown spell database entry), we fall back to the
+    -- existing ETA-sorted candidates that were already added above.
+    -- ------------------------------------------------------------------
+    if hasTarget and result[1] then
+        local fillerKeys = {}
+        for _, rEntry in ipairs(rotation) do
+            if rEntry.key and GetEntryRepeatLimit(rEntry) > 1 then
+                fillerKeys[rEntry.key] = true
+            end
+        end
+
+        local simResult = {}
+        local simSeen   = { [result[1].key] = true }
+        local projCtx   = ctx
+        local projKey   = result[1].key
+        local simOk     = true
+
+        -- Ensure simInCombat is set on the projected chain (never precombat).
+        if projCtx.simInCombat == nil then
+            projCtx = setmetatable({ simInCombat = true }, { __index = projCtx })
+        end
+
+        for slot = 2, 4 do
+            if not projKey or not simOk then break end
+
+            local ok_sim, nextCtx = pcall(RE.SimulateSpellEffect, RE, projCtx, projKey, spec)
+            if not ok_sim or not nextCtx then simOk = false; break end
+            projCtx = nextCtx
+
+            local bestKey = nil
+            for _, rEntry in ipairs(rotation) do
+                local eKey = rEntry.key
+                -- Allow filler spells to repeat in the sim chain so that all
+                -- four icon slots are populated when no higher-priority spell
+                -- is available.  Non-filler spells are still deduplicated.
+                if eKey and (not simSeen[eKey] or fillerKeys[eKey]) and rEntry.conditions then
+                    local ok_eval, cand = pcall(RE._EvaluateEntry, RE, rEntry,
+                                                1, projCtx, spec,
+                                                A.db and A.db.specs and A.db.specs[spec and spec.meta and spec.meta.id],
+                                                hasTarget, false)
+                    if ok_eval and cand and ((cand.eta or 0) <= 0.05) then
+                        bestKey = eKey
+                        break
+                    end
+                end
+            end
+
+            if bestKey then
+                local pBucket = nil
+                for _, rEntry in ipairs(rotation) do
+                    if rEntry.key == bestKey then
+                        pBucket = ResolveEntryPriorityBucket(rEntry)
+                        break
+                    end
+                end
+                local simEntry = { key = bestKey, eta = 0, simulated = true }
+                if pBucket ~= nil then simEntry.priorityBucket = pBucket end
+                simResult[#simResult + 1] = simEntry
+                simSeen[bestKey] = true
+                projKey = bestKey
+            else
+                break
+            end
+        end
+
+        -- Only replace positions 2–4 if simulation produced at least one entry.
+        if #simResult > 0 then
+            local compressed = { result[1] }
+            local repeatCounts = {}
+            if fillerKeys[result[1].key] then
+                repeatCounts[result[1].key] = 1
+            end
+            for _, e in ipairs(simResult) do
+                if fillerKeys[e.key] then
+                    local count = repeatCounts[e.key] or 0
+                    if count < 2 then
+                        repeatCounts[e.key] = count + 1
+                        compressed[#compressed + 1] = e
+                    end
+                else
+                    compressed[#compressed + 1] = e
+                end
+            end
+            result = compressed
+        end
+    end
+
+    if hasTarget and #result > 0 and #result < 4 then
+        local fallbackRefresh = nil
+        for _, rEntry in ipairs(rotation) do
+            local key = rEntry.key
+            if key and not seen[key] and rEntry.conditions then
+                local spell = A.SPELLS and A.SPELLS[key]
+                local known = spell and (not A.KnowsSpell or A.KnowsSpell(spell.id))
+                if known ~= false then
+                    local deadline = GetRefreshDeadline(rEntry)
+                    if deadline and deadline > 0 then
+                        if not fallbackRefresh or deadline < fallbackRefresh.eta then
+                            fallbackRefresh = {
+                                key = key,
+                                eta = deadline,
+                                cooldownEnd = now + deadline,
+                                priorityBucket = ResolveEntryPriorityBucket(rEntry),
+                            }
+                        end
+                    end
+                end
+            end
+        end
+        if fallbackRefresh then
+            Add(fallbackRefresh.key, fallbackRefresh.eta, false, fallbackRefresh.priorityBucket, fallbackRefresh.cooldownEnd)
+        end
+    end
+
+    if hasTarget and #result > 0 then
+        for _, entry in ipairs(result) do
+            local rotEntry = nil
+            for _, rEntry in ipairs(rotation) do
+                if rEntry.key == entry.key then
+                    rotEntry = rEntry
+                    break
+                end
+            end
+            if rotEntry then
+                local refreshDeadline = GetRefreshDeadline(rotEntry)
+                if refreshDeadline then
+                    entry.showTimer = true
+                    entry.timerRemaining = refreshDeadline
+                end
+            end
         end
     end
 
@@ -3161,6 +3715,82 @@ function RE:DebugEvaluate(spec)
 
     local _, diagnostics = self:_EvaluatePrepared(spec, ctx, db, rotation, hasTarget, true)
     return diagnostics
+end
+
+------------------------------------------------------------------------
+-- Per-slot diagnostics for the Troubleshooter UI.
+--
+-- Returns each queue slot (up to 4) with:
+--   entry       – the result entry { key, eta, simulated }
+--   ctx         – the evaluation context (real for slot 1, projected 2–4)
+--   isSimulated – false for slot 1, true for 2–4
+--   diagnostics – { entries = [{key, status, conditionResults, …}] }
+--
+-- The 'diagnostics.entries' array covers every rotation entry so the UI
+-- can show which conditions passed/failed and why.
+------------------------------------------------------------------------
+function RE:DebugEvaluateSlots(spec)
+    if not spec or not spec.rotation then return nil end
+
+    local ctx = self:BuildContext(spec)
+    local db  = A.db and A.db.specs and A.db.specs[spec.meta.id]
+    local rotation = (db and db.rotation) or spec.rotation
+    local hasTarget = UnitExists("target")
+                      and not UnitIsDead("target")
+                      and UnitCanAttack("player", "target")
+
+    -- Slot 1: full evaluator fills result[1..4] and returns per-entry diagnostics.
+    local result, diag1 = self:_EvaluatePrepared(spec, ctx, db, rotation, hasTarget, true)
+    if not result then return nil end
+
+    local slots = {}
+    slots[1] = {
+        slotIndex   = 1,
+        entry       = result[1],
+        ctx         = ctx,
+        isSimulated = false,
+        diagnostics = diag1,
+    }
+
+    -- Slots 2–4: simulate each preceding cast, then run _EvaluateEntry for every
+    -- rotation entry against the projected ctx.  We skip _BuildResultFromCandidates
+    -- to avoid costly nested forward simulation.
+    local projCtx = ctx
+    if projCtx.simInCombat == nil then
+        projCtx = setmetatable({ simInCombat = true }, { __index = projCtx })
+    end
+
+    for i = 2, 4 do
+        local prevEntry = result[i - 1]
+        if not prevEntry then break end
+
+        local ok_sim, nextCtx = pcall(RE.SimulateSpellEffect, RE, projCtx, prevEntry.key, spec)
+        if not ok_sim or not nextCtx then break end
+        projCtx = nextCtx
+
+        local entries = {}
+        for _, rotEntry in ipairs(rotation) do
+            if rotEntry.key and rotEntry.conditions then
+                local ok_ev, _, entryDiag = pcall(
+                    self._EvaluateEntry, self,
+                    rotEntry, 1, projCtx, spec, db, hasTarget, true
+                )
+                if ok_ev and entryDiag then
+                    entries[#entries + 1] = entryDiag
+                end
+            end
+        end
+
+        slots[i] = {
+            slotIndex   = i,
+            entry       = result[i],
+            ctx         = projCtx,
+            isSimulated = true,
+            diagnostics = { entries = entries, hasTarget = hasTarget },
+        }
+    end
+
+    return { slots = slots, result = result, hasTarget = hasTarget }
 end
 
 ------------------------------------------------------------------------

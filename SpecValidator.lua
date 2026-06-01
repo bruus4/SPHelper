@@ -95,6 +95,9 @@ SV.ALLOWED_CONDITION_TYPES = {
     setting_compare             = true,
     -- Kill-prediction condition
     spell_can_kill_target       = true,
+    -- Aggro detection
+    has_aggro                   = true,
+    not_has_aggro               = true,
 }
 
 ------------------------------------------------------------------------
@@ -161,6 +164,25 @@ function SV:ValidateRotation(rotation)
                 end
             end
         end
+
+        if entry.repeatLimit ~= nil then
+            local repeatLimit = tonumber(entry.repeatLimit)
+            if not repeatLimit or repeatLimit <= 0 then
+                return false, "entry " .. i .. ": repeatLimit must be a positive number"
+            end
+        end
+
+        if entry.channelPolicy ~= nil then
+            local allowed = {
+                default = true,
+                keep_current = true,
+                replace_current = true,
+            }
+            if not allowed[entry.channelPolicy] then
+                return false, "entry " .. i .. ": unknown channelPolicy '" .. tostring(entry.channelPolicy) .. "'"
+            end
+        end
+
         -- Reject raw function values in DB-sourced entries (not _fromFile)
         if not rotation._fromFile then
             for k, v in pairs(entry) do

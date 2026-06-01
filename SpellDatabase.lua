@@ -328,6 +328,8 @@ DB.catalog = {
         castType = "instant",
         hasteType = "gcd",
         critMultiplier = 2.0,
+        resourceCost = 42,
+        comboPointsGenerated = 1,
         flags = { offensive = true, builder = true, requiresBehind = true, requiresCatForm = true },
         coefficients = { attackPower = 1.0 },
         damage = { bonusVsBleeding = 224 },
@@ -347,6 +349,10 @@ DB.catalog = {
         duration = 12,
         critMultiplier = 2.0,
         debuffId = 33876,
+        debuffAura = "Mangle (Cat)",         -- exact in-game debuff name shown on target
+        debuffExclusive = true,              -- only one Mangle debuff can be active at a time
+        resourceCost = 40,
+        comboPointsGenerated = 1,
         flags = { offensive = true, builder = true, debuff = true, requiresCatForm = true },
         coefficients = { attackPower = 1.0 },
         damage = { bleedBonusFlat = 159 },
@@ -367,6 +373,8 @@ DB.catalog = {
         tickInterval = 2,
         critMultiplier = 2.0,
         debuffId = 1079,
+        resourceCost = 30,
+        comboPointsConsumed = "all",
         flags = { offensive = true, bleed = true, finisher = true, requiresCatForm = true },
         comboScaling = { pointsPerComboPoint = 4 },
         talentModifiers = {},
@@ -383,6 +391,9 @@ DB.catalog = {
         hasteType = "gcd",
         duration = 40,
         debuffId = 16857,
+        debuffAura = "Faerie Fire (Feral)",  -- exact in-game debuff name on target
+        debuffExclusive = true,              -- only one Faerie Fire variant can be active
+        debuffSiblings = { "Faerie Fire" },  -- Balance version is mutually exclusive
         flags = { offensive = true, debuff = true, armorReduction = true, requiresForm = true },
         talentModifiers = {},
     },
@@ -397,8 +408,12 @@ DB.catalog = {
         castType = "instant",
         hasteType = "gcd",
         critMultiplier = 2.0,
+        resourceCost = 0,
+        comboPointsConsumed = "all",
         flags = { offensive = true, finisher = true, requiresCatForm = true, consumesExtraEnergy = true },
-        coefficients = { attackPower = 1.0 },
+        -- Rank 9 (level 70): base damage range 357-514; use conservative floor for kill prediction.
+        damage = { estimateBase = 357 },
+        coefficients = { attackPower = 0.07 },  -- AP coefficient ~0.07 per combo point (×CP applied in evaluator)
         comboScaling = { pointsPerComboPoint = 36 },
         talentModifiers = {},
     },
@@ -417,6 +432,8 @@ DB.catalog = {
         tickInterval = 3,
         critMultiplier = 2.0,
         debuffId = 1822,
+        resourceCost = 35,
+        comboPointsGenerated = 1,
         flags = { offensive = true, bleed = true, builder = true, requiresCatForm = true },
         talentModifiers = {},
     },
@@ -460,8 +477,34 @@ DB.catalog = {
         hasteType = "gcd",
         duration = -1,
         buffId = 768,
+        grantsFormKey = "cat_form",          -- simulation: activates this form buff key
+        removesFormKeys = { "bear_form", "dire_bear_form", "stealth" },
         flags = { form = true, stance = true },
         talentModifiers = {},
+        -- How much energy is restored when shifting into Cat Form.
+        -- Base = 0; each rank of Furor adds 8 energy (Restoration tree tab 3,
+        -- talent index 2, 5 ranks max = 40 energy).  Equipping Wolfshead Helm
+        -- (item ID 8345, head slot 1) adds a further 20 energy.
+        -- A.ComputePowershiftEnergy() reads this table at runtime.
+        powershiftCalc = {
+            base = 0,
+            talentModifiers = {
+                {
+                    talentName    = "Furor",
+                    tab           = 3,       -- Restoration tree
+                    index         = 2,       -- second talent in tier 1
+                    energyPerRank = 8,       -- 8 energy per rank, 5 ranks max = 40
+                },
+            },
+            itemModifiers = {
+                {
+                    description = "Wolfshead Helm",
+                    slot        = 1,         -- head slot
+                    itemId      = 8345,
+                    bonus       = 20,
+                },
+            },
+        },
     },
     ["Bear Form"] = {
         class = "DRUID",
@@ -476,6 +519,8 @@ DB.catalog = {
         hasteType = "gcd",
         duration = -1,
         buffId = 5487,
+        grantsFormKey = "bear_form",
+        removesFormKeys = { "cat_form", "dire_bear_form", "stealth" },
         flags = { form = true, stance = true },
         talentModifiers = {},
     },
@@ -491,6 +536,8 @@ DB.catalog = {
         hasteType = "gcd",
         duration = -1,
         buffId = 9634,
+        grantsFormKey = "dire_bear_form",
+        removesFormKeys = { "cat_form", "bear_form", "stealth" },
         flags = { form = true, stance = true },
         talentModifiers = {},
     },
@@ -507,7 +554,9 @@ DB.catalog = {
         hasteType = "gcd",
         duration = 12,
         critMultiplier = 2.0,
-        debuffId = 33876,  -- same debuff aura as Mangle Cat
+        debuffId = 33876,
+        debuffAura = "Mangle (Cat)",         -- same in-game debuff aura as Mangle (Cat)
+        debuffExclusive = true,              -- only one Mangle debuff can be active at a time
         flags = { offensive = true, builder = true, debuff = true, requiresBearForm = true },
         talentModifiers = {},
     },
@@ -670,7 +719,7 @@ DB.catalog = {
     ------------------------------------------------------------------------
     ["Hurricane"] = {
         class = "DRUID",
-        spec = "BALANCE",
+        spec = nil,
         name = "Hurricane",
         baseId = 16914,
         minLevel = 40,
@@ -791,6 +840,9 @@ DB.catalog = {
         range = 30,
         duration = 40,
         debuffId = 770,
+        debuffAura = "Faerie Fire",          -- exact in-game debuff name on target
+        debuffExclusive = true,              -- only one Faerie Fire variant can be active
+        debuffSiblings = { "Faerie Fire (Feral)" },  -- Feral version is mutually exclusive
         flags = { offensive = true, debuff = true, armorReduction = true },
         talentModifiers = {},
     },

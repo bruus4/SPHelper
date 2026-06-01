@@ -70,14 +70,22 @@ end
 --- Register a spec table (called by spec files at load time).
 function SM:RegisterSpec(spec)
     if not spec or not spec.meta or not spec.meta.id then
-        print("|cffff4444[SPHelper] Spec rejected: missing meta.id|r")
+        if A and A.ReportError then
+            A.ReportError("SPEC", "Spec rejected", "missing meta.id", { phase = "RegisterSpec" })
+        else
+            print("|cffff4444[SPHelper] Spec rejected: missing meta.id|r")
+        end
         return false
     end
     -- Validate if SpecValidator is available
     if A.SpecValidator and A.SpecValidator.Validate then
         local ok, err = A.SpecValidator:Validate(spec)
         if not ok then
-            print("|cffff4444[SPHelper] Spec rejected (" .. tostring(spec.meta.id) .. "): " .. tostring(err) .. "|r")
+            if A and A.ReportError then
+                A.ReportError("SPEC", "Spec rejected", err, { spec = spec.meta.id, phase = "Validate" })
+            else
+                print("|cffff4444[SPHelper] Spec rejected (" .. tostring(spec.meta.id) .. "): " .. tostring(err) .. "|r")
+            end
             return false
         end
     end
@@ -159,7 +167,11 @@ function SM:ActivateSpec(id)
         if h._refCount == 1 and h.obj.OnSpecActivate then
             local ok, err = pcall(h.obj.OnSpecActivate, h.obj, spec)
             if not ok then
-                print("|cffff4444[SPHelper] Helper '" .. hname .. "' OnSpecActivate error: " .. tostring(err) .. "|r")
+                if A and A.ReportError then
+                    A.ReportError("SPEC", "OnSpecActivate error", err, { helper = hname, spec = id })
+                else
+                    print("|cffff4444[SPHelper] Helper '" .. hname .. "' OnSpecActivate error: " .. tostring(err) .. "|r")
+                end
             end
         end
     end
@@ -181,7 +193,11 @@ function SM:DeactivateSpec(id)
             if h._refCount == 0 and h.obj.OnSpecDeactivate then
                 local ok, err = pcall(h.obj.OnSpecDeactivate, h.obj, spec)
                 if not ok then
-                    print("|cffff4444[SPHelper] Helper '" .. hname .. "' OnSpecDeactivate error: " .. tostring(err) .. "|r")
+                    if A and A.ReportError then
+                        A.ReportError("SPEC", "OnSpecDeactivate error", err, { helper = hname, spec = id })
+                    else
+                        print("|cffff4444[SPHelper] Helper '" .. hname .. "' OnSpecDeactivate error: " .. tostring(err) .. "|r")
+                    end
                 end
             end
         end
@@ -283,7 +299,11 @@ function SM:UpdateSpecFromDB(id)
     if A.SpecValidator and A.SpecValidator.ValidateRotation then
         local ok, err = A.SpecValidator:ValidateRotation(override)
         if not ok then
-            print("|cffff4444[SPHelper] Rotation override rejected: " .. tostring(err) .. "|r")
+            if A and A.ReportError then
+                A.ReportError("SPEC", "Rotation override rejected", err, { spec = id })
+            else
+                print("|cffff4444[SPHelper] Rotation override rejected: " .. tostring(err) .. "|r")
+            end
             return false
         end
     end

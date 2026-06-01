@@ -168,12 +168,58 @@ function CH:GetChannelSpellDefinitions(spec)
     if self.KNOWN_CHANNELS then
         for spellName, info in pairs(self.KNOWN_CHANNELS) do
             if type(info) == "table" and spellName then
-                AddEntry(info, info.spellKey or info.spellID or spellName, spellName)
+                -- Apply the same class/spec filter as the SpellDatabase path.
+                local mockDef = { class = info.class, spec = info.spec }
+                if ChannelSpecMatches(mockDef, spec)
+                   and (not spec or not spec.meta or not spec.meta.class
+                        or not info.class or info.class == spec.meta.class) then
+                    AddEntry(info, info.spellKey or info.spellID or spellName, spellName)
+                end
             end
         end
     end
 
     return defs
+end
+
+function CH:GetDefaultChannelSpellName(spec)
+    local defs = self._channelSpellDefs
+    if defs and defs[1] and defs[1].spellName then
+        return defs[1].spellName
+    end
+
+    local specDefs = self:GetChannelSpellDefinitions(spec)
+    if specDefs and specDefs[1] and specDefs[1].spellName then
+        return specDefs[1].spellName
+    end
+
+    local fallbackDefs = self:GetChannelSpellDefinitions(nil)
+    if fallbackDefs and fallbackDefs[1] and fallbackDefs[1].spellName then
+        return fallbackDefs[1].spellName
+    end
+
+    return nil
+end
+
+function CH:IsChannelSpell(spellRef, spec)
+    if spellRef == nil then return false end
+
+    local def = nil
+    if A.GetSpellDefinition then
+        def = A.GetSpellDefinition(spellRef)
+    end
+    if def and (def.castType == "channel" or def.channel == true or (def.flags and def.flags.channel)) then
+        return true
+    end
+
+    local defs = self:GetChannelSpellDefinitions(spec)
+    for _, info in ipairs(defs or {}) do
+        if info.spellKey == spellRef or info.spellName == spellRef then
+            return true
+        end
+    end
+
+    return false
 end
 
 function CH:GetChannelInfoForSpell(spellName, spellID)
@@ -324,12 +370,10 @@ CH._config = {
 
 ------------------------------------------------------------------------
 -- Known channeled spells and their tick counts.
--- Populated from spec.channelSpells on activate; falls back to this
--- default table if no spec data is available.
+-- Populated from spec.channelSpells on activate; falls back to SpellDatabase
+-- discovery if no spec data is available.
 ------------------------------------------------------------------------
-CH.KNOWN_CHANNELS = {
-    ["Mind Flay"] = { castType = "channel", ticks = 3, fakeQueue = true, clipOverlay = true, tickSound = true, tickFlash = true, tickMarkers = true },
-}
+CH.KNOWN_CHANNELS = {}
 
 ------------------------------------------------------------------------
 -- Update KNOWN_CHANNELS from spec's channelSpells data
@@ -943,7 +987,7 @@ function CH:GetMacroText(spellName)
     end
     -- Pass the spell name into SPH_FQ so DoT-refresh hints can be looked up.
     -- For channel spells the argument is harmless (channel mode ignores it).
-    local sn = spellName or "Mind Flay"
+    local sn = spellName or self:GetDefaultChannelSpellName() or ""
     local escaped = sn:gsub('"', '\\"')
     return '/run SPH_FQ("' .. escaped .. '")\n/cast ' .. sn
 end
@@ -1004,14 +1048,9 @@ function CH:GetMacroSpells()
     end
 
     if #spells == 0 then
-        if self.GetChannelSpellDefinitions then
-            local defs = self:GetChannelSpellDefinitions(nil)
-            for _, cs in ipairs(defs or {}) do
-                add(cs.spellName)
-            end
-        end
-        if #spells == 0 then
-            add("Mind Flay")
+        local fallback = self:GetDefaultChannelSpellName()
+        if fallback then
+            add(fallback)
         end
     end
     return spells

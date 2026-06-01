@@ -388,7 +388,7 @@ function A:InitConfig()
                 BuildControls(self)
             end)
             if not ok then
-                print("SPHelper: failed building options panel:", err)
+                A.ReportError("CONFIG", "failed building options panel", err, { phase = "OnShow" })
                 if not self._sph_errorLabel then
                     local lbl = self:CreateFontString(nil, "OVERLAY")
                     lbl:SetFont("Fonts\\FRIZQT__.TTF", 12, "OUTLINE")
@@ -423,7 +423,7 @@ function A:InitConfig()
             if not built then
                 local ok, err = pcall(function() BuildControls(self) end)
                 if not ok then
-                    print("SPHelper: failed building options (Refresh):", err)
+                    A.ReportError("CONFIG", "failed building options", err, { phase = "Refresh" })
                 else
                     built = true
                 end
@@ -856,6 +856,36 @@ function A:InitConfig()
                 print("|cff8882d5SPHelper|r: SpecUI not loaded.")
             end
 
+        elseif msg == "capture" then
+            -- Snapshot the troubleshooter: open the Spec UI, switch to the
+            -- Debug tab, then run the chat-capture so the EditBox is
+            -- populated. If SpecUI isn't available, fall back to the
+            -- chat-only capture.
+            if A.SpecUI and A.SpecUI.Open then
+                A.SpecUI:Open()
+                -- Give the UI a moment to open, then switch to tab 7 and
+                -- invoke the capture so the troubleshooter's EditBox is
+                -- guaranteed to exist and be filled.
+                C_Timer.After(0.06, function()
+                    if A.SpecUI and A.SpecUI.SwitchTab then
+                        A.SpecUI:SwitchTab(7, A.SpecUI._spec)
+                    end
+                    C_Timer.After(0.06, function()
+                        if A.TroubleshooterChatCapture then
+                            A.TroubleshooterChatCapture()
+                        else
+                            print("|cff8882d5SPHelper|r: Troubleshooter not available.")
+                        end
+                    end)
+                end)
+            else
+                if A.TroubleshooterChatCapture then
+                    A.TroubleshooterChatCapture()
+                else
+                    print("|cff8882d5SPHelper|r: Troubleshooter not available.")
+                end
+            end
+
         elseif msg == "debug" or msg:find("^debug%s+") then
             local args = {}
             for token in msg:gmatch("%S+") do
@@ -930,6 +960,7 @@ function A:InitConfig()
             print("  /sph            — Open settings")
             print("  /sph spec       — Open spec & rotation editor")
             print("  /sph visuals    — Open visual layout options")
+            print("  /sph capture    — Snapshot troubleshooter → chat + Debug tab")
             print("  /sph debug      — List or toggle module debug logging")
             print("  /sph lock       — Lock all frames")
             print("  /sph unlock     — Unlock frames for dragging")

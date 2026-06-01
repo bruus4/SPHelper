@@ -12,6 +12,7 @@ SpellDatabase.lua
 # Spec system (manager then validator, before helpers and specs)
 SpecManager.lua
 SpecValidator.lua
+SpecTemplates.lua
 
 # Helper modules (register themselves with SpecManager)
 CastBar.lua
