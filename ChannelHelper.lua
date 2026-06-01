@@ -26,6 +26,10 @@ local function ClampFakeQueueMaxMs(ms)
 end
 
 function CH:GetEffectiveFakeQueueMaxMs()
+    local active = self._activeChannelInfo
+    if active and active.fakeQueueMaxMs ~= nil then
+        return ClampFakeQueueMaxMs(active.fakeQueueMaxMs)
+    end
     return ClampFakeQueueMaxMs(self._config and self._config.fakeQueueMaxMs or 0)
 end
 
@@ -34,6 +38,116 @@ local function NormalizeChannelToken(value)
     value = value:gsub("[%s%-]+", "_")
     value = value:gsub("__+", "_")
     return string.upper(value)
+end
+
+local function CopyValue(value)
+    if type(value) ~= "table" then return value end
+    local copy = {}
+    for key, child in pairs(value) do
+        copy[key] = CopyValue(child)
+    end
+    return copy
+end
+
+local function MergeInto(dest, src)
+    if type(src) ~= "table" then return dest end
+    for key, value in pairs(src) do
+        if type(value) == "table" and type(dest[key]) == "table" then
+            MergeInto(dest[key], value)
+        else
+            dest[key] = CopyValue(value)
+        end
+    end
+    return dest
+end
+
+local function SanitizeEntryToken(value)
+    value = tostring(value or "entry"):lower():gsub("[^%w]+", "_"):gsub("^_+", ""):gsub("_+$", "")
+    if value == "" then value = "entry" end
+    return value
+end
+
+local function GetRotationForSpec(spec)
+    if not spec or not spec.meta then return nil end
+    local sdb = A.db and A.db.specs and A.db.specs[spec.meta.id]
+    return (sdb and sdb.rotation) or spec.rotation
+end
+
+local function GetEntryId(entry, index)
+    if entry and entry.id and entry.id ~= "" then return entry.id end
+    local def = A.GetSpellDefinition and A.GetSpellDefinition(entry and entry.key)
+    local name = (def and def.name) or (entry and entry.key) or "entry"
+    local spellID = (def and (def.id or def.baseId)) or (A.ResolveSpellID and A.ResolveSpellID(entry and entry.key)) or 0
+    return string.format("%s_%s", SanitizeEntryToken(name), tostring(spellID))
+end
+
+local function GetSavedHelperOptions(spec, entry, index)
+    if not spec or not spec.meta or not entry then return nil end
+    local sdb = A.db and A.db.specs and A.db.specs[spec.meta.id]
+    local saved = sdb and sdb.helperOptions
+    if type(saved) ~= "table" then return nil end
+
+    local entryId = GetEntryId(entry, index)
+    if type(saved[entryId]) == "table" then return saved[entryId] end
+
+    local spellName = entry.key
+    local def = A.GetSpellDefinition and A.GetSpellDefinition(entry.key)
+    if def and def.name then spellName = def.name end
+    if spellName and type(saved[spellName]) == "table" then return saved[spellName] end
+    return nil
+end
+
+local function GetEntryHelperOptions(spec, entry, index)
+    local options = CopyValue(entry and entry.helperOptions or {}) or {}
+    MergeInto(options, GetSavedHelperOptions(spec, entry, index))
+    return options
+end
+
+local function BuildChannelDefinitionFromEntry(spec, entry, index)
+    if not entry or not entry.key or type(entry.helpers) ~= "table" then return nil end
+    local helpers = entry.helpers
+    if not (helpers.fakeQueue or helpers.clipOverlay or helpers.tickSound or helpers.tickFlash or helpers.tickMarkers) then
+        return nil
+    end
+
+    local def = A.GetSpellDefinition and A.GetSpellDefinition(entry.key)
+    if not def or not (def.castType == "channel" or def.channel == true or (def.flags and def.flags.channel)) then
+        return nil
+    end
+
+    local options = GetEntryHelperOptions(spec, entry, index)
+    local fqOpts = options.fakeQueue or {}
+    local clipOpts = options.clipOverlay or options.channel or {}
+    local markerOpts = options.tickMarkers or {}
+    local soundOpts = options.tickSound or {}
+    local flashOpts = options.tickFlash or {}
+
+    return {
+        _fromRotation = true,
+        id = GetEntryId(entry, index),
+        castType = "channel",
+        spellKey = entry.key,
+        spellName = def.name or entry.key,
+        ticks = tonumber(def.ticks) or 0,
+        duration = def.duration or def.castTime,
+        tickInterval = def.tickInterval,
+        fakeQueue = helpers.fakeQueue == true,
+        fakeQueueMaxMs = fqOpts.maxMs,
+        fqFireOffsetMs = fqOpts.fireOffsetMs,
+        fqDiag = fqOpts.diagnostics,
+        fqAutoAdjust = fqOpts.autoAdjust,
+        fqAllowNegative = fqOpts.allowNegative,
+        clipOverlay = helpers.clipOverlay == true,
+        minDuration = clipOpts.minDuration,
+        clipReasons = clipOpts.clipReasons or {},
+        tickSound = helpers.tickSound == true,
+        tickSoundTicks = soundOpts.ticks or {},
+        tickFlash = helpers.tickFlash == true,
+        tickFlashTicks = flashOpts.ticks or {},
+        tickMarkers = helpers.tickMarkers == true,
+        tickMarkerMode = markerOpts.mode or "all",
+        tickMarkerTicks = markerOpts.ticks or {},
+    }
 end
 
 local function ChannelSpecMatches(def, spec)
@@ -101,18 +215,34 @@ local function NormalizeChannelSpellEntry(entry, fallbackKey, fallbackName)
     end
     if ticks <= 0 then ticks = 3 end
 
+    local defaultOn = entry._legacyChannel == true
+    local function ResolveEntryFlag(field, defaultValue)
+        local value = entry[field]
+        if value == nil then return defaultValue end
+        return value ~= false
+    end
+
     local normalized = {
+        _fromRotation = entry._fromRotation == true,
+        id = entry.id,
         castType = "channel",
         spellKey = spellKey,
         spellName = spellName,
         ticks = ticks,
-        fakeQueue = entry.fakeQueue ~= false,
-        clipOverlay = entry.clipOverlay ~= false,
-        tickSound = entry.tickSound ~= false,
+        fakeQueue = ResolveEntryFlag("fakeQueue", defaultOn),
+        fakeQueueMaxMs = entry.fakeQueueMaxMs,
+        fqFireOffsetMs = entry.fqFireOffsetMs,
+        fqDiag = entry.fqDiag,
+        fqAutoAdjust = entry.fqAutoAdjust,
+        fqAllowNegative = entry.fqAllowNegative,
+        clipOverlay = ResolveEntryFlag("clipOverlay", defaultOn),
+        minDuration = entry.minDuration,
+        clipReasons = entry.clipReasons or {},
+        tickSound = ResolveEntryFlag("tickSound", defaultOn),
         tickSoundTicks = entry.tickSoundTicks or {},
-        tickFlash = entry.tickFlash ~= false,
+        tickFlash = ResolveEntryFlag("tickFlash", defaultOn),
         tickFlashTicks = entry.tickFlashTicks or {},
-        tickMarkers = entry.tickMarkers ~= false,
+        tickMarkers = ResolveEntryFlag("tickMarkers", defaultOn),
         tickMarkerMode = entry.tickMarkerMode or "all",
         tickMarkerTicks = entry.tickMarkerTicks or {},
     }
@@ -136,9 +266,18 @@ function CH:GetChannelSpellDefinitions(spec)
         defs[#defs + 1] = normalized
     end
 
+    local rotation = GetRotationForSpec(spec)
+    if type(rotation) == "table" then
+        for index, entry in ipairs(rotation) do
+            AddEntry(BuildChannelDefinitionFromEntry(spec, entry, index), entry and entry.key, nil)
+        end
+    end
+
     if spec and type(spec.channelSpells) == "table" then
         for _, cs in ipairs(spec.channelSpells) do
-            AddEntry(cs, cs.spellKey or cs.key, cs.spellName or cs.name)
+            local legacy = CopyValue(cs)
+            legacy._legacyChannel = true
+            AddEntry(legacy, legacy.spellKey or legacy.key, legacy.spellName or legacy.name)
         end
     end
 
@@ -256,13 +395,13 @@ function CH:GetChannelInfoForSpell(spellName, spellID)
     local info = {
         castType = "channel",
         ticks = (def and def.ticks) or 3,
-        fakeQueue = ResolveFlag("fakeQueue", true),
-        clipOverlay = ResolveFlag("clipOverlay", true),
-        tickSound = ResolveFlag("tickSound", true),
+        fakeQueue = ResolveFlag("fakeQueue", false),
+        clipOverlay = ResolveFlag("clipOverlay", false),
+        tickSound = ResolveFlag("tickSound", false),
         tickSoundTicks = def and def.tickSoundTicks or {},
-        tickFlash = ResolveFlag("tickFlash", true),
+        tickFlash = ResolveFlag("tickFlash", false),
         tickFlashTicks = def and def.tickFlashTicks or {},
-        tickMarkers = ResolveFlag("tickMarkers", true),
+        tickMarkers = ResolveFlag("tickMarkers", false),
         tickMarkerMode = def and def.tickMarkerMode or "all",
         tickMarkerTicks = def and def.tickMarkerTicks or {},
         spellKey = def and def.key or nil,
@@ -385,19 +524,28 @@ function CH:LoadChannelSpells(spec)
     for _, cs in ipairs(defs) do
         if cs.spellName then
             local prefix = "cs_" .. (cs.spellKey or "") .. "_"
+            local fromRotation = cs._fromRotation == true
             self.KNOWN_CHANNELS[cs.spellName] = {
                 castType    = "channel",
                 ticks       = cs.ticks or 3,
-                fakeQueue   = A.SpecVal(prefix .. "fakeQueue",   cs.fakeQueue ~= false),
-                clipOverlay = A.SpecVal(prefix .. "clipOverlay", cs.clipOverlay ~= false),
-                tickSound   = A.SpecVal(prefix .. "tickSound",  cs.tickSound ~= false),
-                tickSoundTicks = A.SpecVal(prefix .. "tickSoundTicks", cs.tickSoundTicks or {}),
-                tickFlash   = A.SpecVal(prefix .. "tickFlash",  cs.tickFlash ~= false),
-                tickFlashTicks = A.SpecVal(prefix .. "tickFlashTicks", cs.tickFlashTicks or {}),
-                tickMarkers = A.SpecVal(prefix .. "tickMarkers", cs.tickMarkers ~= false),
-                tickMarkerMode  = A.SpecVal(prefix .. "tickMarkerMode",  cs.tickMarkerMode or "all"),
-                tickMarkerTicks = A.SpecVal(prefix .. "tickMarkerTicks", cs.tickMarkerTicks or {}),
+                fakeQueue   = fromRotation and (cs.fakeQueue == true) or A.SpecVal(prefix .. "fakeQueue", cs.fakeQueue ~= false),
+                fakeQueueMaxMs = cs.fakeQueueMaxMs,
+                fqFireOffsetMs = cs.fqFireOffsetMs,
+                fqDiag = cs.fqDiag,
+                fqAutoAdjust = cs.fqAutoAdjust,
+                fqAllowNegative = cs.fqAllowNegative,
+                clipOverlay = fromRotation and (cs.clipOverlay == true) or A.SpecVal(prefix .. "clipOverlay", cs.clipOverlay ~= false),
+                minDuration = cs.minDuration,
+                clipReasons = cs.clipReasons or {},
+                tickSound   = fromRotation and (cs.tickSound == true) or A.SpecVal(prefix .. "tickSound", cs.tickSound ~= false),
+                tickSoundTicks = fromRotation and (cs.tickSoundTicks or {}) or A.SpecVal(prefix .. "tickSoundTicks", cs.tickSoundTicks or {}),
+                tickFlash   = fromRotation and (cs.tickFlash == true) or A.SpecVal(prefix .. "tickFlash", cs.tickFlash ~= false),
+                tickFlashTicks = fromRotation and (cs.tickFlashTicks or {}) or A.SpecVal(prefix .. "tickFlashTicks", cs.tickFlashTicks or {}),
+                tickMarkers = fromRotation and (cs.tickMarkers == true) or A.SpecVal(prefix .. "tickMarkers", cs.tickMarkers ~= false),
+                tickMarkerMode  = fromRotation and (cs.tickMarkerMode or "all") or A.SpecVal(prefix .. "tickMarkerMode", cs.tickMarkerMode or "all"),
+                tickMarkerTicks = fromRotation and (cs.tickMarkerTicks or {}) or A.SpecVal(prefix .. "tickMarkerTicks", cs.tickMarkerTicks or {}),
                 spellKey    = cs.spellKey,
+                id          = cs.id,
             }
         end
     end
@@ -823,8 +971,42 @@ end
 -- at the optimal moment.
 ------------------------------------------------------------------------
 
+function CH:GetFakeQueueOptionsForSpell(spellArg)
+    if not spellArg or not A.SpecManager or not A.SpecManager.GetActiveSpecs then return nil end
+    local needle = tostring(spellArg)
+    local activeSpecs = A.SpecManager:GetActiveSpecs() or {}
+    for _, spec in pairs(activeSpecs) do
+        local rotation = GetRotationForSpec(spec)
+        if type(rotation) == "table" then
+            for index, entry in ipairs(rotation) do
+                if entry and entry.helpers and entry.helpers.fakeQueue == true then
+                    local def = A.GetSpellDefinition and A.GetSpellDefinition(entry.key)
+                    local spellID = def and (def.id or def.baseId) or (A.ResolveSpellID and A.ResolveSpellID(entry.key))
+                    local spellName = def and def.name or entry.key
+                    if needle == tostring(entry.key) or needle == tostring(spellName) or (spellID and needle == tostring(spellID)) then
+                        local options = GetEntryHelperOptions(spec, entry, index)
+                        return options.fakeQueue or {}
+                    end
+                end
+            end
+        end
+    end
+    return nil
+end
+
 function CH:FakeQueue(spellArg)
+    local spellFQOptions = self.GetFakeQueueOptionsForSpell and self:GetFakeQueueOptionsForSpell(spellArg) or nil
     local maxWaitMs = self:GetEffectiveFakeQueueMaxMs()
+    if (not self._state.active) and spellFQOptions and spellFQOptions.maxMs ~= nil then
+        maxWaitMs = ClampFakeQueueMaxMs(spellFQOptions.maxMs)
+    end
+    local diagEnabled = self._config and self._config.fqDiag
+    if spellFQOptions and spellFQOptions.diagnostics ~= nil then
+        diagEnabled = spellFQOptions.diagnostics ~= false
+    end
+    if self._state.active and self._activeChannelInfo and self._activeChannelInfo.fqDiag ~= nil then
+        diagEnabled = self._activeChannelInfo.fqDiag ~= false
+    end
     local maxWait = maxWaitMs / 1000
     if maxWait <= 0 then return end
 
@@ -854,7 +1036,7 @@ function CH:FakeQueue(spellArg)
             local now = GetTime()
             local needed = hint.fireAt - now
             if needed <= 0 or needed > maxWait then
-                if self._config and self._config.fqDiag and needed > maxWait then
+                if diagEnabled and needed > maxWait then
                     if not self._lastDotFQSkipPrint or (now - self._lastDotFQSkipPrint) >= 2.0 then
                         self._lastDotFQSkipPrint = now
                         print(string.format(
@@ -869,7 +1051,7 @@ function CH:FakeQueue(spellArg)
             A._fqBlocking = true
             repeat until (debugprofilestop() - start_dbp) >= needed_ms
             A._fqBlocking = false
-            if self._config and self._config.fqDiag then
+            if diagEnabled then
                 local now2 = GetTime()
                 if not self._lastDotFQPrint or (now2 - self._lastDotFQPrint) >= 2.0 then
                     self._lastDotFQPrint = now2
@@ -902,7 +1084,11 @@ function CH:FakeQueue(spellArg)
     -- Latency compensation (-lat_s) is baked in; offset is only a small adjustment.
     -- ---------------------------------------------------------------
     local lat_s      = s.latency            -- one-way latency in seconds
-    local fineOffset = self._config.fqFireOffsetMs / 1000  -- fine-tune seconds
+    local offsetMs   = self._config.fqFireOffsetMs
+    if self._activeChannelInfo and self._activeChannelInfo.fqFireOffsetMs ~= nil then
+        offsetMs = tonumber(self._activeChannelInfo.fqFireOffsetMs) or offsetMs
+    end
+    local fineOffset = offsetMs / 1000  -- fine-tune seconds
     local now        = GetTime()
 
     local targetTime = nil
@@ -925,7 +1111,7 @@ function CH:FakeQueue(spellArg)
     -- Skip if the target is more than maxWait away (would freeze too long)
     -- or already past (nothing to wait for).
     if needed > maxWait then
-        if self._config and self._config.fqDiag then
+        if diagEnabled then
             local now2 = GetTime()
             if not self._lastFQSkipPrint or (now2 - self._lastFQSkipPrint) >= 2.0 then
                 self._lastFQSkipPrint = now2
@@ -961,7 +1147,7 @@ function CH:FakeQueue(spellArg)
 
     -- Throttled console notice (shows wait only; detailed tick timing printed in OnTick)
     local waited_ms = math.floor(needed_ms + 0.5)
-    if waited_ms >= 1 and self._config and self._config.fqDiag then
+    if waited_ms >= 1 and diagEnabled then
         local now2 = GetTime()
         if not CH._lastFQPrint or (now2 - CH._lastFQPrint) >= 2.0 then
             CH._lastFQPrint = now2
@@ -1008,37 +1194,63 @@ end
 function CH:GetMacroSpells()
     local spells = {}
     local seen = {}
+    local hasExplicitHelpers = false
     local function add(name)
         if not name or seen[name] then return end
         seen[name] = true
         spells[#spells + 1] = name
     end
 
-    if self._channelSpellDefs and #self._channelSpellDefs > 0 then
-        for _, cs in ipairs(self._channelSpellDefs) do
-            add(cs.spellName)
-        end
-    elseif self.KNOWN_CHANNELS then
-        for spellName in pairs(self.KNOWN_CHANNELS) do
-            add(spellName)
-        end
-    end
-
-    -- DoT-refresh spells from the active spec's rotation.
+    -- Prefer the explicit rotation-entry helper model.
     if A.SpecManager and A.SpecManager.GetActiveSpecs then
         local activeSpecs = A.SpecManager:GetActiveSpecs() or {}
         for _, spec in pairs(activeSpecs) do
-            local rotation = spec and spec.rotation
+            local rotation = GetRotationForSpec(spec)
             if rotation then
                 for _, entry in ipairs(rotation) do
-                    if entry.key and entry.conditions then
-                        for _, cond in ipairs(entry.conditions) do
-                            if cond and cond.type == "projected_dot_time_left_lt" then
-                                local spell = A.SPELLS and A.SPELLS[entry.key]
-                                if spell and spell.name then
-                                    add(spell.name)
+                    if entry and entry.key and entry.helpers and entry.helpers.fakeQueue == true then
+                        local spell = A.GetSpellDefinition and A.GetSpellDefinition(entry.key)
+                        if spell and spell.name then
+                            add(spell.name)
+                            hasExplicitHelpers = true
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    if not hasExplicitHelpers then
+        if self._channelSpellDefs and #self._channelSpellDefs > 0 then
+            for _, cs in ipairs(self._channelSpellDefs) do
+                if cs.fakeQueue ~= false then
+                    add(cs.spellName)
+                end
+            end
+        elseif self.KNOWN_CHANNELS then
+            for spellName, info in pairs(self.KNOWN_CHANNELS) do
+                if not info or info.fakeQueue ~= false then
+                    add(spellName)
+                end
+            end
+        end
+
+        -- Legacy DoT-refresh spells from the active spec's rotation.
+        if A.SpecManager and A.SpecManager.GetActiveSpecs then
+            local activeSpecs = A.SpecManager:GetActiveSpecs() or {}
+            for _, spec in pairs(activeSpecs) do
+                local rotation = GetRotationForSpec(spec)
+                if rotation then
+                    for _, entry in ipairs(rotation) do
+                        if entry.key and entry.conditions then
+                            for _, cond in ipairs(entry.conditions) do
+                                if cond and cond.type == "projected_dot_time_left_lt" then
+                                    local spell = A.SPELLS and A.SPELLS[entry.key]
+                                    if spell and spell.name then
+                                        add(spell.name)
+                                    end
+                                    break
                                 end
-                                break
                             end
                         end
                     end
@@ -1056,62 +1268,59 @@ function CH:GetMacroSpells()
     return spells
 end
 
---- Automatically create FQ macros for the active spec's rotation spells.
+local function GetMacroIconForSpell(spellName)
+    local iconTexture = A.GetSpellIconCached and A.GetSpellIconCached(spellName) or select(3, GetSpellInfo(spellName))
+    if iconTexture then return iconTexture end
+    for _, spellData in pairs(A.SPELLS or {}) do
+        if spellData.name == spellName then
+            iconTexture = (A.GetSpellIconCached and A.GetSpellIconCached(spellData.id)) or select(3, GetSpellInfo(spellData.id))
+            if iconTexture then return iconTexture end
+        end
+    end
+    return "INV_MISC_QUESTIONMARK"
+end
+
+function CH:CreateMacroForSpell(spellName)
+    if not spellName or spellName == "" then return "failed" end
+    local macroName = "SPH: " .. spellName
+    local body = self:GetMacroText(spellName)
+    local iconTexture = GetMacroIconForSpell(spellName)
+    local existingIdx = GetMacroIndexByName(macroName)
+    if existingIdx and existingIdx > 0 then
+        EditMacro(existingIdx, macroName, iconTexture, body)
+        return "updated"
+    end
+
+    local ok, result = pcall(CreateMacro, macroName, iconTexture, body, 1)
+    if ok and result then return "created" end
+
+    local ok2, result2 = pcall(CreateMacro, macroName, iconTexture, body, nil)
+    if ok2 and result2 then return "created" end
+    return "failed"
+end
+
+--- Automatically create or update FQ macros for selected spells.
 --- Uses CreateMacro() API. Only creates macros that don't already exist.
 --- Returns the number of macros created.
-function CH:CreateMacros()
-    local spells = self:GetMacroSpells()
+function CH:CreateMacros(selectedSpells)
+    if InCombatLockdown and InCombatLockdown() then
+        print("|cffff4444SPHelper|r: Macros cannot be created or updated while in combat.")
+        return 0
+    end
+
+    local spells = selectedSpells or self:GetMacroSpells()
     local created = 0
     local skipped = 0
     local failed = 0
 
     for _, spellName in ipairs(spells) do
-        local macroName = "SPH: " .. spellName
-        -- Check if macro already exists
-        local existingIdx = GetMacroIndexByName(macroName)
-        if existingIdx and existingIdx > 0 then
-            -- Update the existing macro body in case it changed
-            local body = self:GetMacroText(spellName)
-            local iconTexture = A.GetSpellIconCached and A.GetSpellIconCached(spellName) or select(3, GetSpellInfo(spellName))
-            if not iconTexture then
-                local spellData
-                for _, sd in pairs(A.SPELLS) do
-                    if sd.name == spellName then spellData = sd; break end
-                end
-                if spellData then
-                    iconTexture = (A.GetSpellIconCached and A.GetSpellIconCached(spellData.id)) or select(3, GetSpellInfo(spellData.id))
-                end
-            end
-            EditMacro(existingIdx, macroName, iconTexture or "INV_MISC_QUESTIONMARK", body)
+        local result = self:CreateMacroForSpell(spellName)
+        if result == "updated" then
             skipped = skipped + 1
+        elseif result == "created" then
+            created = created + 1
         else
-            local body = self:GetMacroText(spellName)
-            -- Get the spell icon
-            local iconTexture = A.GetSpellIconCached and A.GetSpellIconCached(spellName) or select(3, GetSpellInfo(spellName))
-            if not iconTexture then
-                local spellData
-                for _, sd in pairs(A.SPELLS) do
-                    if sd.name == spellName then spellData = sd; break end
-                end
-                if spellData then
-                    iconTexture = (A.GetSpellIconCached and A.GetSpellIconCached(spellData.id)) or select(3, GetSpellInfo(spellData.id))
-                end
-            end
-            -- Try per-character macros first (slot 19–36 in TBC), fallback to general
-            local ok, result = pcall(CreateMacro, macroName,
-                iconTexture or "INV_MISC_QUESTIONMARK", body, 1)
-            if ok and result then
-                created = created + 1
-            else
-                -- Try general macro slot
-                local ok2, result2 = pcall(CreateMacro, macroName,
-                    iconTexture or "INV_MISC_QUESTIONMARK", body, nil)
-                if ok2 and result2 then
-                    created = created + 1
-                else
-                    failed = failed + 1
-                end
-            end
+            failed = failed + 1
         end
     end
 
@@ -1124,6 +1333,187 @@ function CH:CreateMacros()
         print("|cffff4444SPHelper|r: Some macros failed — you may have too many macros. Delete unused ones and try again.")
     end
     return created
+end
+
+function CH:OpenMacroChooser()
+    local spells = self:GetMacroSpells()
+    if self.macroChooser and self.macroChooser:IsShown() then
+        self.macroChooser:Hide()
+        return
+    end
+
+    local frame = self.macroChooser
+    if not frame then
+        frame = CreateFrame("Frame", "SPHelperMacroChooser", UIParent, "BackdropTemplate")
+        frame:SetSize(540, 420)
+        frame:SetPoint("CENTER")
+        frame:SetFrameStrata("DIALOG")
+        frame:SetToplevel(true)
+        frame:SetMovable(true)
+        frame:EnableMouse(true)
+        frame:SetClampedToScreen(true)
+        frame:RegisterForDrag("LeftButton")
+        frame:SetScript("OnDragStart", function(self) self:StartMoving() end)
+        frame:SetScript("OnDragStop", function(self) self:StopMovingOrSizing() end)
+        A.CreateBackdrop(frame, 0.045, 0.038, 0.060, 1, 0.30, 0.25, 0.42, 1)
+
+        local title = frame:CreateFontString(nil, "OVERLAY")
+        title:SetFont("Fonts\\FRIZQT__.TTF", 12, "OUTLINE")
+        title:SetPoint("TOP", frame, "TOP", 0, -10)
+        title:SetText("SPHelper Fake Queue Macros")
+
+        local closeBtn = CreateFrame("Button", nil, frame, "BackdropTemplate")
+        closeBtn:SetSize(20, 20)
+        closeBtn:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -8, -8)
+        A.CreateBackdrop(closeBtn, 0.30, 0.08, 0.08, 0.95, 0.55, 0.18, 0.18, 1)
+        local closeText = closeBtn:CreateFontString(nil, "OVERLAY")
+        closeText:SetFont("Fonts\\FRIZQT__.TTF", 11, "OUTLINE")
+        closeText:SetPoint("CENTER")
+        closeText:SetText("X")
+        closeBtn:SetScript("OnClick", function() frame:Hide() end)
+
+        local note = frame:CreateFontString(nil, "OVERLAY")
+        note:SetFont("Fonts\\FRIZQT__.TTF", 9)
+        note:SetPoint("TOPLEFT", frame, "TOPLEFT", 16, -34)
+        note:SetWidth(500)
+        note:SetJustifyH("LEFT")
+        note:SetTextColor(0.76, 0.76, 0.82, 1)
+        note:SetText("Select which macros to create or update. Existing macros are updated with the current helper body.")
+
+        local scroll = CreateFrame("ScrollFrame", nil, frame, "UIPanelScrollFrameTemplate")
+        scroll:SetPoint("TOPLEFT", frame, "TOPLEFT", 14, -60)
+        scroll:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -32, 58)
+        local content = CreateFrame("Frame", nil, scroll)
+        content:SetWidth(480)
+        scroll:SetScrollChild(content)
+        frame._content = content
+        frame._rows = {}
+
+        local function MakeButton(text, x, onClick)
+            local btn = CreateFrame("Button", nil, frame, "BackdropTemplate")
+            btn:SetSize(94, 24)
+            btn:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", x, 18)
+            A.CreateBackdrop(btn, 0.13, 0.11, 0.18, 0.96, 0.34, 0.30, 0.48, 1)
+            local fs = btn:CreateFontString(nil, "OVERLAY")
+            fs:SetFont("Fonts\\FRIZQT__.TTF", 9, "OUTLINE")
+            fs:SetPoint("CENTER")
+            fs:SetText(text)
+            btn:SetScript("OnClick", onClick)
+            return btn
+        end
+
+        MakeButton("Select All", 16, function()
+            for _, row in ipairs(frame._rows or {}) do
+                if row._check then row._check:SetChecked(true) end
+            end
+        end)
+        MakeButton("Select None", 118, function()
+            for _, row in ipairs(frame._rows or {}) do
+                if row._check then row._check:SetChecked(false) end
+            end
+        end)
+        MakeButton("Create", 328, function()
+            local selected = {}
+            for _, row in ipairs(frame._rows or {}) do
+                if row:IsShown() and row._check and row._check:GetChecked() and row._spellName then
+                    selected[#selected + 1] = row._spellName
+                end
+            end
+            if #selected == 0 then
+                print("|cff8882d5SPHelper|r: No macros selected.")
+                return
+            end
+            if InCombatLockdown and InCombatLockdown() then
+                print("|cffff4444SPHelper|r: Macros cannot be created or updated while in combat.")
+                return
+            end
+            A.ChannelHelper:CreateMacros(selected)
+            frame:Hide()
+            A.ChannelHelper:OpenMacroChooser()
+        end)
+        MakeButton("Close", 430, function() frame:Hide() end)
+
+        frame:SetScript("OnShow", function()
+            if type(UISpecialFrames) == "table" then
+                local found = false
+                for _, name in ipairs(UISpecialFrames) do
+                    if name == "SPHelperMacroChooser" then found = true; break end
+                end
+                if not found then table.insert(UISpecialFrames, "SPHelperMacroChooser") end
+            end
+        end)
+        frame:SetScript("OnHide", function()
+            if type(UISpecialFrames) == "table" then
+                for i, name in ipairs(UISpecialFrames) do
+                    if name == "SPHelperMacroChooser" then table.remove(UISpecialFrames, i); break end
+                end
+            end
+        end)
+
+        self.macroChooser = frame
+    end
+
+    local content = frame._content
+    for _, row in ipairs(frame._rows or {}) do row:Hide() end
+    wipe(frame._rows)
+
+    if #spells == 0 then
+        local row = CreateFrame("Frame", nil, content)
+        row:SetSize(480, 30)
+        row:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -4)
+        local text = row:CreateFontString(nil, "OVERLAY")
+        text:SetFont("Fonts\\FRIZQT__.TTF", 10)
+        text:SetPoint("LEFT", row, "LEFT", 8, 0)
+        text:SetTextColor(0.85, 0.85, 0.85, 1)
+        text:SetText("No Fake Queue macro-enabled spells were found for the active rotation.")
+        frame._rows[1] = row
+        content:SetHeight(40)
+    else
+        for index, spellName in ipairs(spells) do
+            local row = CreateFrame("Frame", nil, content, "BackdropTemplate")
+            row:SetSize(480, 54)
+            row:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -((index - 1) * 58))
+            A.CreateBackdrop(row, 0.07, 0.06, 0.09, 0.96, 0.28, 0.24, 0.34, 1)
+            row._spellName = spellName
+
+            local check = CreateFrame("CheckButton", nil, row)
+            check:SetSize(22, 22)
+            check:SetPoint("LEFT", row, "LEFT", 8, 0)
+            check:SetNormalTexture("Interface\\Buttons\\UI-CheckBox-Up")
+            check:SetPushedTexture("Interface\\Buttons\\UI-CheckBox-Down")
+            check:SetHighlightTexture("Interface\\Buttons\\UI-CheckBox-Highlight", "ADD")
+            check:SetCheckedTexture("Interface\\Buttons\\UI-CheckBox-Check")
+            check:SetChecked(true)
+            row._check = check
+
+            local icon = row:CreateTexture(nil, "ARTWORK")
+            icon:SetSize(32, 32)
+            icon:SetPoint("LEFT", check, "RIGHT", 8, 0)
+            icon:SetTexture(GetMacroIconForSpell(spellName))
+
+            local macroName = "SPH: " .. spellName
+            local exists = (GetMacroIndexByName(macroName) or 0) > 0
+            local nameText = row:CreateFontString(nil, "OVERLAY")
+            nameText:SetFont("Fonts\\FRIZQT__.TTF", 10, "OUTLINE")
+            nameText:SetPoint("TOPLEFT", icon, "TOPRIGHT", 8, -5)
+            nameText:SetWidth(380)
+            nameText:SetJustifyH("LEFT")
+            nameText:SetText(macroName .. (exists and "  |cff66dd88update|r" or "  |cffffcc00new|r"))
+
+            local bodyText = row:CreateFontString(nil, "OVERLAY")
+            bodyText:SetFont("Fonts\\FRIZQT__.TTF", 8)
+            bodyText:SetPoint("TOPLEFT", icon, "TOPRIGHT", 8, -24)
+            bodyText:SetWidth(380)
+            bodyText:SetJustifyH("LEFT")
+            bodyText:SetTextColor(0.68, 0.68, 0.74, 1)
+            bodyText:SetText((self:GetMacroText(spellName) or ""):gsub("\n", "  /  "))
+
+            frame._rows[#frame._rows + 1] = row
+        end
+        content:SetHeight((#spells * 58) + 8)
+    end
+
+    frame:Show()
 end
 
 ------------------------------------------------------------------------

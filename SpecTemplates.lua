@@ -67,10 +67,10 @@ function T.StateCompare(subject, op, value) return cond("state_compare", { subje
 function T.ResourceGte(amount) return cond("resource_gte", { amount = amount }) end
 function T.ResourceLt(amount) return cond("resource_lt", { amount = amount }) end
 function T.ResourceRequiredGte(amount) return cond("resource_required_gte", { amount = amount }) end
-function T.ComboPointsGte(amount) return cond("combo_points_gte", { amount = amount }) end
-function T.ComboPointsLt(amount) return cond("combo_points_lt", { amount = amount }) end
-function T.TargetTtdGte(value) return cond("target_ttd_gte", { value = value }) end
-function T.TargetTtdLt(value) return cond("target_ttd_lt", { value = value }) end
+function T.ComboPointsGte(amount) return cond("combo_points_gte", { points = amount }) end
+function T.ComboPointsLt(amount) return cond("combo_points_lt", { points = amount }) end
+function T.TargetTtdGte(value) return cond("target_ttd_gte", { seconds = value }) end
+function T.TargetTtdLt(value) return cond("target_ttd_lt", { seconds = value }) end
 function T.DotMissing(spellKey) return cond("dot_missing", { spellKey = spellKey }) end
 function T.ProjectedDotTimeLeftLT(spellKey, seconds)
     local fields = { spellKey = spellKey }
@@ -250,40 +250,49 @@ function T.BuilderSplitEntries(params)
     local fallbackOptionKey = params.fallbackOptionKey or "use_mangle"
     local primaryResource = params.primaryResource or 42
     local fallbackResource = params.fallbackResource or 40
+    local repeatLimit = params.repeatLimit or 4
+    local maxComboPoints = params.maxComboPoints or 5
 
+    local primaryExtra = {
+        T.ComboPointsLt(maxComboPoints),
+        T.NotHasAggro(),
+        T.AnyOf({
+            T.ResourceGte(primaryResource),
+            T.Clearcasting(),
+        }),
+    }
+    appendConditions(primaryExtra, params.primaryExtraConditions)
     local primary = T.SpellEntry({
         key = params.primaryKey or "Shred",
         targetValid = true,
         catForm = true,
         optionKey = primaryOptionKey,
         notStealthed = true,
-        extraConditions = {
-            T.NotHasAggro(),
-            T.AnyOf({
-                T.ResourceGte(primaryResource),
-                T.Clearcasting(),
-            }),
-        },
-        entryOpts = extend({ explicitPriority = priority }, params.primaryEntryOpts),
+        extraConditions = primaryExtra,
+        entryOpts = extend({ explicitPriority = priority, isFiller = true, repeatLimit = repeatLimit }, params.primaryEntryOpts),
     })
 
+    local fallbackExtra = {
+        T.ComboPointsLt(maxComboPoints),
+        T.AnyOf({
+            T.HasAggro(),
+            T.Not(T.SpecOption(primaryOptionKey)),
+            T.NotBehindTarget(),
+        }),
+        T.AnyOf({
+            T.ResourceGte(fallbackResource),
+            T.Clearcasting(),
+        }),
+    }
+    appendConditions(fallbackExtra, params.fallbackExtraConditions)
     local fallback = T.SpellEntry({
         key = params.fallbackKey or "Mangle (Cat)",
         targetValid = true,
         catForm = true,
         optionKey = fallbackOptionKey,
         notStealthed = true,
-        extraConditions = {
-            T.AnyOf({
-                T.HasAggro(),
-                T.Not(T.SpecOption(primaryOptionKey)),
-            }),
-            T.AnyOf({
-                T.ResourceGte(fallbackResource),
-                T.Clearcasting(),
-            }),
-        },
-        entryOpts = extend({ explicitPriority = priority }, params.fallbackEntryOpts),
+        extraConditions = fallbackExtra,
+        entryOpts = extend({ explicitPriority = priority, isFiller = true, repeatLimit = repeatLimit }, params.fallbackEntryOpts),
     })
 
     return primary, fallback
@@ -417,6 +426,24 @@ function T.BuildShadowPriestRotation(spec)
             spellKey = "Mind Flay",
             repeatLimit = 2,
             channelPolicy = "keep_current",
+            entryOpts = {
+                helpers = {
+                    fakeQueue = true,
+                    clipOverlay = true,
+                    tickSound = true,
+                    tickFlash = true,
+                    tickMarkers = true,
+                },
+                helperOptions = {
+                    clipOverlay = {
+                        minDuration = 1.0,
+                        clipReasons = { "Vampiric Touch", "Shadow Word: Pain" },
+                    },
+                    tickMarkers = { mode = "all" },
+                    tickSound = { ticks = {} },
+                    tickFlash = { ticks = {} },
+                },
+            },
         }),
     }
 end
@@ -595,7 +622,7 @@ function T.BuildFeralDruidRotation(spec)
             notStealthed = true,
             optionKey = "use_ferocious_bite",
             extraConditions = {
-                T.StateCompare("combo_points", ">=", 5),
+                T.StateCompare("combo_points", ">=", 4),
                 T.AnyOf({
                     T.ResourceGte(35),
                     T.Clearcasting(),
@@ -604,22 +631,6 @@ function T.BuildFeralDruidRotation(spec)
                     T.StateCompare("target_ttd", "<", "rip_min_ttd"),
                     T.SpellCanKillTarget("Ferocious Bite"),
                 }),
-            },
-        }),
-        T.SpellEntry({
-            key = "Ferocious Bite",
-            spellKey = "Ferocious Bite",
-            targetValid = true,
-            catForm = true,
-            notStealthed = true,
-            optionKey = "use_ferocious_bite",
-            extraConditions = {
-                T.StateCompare("combo_points", ">=", 4),
-                T.AnyOf({
-                    T.ResourceGte(35),
-                    T.Clearcasting(),
-                }),
-                T.SpellCanKillTarget("Ferocious Bite"),
             },
         }),
         T.SpellEntry({
@@ -641,6 +652,22 @@ function T.BuildFeralDruidRotation(spec)
             },
         }),
         T.SpellEntry({
+            key = "Ferocious Bite",
+            spellKey = "Ferocious Bite",
+            targetValid = true,
+            catForm = true,
+            notStealthed = true,
+            optionKey = "use_ferocious_bite",
+            extraConditions = {
+                T.StateCompare("combo_points", ">=", 5),
+                T.AnyOf({
+                    T.ResourceGte(35),
+                    T.Clearcasting(),
+                }),
+                T.DebuffPropertyCompare("Rip", "player", "remaining", ">=", "ferocious_bite_min_rip_remaining"),
+            },
+        }),
+        T.SpellEntry({
             key = "Mangle (Cat)",
             spellKey = "Mangle (Cat)",
             targetValid = true,
@@ -656,6 +683,24 @@ function T.BuildFeralDruidRotation(spec)
                 }),
             },
             entryOpts = { explicitPriority = 10 },
+        }),
+        T.SpellEntry({
+            key = "Rake",
+            spellKey = "Rake",
+            targetValid = true,
+            catForm = true,
+            notStealthed = true,
+            optionKey = "use_rake",
+            extraConditions = {
+                T.StateCompare("combo_points", "<", 5),
+                T.TargetTtdGte("rake_min_ttd"),
+                T.AnyOf({
+                    T.ResourceGte(35),
+                    T.Clearcasting(),
+                }),
+                T.NotRecentlyCast("Rake", 0.6),
+                T.DotMissing("Rake"),
+            },
         }),
         shred,
         mangle,

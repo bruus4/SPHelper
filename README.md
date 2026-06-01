@@ -45,6 +45,10 @@ Open the configuration with `/sph` or use these commands:
 - `/sph unlock` — Unlock frames for moving
 - `/sph scale <value>` — Set UI scale (0.5–3.0)
 - `/sph swd <always|execute|never>` — Shadow Word: Death suggestion mode
+- `/sph createmacros` — Choose Fake Queue macros to create or update
+- `/sph dot add` — Add your current combat target to the DoT tracker
+- `/sph dot remove` — Remove your current target from the DoT tracker
+- `/sph dot clear` — Clear manually added DoT tracker targets
 - `/sph reset` — Restore default settings
 
 ## Configuration

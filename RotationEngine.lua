@@ -27,13 +27,23 @@ local _hpDecay = {
 ------------------------------------------------------------------------
 -- Power/energy tracker — estimate regen rate and tick timing
 ------------------------------------------------------------------------
+-- Energy ticks on a fixed 2.0s cadence in this client (Classic/TBC era).
+-- It is NOT affected by haste, so we treat the interval as a constant and
+-- only track the tick *phase* (lastTickTime).  Estimating the interval with
+-- an EMA is unreliable: whenever energy is capped (ticks add nothing and go
+-- undetected) or a tick is missed, the next detected gap is much larger than
+-- 2s and corrupts the average for several seconds, which made energy-gated
+-- "time to cast" countdowns (e.g. Mangle / Shred) jump around.
+local ENERGY_TICK_INTERVAL = 2.0
+local ENERGY_PER_TICK      = 20
+
 local _powerState = {
     lastPower   = nil,
     lastTime    = nil,
     rate        = 0,
     alpha       = 0.25,
     lastTickTime= nil,
-    tickInterval= 2.0,  -- default energy tick interval (seconds)
+    tickInterval= ENERGY_TICK_INTERVAL,  -- fixed energy tick interval (seconds)
 
 }
 
@@ -138,6 +148,56 @@ local function CompareValues(lhs, op, rhs)
     return false
 end
 
+local function IsGreaterCompareOp(op)
+    op = op or ">="
+    return op == ">" or op == ">=" or op == "gt" or op == "gte" or op == "ge"
+end
+
+local function IsLessCompareOp(op)
+    op = op or "<"
+    return op == "<" or op == "<=" or op == "lt" or op == "lte" or op == "le"
+end
+
+local function TargetHPPct(ctx)
+    if not ctx or not ctx.targetMaxHP or ctx.targetMaxHP <= 0 then return nil end
+    return (ctx.targetHP or 0) / ctx.targetMaxHP
+end
+
+local function ResolveTargetTTDCompareValue(ctx, op, threshold)
+    if ctx and ctx.targetTTD ~= nil then
+        return ctx.targetTTD
+    end
+
+    local hpPct = TargetHPPct(ctx)
+    if not hpPct then return nil end
+    if hpPct <= 0.25 then return 0 end
+
+    threshold = tonumber(threshold) or 0
+    if IsGreaterCompareOp(op) then
+        if op == ">" or op == "gt" then
+            return threshold + 0.001
+        end
+        return threshold
+    end
+    if IsLessCompareOp(op) then
+        return threshold + 0.001
+    end
+    return nil
+end
+
+local function TargetTTDMeetsMinimum(ttd, hpPct, isPreview, requiredTTD)
+    requiredTTD = tonumber(requiredTTD) or 0
+    if requiredTTD <= 0 then return true end
+    if ttd ~= nil then return ttd >= requiredTTD end
+    if isPreview then return true end
+    return (hpPct or 0) > 0.25
+end
+
+local function TargetTTDComparePasses(ctx, op, threshold)
+    local lhs = ResolveTargetTTDCompareValue(ctx, op, threshold)
+    return CompareValues(lhs, op, threshold)
+end
+
 local function ResolveSpellId(spellKey)
     if not spellKey then return nil end
     if A.ResolveSpellID then
@@ -223,6 +283,13 @@ local function GetSpellTravelTimeValue(spellKey)
         return A.GetSpellTravelTime(spellKey)
     end
     return nil
+end
+
+local function GetSpellTravelTimeForCompare(spellKey, ctx)
+    local observed = tonumber(GetSpellTravelTimeValue(spellKey)) or 0
+    local latency = (ctx and ctx.lat) or (A.GetLatency and A.GetLatency()) or 0
+    latency = tonumber(latency) or 0
+    return math.max(observed, latency, 0)
 end
 
 local function GetUnitBuffInfo(unit, buffName, ctx)
@@ -372,6 +439,105 @@ local function GetDotTickFrequency(spec, spellKey)
     return nil
 end
 
+local function CopyValue(value)
+    if type(value) ~= "table" then return value end
+    local copy = {}
+    for key, child in pairs(value) do
+        copy[key] = CopyValue(child)
+    end
+    return copy
+end
+
+local function MergeInto(dest, src)
+    if type(src) ~= "table" then return dest end
+    for key, value in pairs(src) do
+        if type(value) == "table" and type(dest[key]) == "table" then
+            MergeInto(dest[key], value)
+        else
+            dest[key] = CopyValue(value)
+        end
+    end
+    return dest
+end
+
+local function SanitizeEntryToken(value)
+    value = tostring(value or "entry"):lower():gsub("[^%w]+", "_"):gsub("^_+", ""):gsub("_+$", "")
+    if value == "" then value = "entry" end
+    return value
+end
+
+local function GetRuntimeRotation(spec)
+    if not spec or not spec.meta then return nil end
+    local sdb = A.db and A.db.specs and A.db.specs[spec.meta.id]
+    return (sdb and sdb.rotation) or spec.rotation
+end
+
+local function GetEntryId(entry, index)
+    if entry and entry.id and entry.id ~= "" then return entry.id end
+    local def = A.GetSpellDefinition and A.GetSpellDefinition(entry and entry.key)
+    local name = (def and def.name) or (entry and entry.key) or "entry"
+    local spellID = (def and (def.id or def.baseId)) or ResolveSpellId(entry and entry.key) or 0
+    return string.format("%s_%s", SanitizeEntryToken(name), tostring(spellID))
+end
+
+local function GetEntryHelperOptions(spec, entry, index)
+    local options = CopyValue(entry and entry.helperOptions or {}) or {}
+    local sdb = spec and spec.meta and A.db and A.db.specs and A.db.specs[spec.meta.id]
+    local saved = sdb and sdb.helperOptions
+    if type(saved) == "table" then
+        MergeInto(options, saved[GetEntryId(entry, index)])
+        local def = A.GetSpellDefinition and A.GetSpellDefinition(entry and entry.key)
+        local name = def and def.name or (entry and entry.key)
+        if name then MergeInto(options, saved[name]) end
+    end
+    return options
+end
+
+local function BuildChannelConfigFromEntry(spec, entry, index)
+    if not entry or not entry.key or type(entry.helpers) ~= "table" then return nil end
+    local helpers = entry.helpers
+    if not (helpers.fakeQueue or helpers.clipOverlay or helpers.tickSound or helpers.tickFlash or helpers.tickMarkers) then
+        return nil
+    end
+
+    local def = A.GetSpellDefinition and A.GetSpellDefinition(entry.key)
+    if not def or not (def.castType == "channel" or def.channel == true or (def.flags and def.flags.channel)) then
+        return nil
+    end
+
+    local options = GetEntryHelperOptions(spec, entry, index)
+    local clipOpts = options.clipOverlay or options.channel or {}
+    local fqOpts = options.fakeQueue or {}
+    return {
+        _fromRotation = true,
+        id = GetEntryId(entry, index),
+        spellKey = entry.key,
+        key = entry.key,
+        spellName = def.name or entry.key,
+        ticks = tonumber(def.ticks) or nil,
+        duration = def.duration or def.castTime,
+        tickInterval = def.tickInterval,
+        minDuration = clipOpts.minDuration,
+        clipReasons = clipOpts.clipReasons or {},
+        fakeQueue = helpers.fakeQueue == true,
+        fakeQueueMaxMs = fqOpts.maxMs,
+        fqFireOffsetMs = fqOpts.fireOffsetMs,
+        clipOverlay = helpers.clipOverlay == true,
+    }
+end
+
+local function GetRotationChannelConfig(spec, spellKey)
+    local rotation = GetRuntimeRotation(spec)
+    if type(rotation) ~= "table" then return nil end
+    for index, entry in ipairs(rotation) do
+        if entry and entry.key == spellKey then
+            local config = BuildChannelConfigFromEntry(spec, entry, index)
+            if config then return config end
+        end
+    end
+    return nil
+end
+
 local function GetChannelTickIntervalForSpell(spec, spellKey, ctx)
     if not spellKey then return nil end
     if ctx and ctx.activeChannelSpellKey == spellKey and (ctx.channelTickInterval or 0) > 0 then
@@ -379,6 +545,10 @@ local function GetChannelTickIntervalForSpell(spec, spellKey, ctx)
     end
 
     local ticks = nil
+    local channelConfig = GetRotationChannelConfig(spec, spellKey)
+    if channelConfig then
+        ticks = tonumber(channelConfig.ticks) or ticks
+    end
     for _, channel in ipairs((spec and spec.channelSpells) or {}) do
         if channel.spellKey == spellKey then
             ticks = tonumber(channel.ticks) or ticks
@@ -394,7 +564,13 @@ local function GetChannelTickIntervalForSpell(spec, spellKey, ctx)
     if not ticks or ticks <= 0 then return nil end
 
     local duration = nil
-    if data then
+    if channelConfig then
+        duration = tonumber(channelConfig.duration) or nil
+        if (not duration or duration <= 0) and tonumber(channelConfig.tickInterval) and ticks and ticks > 0 then
+            return tonumber(channelConfig.tickInterval)
+        end
+    end
+    if (not duration or duration <= 0) and data then
         duration = tonumber(data.dur) or tonumber(data.castTime)
     end
     if duration and duration > 0 then
@@ -570,6 +746,8 @@ end
 
 local function GetChannelSpellConfig(spec, spellKey)
     if not spellKey then return nil end
+    local rotationConfig = GetRotationChannelConfig(spec, spellKey)
+    if rotationConfig then return rotationConfig end
     for _, channel in ipairs((spec and spec.channelSpells) or {}) do
         if channel.spellKey == spellKey or channel.key == spellKey then
             return channel
@@ -617,13 +795,7 @@ local function CountTrackedTargets(ctx, minTTD)
 
         if requiredTTD > 0 then
             local ttd = A.GetTargetTimeToDie and A.GetTargetTimeToDie(guid) or nil
-            local passesTTD
-            if ttd ~= nil then
-                passesTTD = ttd >= requiredTTD
-            else
-                passesTTD = isPreview or (hpPct or 0) > 0.25
-            end
-            if not passesTTD then
+            if not TargetTTDMeetsMinimum(ttd, hpPct, isPreview, requiredTTD) then
                 return
             end
         end
@@ -664,12 +836,12 @@ local function GetUnitCastState(unit, now)
 
     local _, _, _, _, endMS, _, _, notInterruptible = UnitCastingInfo(unit)
     if endMS then
-        return math.max((endMS / 1000) - now, 0), not notInterruptible
+        return math.max((endMS / 1000) - now, 0), not (notInterruptible == true)
     end
 
     local _, _, _, _, channelEndMS, _, channelNotInterruptible = UnitChannelInfo(unit)
     if channelEndMS then
-        return math.max((channelEndMS / 1000) - now, 0), not channelNotInterruptible
+        return math.max((channelEndMS / 1000) - now, 0), not (channelNotInterruptible == true)
     end
 
     return 0, false
@@ -702,18 +874,14 @@ local function ResolveStateCompareValue(cond, ctx, spec, db)
     elseif subject == "combo_points" then
         return ctx.comboPoints or 0
     elseif subject == "target_ttd" then
-        if ctx.targetTTD ~= nil then return ctx.targetTTD end
-        if ctx.targetMaxHP and ctx.targetMaxHP > 0 then
-            local hpPct = ctx.targetHP / ctx.targetMaxHP
-            return (hpPct <= 0.25) and 0 or 999
-        end
-        return 0
+        local rhs = ResolveCompareValue(cond.value, 0)
+        return ResolveTargetTTDCompareValue(ctx, cond.op, rhs)
     elseif subject == "resource" then
         return ctx.resourcePower or 0
     elseif subject == "resource_at_gcd" then
         return ctx.resourceAtGCD or ctx.resourcePower or 0
     elseif subject == "next_power_tick_with_gcd" then
-        return ctx.nextPowerTickWithGCD or 0
+        return ctx.nextPowerTickWithGCD
     elseif subject == "threat_pct" then
         return GetUnitThreatPercent(cond.unit or "target")
     elseif subject == "tracked_target_count" then
@@ -736,9 +904,13 @@ local function ResolveSpellPropertyValue(cond, ctx, spec, db)
     if property == "time_to_ready" then
         return GetProjectedSpellCooldown(cond.spellKey, ctx)
     elseif property == "cast_time" then
+        local def = A.GetSpellDefinition and A.GetSpellDefinition(cond.spellKey)
+        if def and (def.castType == "channel" or def.channel == true or (def.flags and def.flags.channel)) then
+            return GetEffectiveSpellChannelTime(cond.spellKey, ctx)
+        end
         return GetEffectiveSpellCastTime(cond.spellKey, ctx)
     elseif property == "travel_time" then
-        return GetSpellTravelTimeValue(cond.spellKey)
+        return GetSpellTravelTimeForCompare(cond.spellKey, ctx)
     elseif property == "dot_base_duration" then
         return GetDotBaseDuration(spec, cond.spellKey)
     elseif property == "dot_tick_frequency" then
@@ -832,14 +1004,7 @@ local function CountOtherTrackedTargetsWithDebuff(spec, ctx, spellKey, minRemain
                 local passesTTD = true
                 if requiredTTD > 0 then
                     local ttd = A.GetTargetTimeToDie and A.GetTargetTimeToDie(guid) or nil
-                    if not ttd and data._preview then
-                        ttd = 999
-                    end
-                    if ttd == nil then
-                        passesTTD = (data.hpPct or 0) > 0.25
-                    else
-                        passesTTD = ttd >= requiredTTD
-                    end
+                    passesTTD = TargetTTDMeetsMinimum(ttd, data.hpPct or 0, data._preview == true, requiredTTD)
                 end
                 if passesTTD then
                     count = count + 1
@@ -971,12 +1136,12 @@ function RE:BuildContext(spec)
                 _powerState.rate = _powerState.alpha * instant +
                                    (1 - _powerState.alpha) * _powerState.rate
             end
+            -- Track only the tick PHASE (when the last tick landed) so
+            -- nextPowerTick stays aligned with the game's 2.0s cadence.
+            -- The interval itself is a fixed constant (see ENERGY_TICK_INTERVAL)
+            -- because an EMA estimate drifts whenever a tick is missed or
+            -- energy is capped, producing erratic energy-gated countdowns.
             if curr > _powerState.lastPower + 0.5 then
-                if _powerState.lastTickTime then
-                    local tickDt = nowP - _powerState.lastTickTime
-                    _powerState.tickInterval = _powerState.alpha * tickDt +
-                                              (1 - _powerState.alpha) * _powerState.tickInterval
-                end
                 _powerState.lastTickTime = nowP
             end
         else
@@ -994,6 +1159,12 @@ function RE:BuildContext(spec)
     if targetGUID and targetMaxHP > 0 and A.UpdateTargetHealthSample then
         A.UpdateTargetHealthSample(targetGUID, targetHP / targetMaxHP, now)
     end
+    if targetGUID and A.GetTargetHealthDecayRate then
+        local stableRate = A.GetTargetHealthDecayRate(targetGUID)
+        if stableRate ~= nil then
+            hpDecayRate = math.max(tonumber(stableRate) or 0, 0)
+        end
+    end
     if targetGUID and A.GetTargetTimeToDie then
         targetTTD = A.GetTargetTimeToDie(targetGUID)
     end
@@ -1001,27 +1172,44 @@ function RE:BuildContext(spec)
         targetTTD = (targetHP / targetMaxHP) / hpDecayRate
     end
 
-    local nextPowerTick = (_powerState.lastTickTime and
-        math.max(0, _powerState.tickInterval - (now - _powerState.lastTickTime))) or nil
+    -- Time until the next energy tick.  Because the cadence is a fixed 2.0s,
+    -- we project the phase forward with modulo so the estimate stays correct
+    -- even when the last detected tick is several seconds stale (e.g. after
+    -- energy was capped and no tick gain was observed).
+    local nextPowerTick = nil
+    if _powerState.lastTickTime then
+        local sinceTick = now - _powerState.lastTickTime
+        if sinceTick < 0 then sinceTick = 0 end
+        local intoTick = sinceTick % _powerState.tickInterval
+        nextPowerTick = _powerState.tickInterval - intoTick
+        if nextPowerTick >= _powerState.tickInterval - 0.0001 then nextPowerTick = 0 end
+    end
     local readyIn       = math.max(castRemaining or 0, gcdRemaining or 0)
     local powerType     = UnitPowerType("player")
     local maxResource   = UnitPowerMax("player") or 100
     if maxResource <= 0 then maxResource = 100 end
 
     local resourceAtGCD = resourcePower
-    if powerType == 3 or (Enum and Enum.PowerType and powerType == Enum.PowerType.Energy) then
+    local isEnergyPower = powerType == 3 or (Enum and Enum.PowerType and powerType == Enum.PowerType.Energy)
+    local powerTickInterval = math.max(_powerState.tickInterval or 2.0, 0.1)
+    if isEnergyPower then
         if nextPowerTick and nextPowerTick <= readyIn then
-            local interval = math.max(_powerState.tickInterval or 2.0, 0.1)
-            local ticks    = 1 + math.floor((readyIn - nextPowerTick) / interval)
+            local ticks    = 1 + math.floor((readyIn - nextPowerTick) / powerTickInterval)
             resourceAtGCD  = resourcePower + ticks * 20
-        elseif (_powerState.rate or 0) > 0 then
-            resourceAtGCD = resourcePower + (_powerState.rate * readyIn)
         end
     elseif (_powerState.rate or 0) > 0 then
         resourceAtGCD = resourcePower + (_powerState.rate * readyIn)
     end
     resourceAtGCD = math.min(resourceAtGCD, maxResource)
-    local nextPowerTickWithGCD = nextPowerTick and (nextPowerTick - readyIn) or nil
+    local nextPowerTickWithGCD = nil
+    if nextPowerTick then
+        if nextPowerTick >= readyIn then
+            nextPowerTickWithGCD = nextPowerTick - readyIn
+        else
+            local remainder = (readyIn - nextPowerTick) % powerTickInterval
+            nextPowerTickWithGCD = (remainder <= 0.0001) and 0 or (powerTickInterval - remainder)
+        end
+    end
 
     -- Channel helper metrics
     local activeChannelSpellKey  = nil
@@ -1165,8 +1353,16 @@ function RE:BuildContext(spec)
     ctx.trackedBuffs           = trackedBuffsByAlias
     ctx.trackedBuffsBySpellKey = trackedBuffsBySpellKey
 
-    -- Channel spell config (first channel spell; used for clip overlays)
-    local channelConfig = spec and spec.channelSpells and spec.channelSpells[1]
+    -- Channel spell config (first helper-enabled channel; used for clip overlays)
+    local channelConfig = nil
+    local rotation = GetRuntimeRotation(spec)
+    if type(rotation) == "table" then
+        for index, entry in ipairs(rotation) do
+            channelConfig = BuildChannelConfigFromEntry(spec, entry, index)
+            if channelConfig then break end
+        end
+    end
+    channelConfig = channelConfig or (spec and spec.channelSpells and spec.channelSpells[1])
     if channelConfig then
         local csKey = channelConfig.spellKey or channelConfig.key
         if csKey then
@@ -1243,6 +1439,14 @@ function RE:SimulateSpellEffect(ctx, spellKey, spec)
 
     -- Resource (energy/rage/mana)
     local cost  = (def and (def.resourceCost or 0)) or 0
+    local consumesClearcasting = false
+    if cost > 0 and def and def.flags and def.flags.offensive then
+        local clearcasting = GetTrackedBuffState(spec, ctx, "clearcasting")
+        if clearcasting and clearcasting.active then
+            cost = 0
+            consumesClearcasting = true
+        end
+    end
     local regen = (ctx.resourceRegen or 0) * advance
     local maxR  = UnitPowerMax("player") or 100
     if maxR <= 0 then maxR = 100 end
@@ -1274,7 +1478,11 @@ function RE:SimulateSpellEffect(ctx, spellKey, spec)
             end
         end
         if cooldown and cooldown > 0 then
-            simCDs[def.baseId] = p.now + cooldown
+            local resolvedId = (A.ResolveSpellID and A.ResolveSpellID(spellKey)) or def.baseId
+            simCDs[resolvedId or def.baseId] = p.now + cooldown
+            if def.baseId and def.baseId ~= resolvedId then
+                simCDs[def.baseId] = p.now + cooldown
+            end
         end
     end
     p.simulatedCooldowns = simCDs
@@ -1282,18 +1490,32 @@ function RE:SimulateSpellEffect(ctx, spellKey, spec)
     -- Simulated buffs: copy parent simBuffs (or empty) then apply changes.
     local simB = {}
     for k, v in pairs(ctx.simBuffs or {}) do simB[k] = v end
+    local function DeactivateTrackedBuff(buffKey)
+        if not buffKey then return end
+        for _, bd in ipairs((spec and spec.trackedBuffs) or {}) do
+            if bd.key == buffKey or bd.spellKey == buffKey then
+                local bname = bd.name or GetSpellDisplayName(bd.spellKey or buffKey)
+                if bname then simB[bname] = { active = false } end
+            end
+        end
+    end
     if def then
         -- Remove forms that this spell replaces.
         if def.removesFormKeys then
             for _, fkey in ipairs(def.removesFormKeys) do
-                -- Map form key back to buff name via trackedBuffs spec definition.
-                for _, bd in ipairs((spec and spec.trackedBuffs) or {}) do
-                    if bd.key == fkey then
-                        local bname = bd.name or GetSpellDisplayName(bd.spellKey or fkey)
-                        if bname then simB[bname] = { active = false } end
-                    end
-                end
+                DeactivateTrackedBuff(fkey)
             end
+        end
+        if def.removesBuffKeys then
+            for _, bkey in ipairs(def.removesBuffKeys) do
+                DeactivateTrackedBuff(bkey)
+            end
+        end
+        if def.flags and def.flags.requiresStealth then
+            DeactivateTrackedBuff("stealth")
+        end
+        if consumesClearcasting then
+            DeactivateTrackedBuff("clearcasting")
         end
         -- Grant the buff this spell applies.
         if def.grantsFormKey or (def.buffId and def.flags and def.flags.form) then
@@ -2161,50 +2383,33 @@ RE._condEval["target_dying_fast"] = function(cond, ctx, spec, db)
     end
     local threshold = (tonumber(resolved) or 5) / 100  -- convert % to fraction
     local direction = cond.direction or "faster"
+    local rate = math.max(tonumber(ctx.hpDecayRate) or 0, 0)
     if direction == "slower" then
-        return ctx.hpDecayRate < threshold
+        return rate < threshold
     end
-    return ctx.hpDecayRate >= threshold
+    return rate >= threshold
 end
 
 RE._condEval["target_ttd_gte"] = function(cond, ctx, spec, db)
-    local seconds = ResolveNumericValue(cond.seconds, 0)
+    local seconds = ResolveNumericValue(cond.seconds ~= nil and cond.seconds or cond.value, 0)
     if seconds <= 0 then return true end
-    local ttd = ctx.targetTTD
-    if ttd ~= nil then
-        return ttd >= seconds
-    end
-    if ctx.targetMaxHP and ctx.targetMaxHP > 0 then
-        local hpPct = ctx.targetHP / ctx.targetMaxHP
-        if hpPct <= 0.25 then
-            return false
-        end
-    end
-    return true
+    return TargetTTDComparePasses(ctx, ">=", seconds)
 end
 
 RE._condEval["target_ttd_lt"] = function(cond, ctx, spec, db)
-    local seconds = ResolveNumericValue(cond.seconds, 0)
+    local seconds = ResolveNumericValue(cond.seconds ~= nil and cond.seconds or cond.value, 0)
     if seconds <= 0 then return false end
-    local ttd = ctx.targetTTD
-    if ttd ~= nil then
-        return ttd < seconds
-    end
-    if ctx.targetMaxHP and ctx.targetMaxHP > 0 then
-        local hpPct = ctx.targetHP / ctx.targetMaxHP
-        return hpPct <= 0.25
-    end
-    return false
+    return TargetTTDComparePasses(ctx, "<", seconds)
 end
 
 -- Flat resource check: current resource (energy/rage/mana) >= cond.amount.
 RE._condEval["resource_gte"] = function(cond, ctx, spec, db)
-    return ctx.resourcePower >= (cond.amount or 0)
+    return ctx.resourcePower >= (ResolveNumericValue(cond.amount, 0) or 0)
 end
 
 -- Flat resource check: current resource < cond.amount (energy/rage/mana).
 RE._condEval["resource_lt"] = function(cond, ctx, spec, db)
-    return ctx.resourcePower < (cond.amount or 0)
+    return ctx.resourcePower < (ResolveNumericValue(cond.amount, 0) or 0)
 end
 
 RE._condEval["resource_at_gcd_lt"] = function(cond, ctx, spec, db)
@@ -2219,12 +2424,14 @@ end
 
 RE._condEval["next_power_tick_with_gcd_lt"] = function(cond, ctx, spec, db)
     local seconds = ResolveNumericValue(cond.seconds, 0)
-    return (ctx.nextPowerTickWithGCD or 0) < seconds
+    if ctx.nextPowerTickWithGCD == nil then return false end
+    return ctx.nextPowerTickWithGCD < seconds
 end
 
 RE._condEval["next_power_tick_with_gcd_gt"] = function(cond, ctx, spec, db)
     local seconds = ResolveNumericValue(cond.seconds, 0)
-    return (ctx.nextPowerTickWithGCD or 0) > seconds
+    if ctx.nextPowerTickWithGCD == nil then return false end
+    return ctx.nextPowerTickWithGCD > seconds
 end
 
 -- Hard-fail resource check: same as resource_gte but treated as a non-predictive
@@ -2382,8 +2589,8 @@ function RE._resolveExpr(expr, ctx, spec)
     end)
     expr = expr:gsub("travel%((.-)%)", function(rawKey)
         local key = NormalizeSpellToken(rawKey)
-        local v = GetSpellTravelTimeValue(key) or (ctx and ctx.lat) or 0
-        return tostring(math.max(v, (ctx and ctx.lat) or 0))
+        local v = GetSpellTravelTimeForCompare(key, ctx)
+        return tostring(v or 0)
     end)
     -- setting(KEY) — resolve a user-configurable setting value.
     -- This allows expressions to reference dynamic settings, e.g.
@@ -3087,6 +3294,19 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
     --     `cooldownEnd` anchored to `now + rawCD` which ticks correctly.
     -- ------------------------------------------------------------------
     local function ChainStepTime(key)
+        -- A channeled spell (Mind Flay) occupies the player for its full
+        -- haste-adjusted duration, not a single GCD.  GetEffectiveSpellCastTime
+        -- returns 0 for channels, so without this branch every channel in the
+        -- chain was costed at the GCD floor (1.5s) — inconsistent with
+        -- SimulateSpellEffect, which advances by the full channel duration when
+        -- predicting positions 2-4.  The ACTIVE channel is special-cased to a
+        -- zero step at i==1 below (its time is already folded into accTime via
+        -- clipCastRemaining), so this only affects predicted/future channels.
+        local def = A.GetSpellDefinition and A.GetSpellDefinition(key)
+        if def and def.castType == "channel" then
+            local chanEff = GetEffectiveSpellChannelTime(key, ctx) or 0
+            return math.max(chanEff, ctx.gcd or 1.5)
+        end
         local castEff = GetEffectiveSpellCastTime(key, ctx) or 0
         return math.max(castEff, ctx.gcd or 1.5)
     end
@@ -3205,6 +3425,19 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
             end
         end
 
+        -- ── Active-channel anchor correction ──────────────────────────
+        -- When the top suggestion IS the spell currently being channeled
+        -- (e.g. "keep channeling Mind Flay"), `accTime` already equals the
+        -- clip anchor (clipCastRemaining = time to the next safe clip, or the
+        -- full remaining channel for non-clippable channels).  Adding another
+        -- ChainStepTime here would double-count the channel and push every
+        -- following queue slot ~1 channel-duration too far out, so the step is
+        -- zero — the next spell can be cast at the clip/finish point already in
+        -- accTime.
+        if i == 1 and ctx.activeChannelSpellKey and c.cand.key == ctx.activeChannelSpellKey then
+            step = 0
+        end
+
         -- Never insert synths before position 1 (i == 1).
         -- The natural `projected_dot_time_left_lt` condition handles the
         -- position-1 transition when the tracked debuff crosses its
@@ -3215,6 +3448,7 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
 
         local channelClip = false
         local channelClipKey = nil
+        local channelClipEntry = nil
         local channelClipTime = nil
         local channelClipBucket = nil
         if activeChannelConfig and activeChannelSpellKey and c.cand.key == activeChannelSpellKey and ctx.activeChannelSpellKey == activeChannelSpellKey then
@@ -3234,6 +3468,7 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
                         if breakAt < activeChannelCastEff and (not channelClipTime or breakAt < channelClipTime) then
                             channelClip = true
                             channelClipKey = reasonKey
+                            channelClipEntry = reasonEntry
                             channelClipTime = breakAt
                             channelClipBucket = ResolveEntryPriorityBucket(reasonEntry)
                         end
@@ -3244,7 +3479,7 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
 
         if channelClip and channelClipKey then
             local clipCd = (channelClipTime and channelClipTime > READY_EPSILON) and (now + channelClipTime) or nil
-            Add(reasonEntry, channelClipKey, 0, false, channelClipBucket, clipCd, true)
+            Add(channelClipEntry, channelClipKey, 0, false, channelClipBucket, clipCd, true)
             Add(c.cand.entry, c.cand.key, 0, true, c.cand.priorityBucket, nil, true)
         else
             -- Chain-position cooldownEnd: only meaningful while something is
@@ -3372,6 +3607,7 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
     if #result == 0 then
         if ctx.inCombat and hasTarget then
             local fillerKey = nil
+            local fillerEntry = nil
             for i = #rotation, 1, -1 do
                 local rEntry = rotation[i]
                 if rEntry.key and A.SPELLS[rEntry.key] then
@@ -3379,12 +3615,13 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
                                      and rEntry.conditions[1].type == "always"
                     if isAlways or not rEntry.conditions then
                         fillerKey = rEntry.key
+                        fillerEntry = rEntry
                         break
                     end
                 end
             end
             if fillerKey then
-                Add(fillerKey)
+                Add(fillerEntry, fillerKey)
             else
                 return nil
             end
@@ -3445,6 +3682,7 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
                     end
                     if eta and eta > 0 then
                         upcoming[#upcoming + 1] = {
+                            entry = rEntry,
                             key = key,
                             eta = eta,
                             cooldownEnd = now + eta,
@@ -3457,7 +3695,7 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
 
         table.sort(upcoming, function(a, b) return a.eta < b.eta end)
         for _, v in ipairs(upcoming) do
-            Add(v.key, v.eta, false, v.priorityBucket, v.cooldownEnd)
+            Add(v.entry, v.key, v.eta, false, v.priorityBucket, v.cooldownEnd)
         end
     end
 
@@ -3473,9 +3711,12 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
     -- ------------------------------------------------------------------
     if hasTarget and result[1] then
         local fillerKeys = {}
+        local fillerRepeatLimits = {}
         for _, rEntry in ipairs(rotation) do
-            if rEntry.key and GetEntryRepeatLimit(rEntry) > 1 then
+            local repeatLimit = GetEntryRepeatLimit(rEntry)
+            if rEntry.key and repeatLimit > 1 then
                 fillerKeys[rEntry.key] = true
+                fillerRepeatLimits[rEntry.key] = repeatLimit
             end
         end
 
@@ -3543,7 +3784,7 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
             for _, e in ipairs(simResult) do
                 if fillerKeys[e.key] then
                     local count = repeatCounts[e.key] or 0
-                    if count < 2 then
+                    if count < (fillerRepeatLimits[e.key] or 2) then
                         repeatCounts[e.key] = count + 1
                         compressed[#compressed + 1] = e
                     end
@@ -3567,6 +3808,7 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
                     if deadline and deadline > 0 then
                         if not fallbackRefresh or deadline < fallbackRefresh.eta then
                             fallbackRefresh = {
+                                entry = rEntry,
                                 key = key,
                                 eta = deadline,
                                 cooldownEnd = now + deadline,
@@ -3578,7 +3820,7 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
             end
         end
         if fallbackRefresh then
-            Add(fallbackRefresh.key, fallbackRefresh.eta, false, fallbackRefresh.priorityBucket, fallbackRefresh.cooldownEnd)
+            Add(fallbackRefresh.entry, fallbackRefresh.key, fallbackRefresh.eta, false, fallbackRefresh.priorityBucket, fallbackRefresh.cooldownEnd)
         end
     end
 

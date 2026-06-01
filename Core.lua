@@ -7,6 +7,13 @@ SPHelper = SPHelper or {}
 local A = SPHelper
 local unpack = unpack or table.unpack
 
+-- User-facing name of the multi-target tracker. Internally the module is
+-- still keyed as `dotTracker` (DB key, InitDotTracker, A.DotTracker* API) to
+-- avoid a saved-variable migration, but everything shown to the player uses
+-- this name because the tracker handles more than DoTs (HP, raid marks,
+-- manual target marking, observed tab-cycle ordering).
+A.TRACKER_NAME = "Target Tracker"
+
 local function PackValues(...)
     return { n = select("#", ...), ... }
 end
@@ -181,6 +188,12 @@ function A.GetTargetTimeToDie(guid)
     local rec = guid and A._targetMetrics[guid]
     if not rec then return nil end
     return rec.ttd
+end
+
+function A.GetTargetHealthDecayRate(guid)
+    local rec = guid and A._targetMetrics[guid]
+    if not rec then return nil end
+    return rec.rate or 0
 end
 
 function A.GetUnitTimeToDie(unit)
@@ -708,7 +721,7 @@ function A.IsShadowPriest()
 end
 
 ------------------------------------------------------------------------
--- Pixel-perfect backdrop helper
+-- WoW-style backdrop helper
 ------------------------------------------------------------------------
 function A.CreateBackdrop(frame, r, g, b, a, borderR, borderG, borderB, borderA)
     r, g, b, a = r or 0.08, g or 0.08, b or 0.08, a or 0.85
@@ -718,9 +731,12 @@ function A.CreateBackdrop(frame, r, g, b, a, borderR, borderG, borderB, borderA)
     borderA = borderA or 1
 
     frame:SetBackdrop({
-        bgFile   = "Interface\\BUTTONS\\WHITE8X8",
-        edgeFile = "Interface\\BUTTONS\\WHITE8X8",
-        edgeSize = 1,
+        bgFile   = "Interface\\Tooltips\\UI-Tooltip-Background",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = true,
+        tileSize = 16,
+        edgeSize = 12,
+        insets = { left = 3, right = 3, top = 3, bottom = 3 },
     })
     frame:SetBackdropColor(r, g, b, a)
     frame:SetBackdropBorderColor(borderR, borderG, borderB, borderA)
@@ -1020,7 +1036,7 @@ A.defaults = {
     dotTracker  = { enabled = true, width = 300, height = 40, rowHeight = 40,
                     maxTargets = 8, warnSeconds = 3, blinkSpeed = 4, dotIconSize = 18,
                     portraitSide = "left", warnMode = "border",
-                    warnBorderSize = 4, warnBarAlpha = 0.35, warnIconAlpha = 0.6, newTargetPosition = "bottom", anchorPosition = "top", sortMode = "addOrder" },
+                    warnBorderSize = 4, warnBarAlpha = 0.35, warnIconAlpha = 0.6, newTargetPosition = "bottom", anchorPosition = "top", sortMode = "tabOrder" },
     rotation    = { enabled = true, iconSize = 40, primaryIconSize = 40 },
     debug       = { echo = false, bufferSize = 200, modules = {} },
     -- Per-frame saved positions (point/relPoint/x/y) keyed by frame name.
@@ -1182,6 +1198,22 @@ function A.InitDB()
         if A.db.castBar.tickFlash == true  then A.db.castBar.tickFlash = "green" end
         if A.db.castBar.tickFlash == false then A.db.castBar.tickFlash = "none"  end
     end
+    if A.db.specs then
+        for _, sdb in pairs(A.db.specs) do
+            if type(sdb) == "table" then
+                if sdb.tickSound == true  then sdb.tickSound = "click" end
+                if sdb.tickSound == false then sdb.tickSound = "none"  end
+                if sdb.tickFlash == true  then sdb.tickFlash = "green" end
+                if sdb.tickFlash == false then sdb.tickFlash = "none"  end
+            end
+        end
+    end
+    if A.db.dotTracker and not A.db.dotTracker._tabSortDefaultMigrated then
+        if A.db.dotTracker.sortMode == nil or A.db.dotTracker.sortMode == "addOrder" then
+            A.db.dotTracker.sortMode = "tabOrder"
+        end
+        A.db.dotTracker._tabSortDefaultMigrated = true
+    end
     -- Migrate old castBar colorIndex (legacy) into new colorMode/color
     if A.db.castBar then
         if A.db.castBar.colorIndex then
@@ -1247,10 +1279,36 @@ function A.InitDB()
     end
 end
 
+local function ResolveTickSoundKey(key)
+    local k = key
+    if k == nil and A.SpecVal then k = A.SpecVal("tickSound", nil) end
+    if k == nil and A.db and A.db.castBar then k = A.db.castBar.tickSound end
+    if k == true then k = "click" end
+    if k == false then k = "none" end
+    return k or "click"
+end
+
+local function ResolveTickFlashKey(key)
+    local k = key
+    if k == nil and A.SpecVal then k = A.SpecVal("tickFlash", nil) end
+    if k == nil and A.db and A.db.castBar then k = A.db.castBar.tickFlash end
+    if k == true then k = "green" end
+    if k == false then k = "none" end
+    return k or "green"
+end
+
+function A.GetConfiguredTickSoundKey(key)
+    return ResolveTickSoundKey(key)
+end
+
+function A.GetConfiguredTickFlashKey(key)
+    return ResolveTickFlashKey(key)
+end
+
 -- Play a tick sound (shared helper used by both the cast bar and tick manager)
 function A.PlayTickSound(key)
-    local k = key or (A.db and A.db.castBar and A.db.castBar.tickSound) or "click"
-    if k == "none" or k == true or not k then return end
+    local k = ResolveTickSoundKey(key)
+    if k == "none" or not k then return end
     local id = A.GetTickSoundId(k)
     if id then pcall(PlaySound, id, "SFX") end
 end
@@ -1273,8 +1331,8 @@ end
 
 -- Perform a tick screen-flash with proper gradient edges and smooth fade-out.
 function A.DoTickFlash(key)
-    local k = key or (A.db and A.db.castBar and A.db.castBar.tickFlash)
-    if k == "none" or k == true or not k then return end
+    local k = ResolveTickFlashKey(key)
+    if k == "none" or not k then return end
     local col = A.GetTickFlashColor(k)
     if not col then return end
     local mode = A.GetTickFlashMode(k)

@@ -100,6 +100,15 @@ function SM:RegisterSpec(spec)
         spec.loadConditions = A.db.specs[spec.meta.id].loadConditionsOverride
     end
 
+    if A.db and A.db.specs and A.db.specs[spec.meta.id] and type(A.db.specs[spec.meta.id].metaOverride) == "table" then
+        local metaOverride = A.db.specs[spec.meta.id].metaOverride
+        for _, field in ipairs({ "specName", "class", "author", "version", "description" }) do
+            if metaOverride[field] ~= nil then
+                spec.meta[field] = metaOverride[field]
+            end
+        end
+    end
+
     local id = spec.meta.id
     local wasRegistered = self._available[id] ~= nil
     self._available[id] = spec

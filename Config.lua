@@ -7,6 +7,27 @@
 ------------------------------------------------------------------------
 local A = SPHelper
 
+local function EnsureDotTrackerReady()
+    if A.DotTrackerAddCurrentTarget and A.DotTrackerRemoveCurrentTarget and A.DotTrackerClearManualTargets then
+        return true
+    end
+    if not (A.db and A.db.dotTracker and A.db.dotTracker.enabled) then
+        return false
+    end
+    if A.InitDotTracker then
+        local ok, err = pcall(A.InitDotTracker, A)
+        if not ok then
+            if A.ReportError then
+                A.ReportError("DOT", "InitDotTracker", err, { source = "Config" })
+            else
+                print("|cffff4444SPHelper|r: " .. (A.TRACKER_NAME or "Target Tracker") .. " failed to initialize: " .. tostring(err))
+            end
+            return false
+        end
+    end
+    return A.DotTrackerAddCurrentTarget ~= nil
+end
+
 -- ====================================================================
 -- UI helpers (work inside any parent frame, no templates needed)
 -- ====================================================================
@@ -259,113 +280,236 @@ local function BuildControls(panel)
     local content = CreateFrame("Frame", nil, panel)
     content:SetAllPoints(panel)
 
+    local width = 620
     local y = -16
 
-    local t = content:CreateFontString(nil, "OVERLAY")
-    t:SetFont("Fonts\\FRIZQT__.TTF", 14, "OUTLINE")
-    t:SetPoint("TOPLEFT", content, "TOPLEFT", 16, y)
-    t:SetText("|cff8882d5SPHelper|r — Shadow Priest HUD")
-    y = y - 26
-
-    local desc = content:CreateFontString(nil, "OVERLAY")
-    desc:SetFont("Fonts\\FRIZQT__.TTF", 10)
-    desc:SetPoint("TOPLEFT", content, "TOPLEFT", 16, y)
-    desc:SetTextColor(0.8, 0.8, 0.8, 1)
-    desc:SetText("Use the commands below to configure SPHelper.\nAll spec settings are managed via the spec editor.")
-    y = y - 36
-
-    MakeSectionHeader(content, "Commands", y); y = y - 24
-
-    local commands = {
-        { cmd = "/sph",             desc = "Open this panel" },
-        { cmd = "/sph spec",        desc = "Open spec & rotation editor (all spec settings)" },
-        { cmd = "/sph visuals",     desc = "Open visual layout options (sizes, colors)" },
-        { cmd = "/sph debug",       desc = "List or toggle module debug logging" },
-        { cmd = "/sph lock",        desc = "Lock all frame positions" },
-        { cmd = "/sph unlock",      desc = "Unlock frames for dragging" },
-        { cmd = "/sph scale N",     desc = "Set global UI scale (0.5-3.0)" },
-        { cmd = "/sph macros",      desc = "Print Fake Queue macro templates" },
-        { cmd = "/sph reset",       desc = "Reset all settings to defaults" },
-    }
-
-    for _, entry in ipairs(commands) do
-        local cmdStr = content:CreateFontString(nil, "OVERLAY")
-        cmdStr:SetFont("Fonts\\FRIZQT__.TTF", 11, "OUTLINE")
-        cmdStr:SetPoint("TOPLEFT", content, "TOPLEFT", 24, y)
-        cmdStr:SetTextColor(1, 0.85, 0.4, 1)
-        cmdStr:SetText(entry.cmd)
-
-        local descStr = content:CreateFontString(nil, "OVERLAY")
-        descStr:SetFont("Fonts\\FRIZQT__.TTF", 10)
-        descStr:SetPoint("TOPLEFT", content, "TOPLEFT", 180, y)
-        descStr:SetTextColor(0.85, 0.85, 0.85, 1)
-        descStr:SetText(entry.desc)
-        y = y - 20
+    local function Tooltip(frame, title, body)
+        frame:SetScript("OnEnter", function(self)
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:SetText(title or "SPHelper")
+            if body and body ~= "" then
+                GameTooltip:AddLine(body, 0.9, 0.9, 0.9, true)
+            end
+            GameTooltip:Show()
+        end)
+        frame:SetScript("OnLeave", function() GameTooltip:Hide() end)
     end
 
-    y = y - 14
+    local function Text(parent, text, x, yOff, w, size, color)
+        local fs = parent:CreateFontString(nil, "OVERLAY")
+        fs:SetFont("Fonts\\FRIZQT__.TTF", size or 10, "")
+        fs:SetPoint("TOPLEFT", parent, "TOPLEFT", x or 0, yOff or 0)
+        fs:SetWidth(w or width)
+        fs:SetJustifyH("LEFT")
+        fs:SetTextColor((color and color[1]) or 0.86, (color and color[2]) or 0.86, (color and color[3]) or 0.86, (color and color[4]) or 1)
+        fs:SetText(text or "")
+        return fs
+    end
 
-    -- Quick-open buttons
-    MakeButton(content, "Open Spec Editor", 160, 24, function()
-        if A.SpecUI and A.SpecUI.Open then A.SpecUI:Open() end
-    end, y)
-    -- Create New Spec: explicit button so users can create specs regardless
-    -- of current class/spec state. Placed to the right of the Spec Editor
-    -- button so it's discoverable by users looking for spec management.
-    local createBtn = CreateFrame("Button", nil, content, "BackdropTemplate")
-    createBtn:SetSize(140, 24)
-    createBtn:SetPoint("TOPLEFT", content, "TOPLEFT", 200, y)
-    A.CreateBackdrop(createBtn, 0.15, 0.15, 0.15, 0.95, 0.3, 0.3, 0.3, 1)
-    local ctxt = createBtn:CreateFontString(nil, "OVERLAY")
-    ctxt:SetFont("Fonts\\FRIZQT__.TTF", 10, "OUTLINE")
-    ctxt:SetPoint("CENTER")
-    ctxt:SetText("Create New Spec")
-    createBtn:SetScript("OnClick", function()
+    local function Panel(parent, x, yOff, w, h, title)
+        local box = CreateFrame("Frame", nil, parent, "BackdropTemplate")
+        box:SetSize(w, h)
+        box:SetPoint("TOPLEFT", parent, "TOPLEFT", x, yOff)
+        A.CreateBackdrop(box, 0.08, 0.08, 0.12, 0.92, 0.32, 0.30, 0.42, 1)
+        if title then
+            local titleFs = box:CreateFontString(nil, "OVERLAY")
+            titleFs:SetFont("Fonts\\FRIZQT__.TTF", 10, "OUTLINE")
+            titleFs:SetPoint("TOPLEFT", box, "TOPLEFT", 10, -8)
+            titleFs:SetTextColor(1, 0.82, 0, 1)
+            titleFs:SetText(title)
+            box._title = titleFs
+        end
+        return box
+    end
+
+    local function ActionButton(parent, text, x, yOff, w, onClick, tip)
+        local btn = CreateFrame("Button", nil, parent, "BackdropTemplate")
+        btn:SetSize(w or 130, 26)
+        btn:SetPoint("TOPLEFT", parent, "TOPLEFT", x, yOff)
+        A.CreateBackdrop(btn, 0.14, 0.13, 0.18, 0.96, 0.38, 0.36, 0.48, 1)
+        local lbl = btn:CreateFontString(nil, "OVERLAY")
+        lbl:SetFont("Fonts\\FRIZQT__.TTF", 9, "OUTLINE")
+        lbl:SetPoint("LEFT", btn, "LEFT", 6, 0)
+        lbl:SetPoint("RIGHT", btn, "RIGHT", -6, 0)
+        lbl:SetJustifyH("CENTER")
+        lbl:SetText(text)
+        btn._label = lbl
+        btn:SetScript("OnClick", onClick)
+        if tip then Tooltip(btn, text, tip) end
+        return btn
+    end
+
+    local function StatusText(value)
+        return value and "|cff66dd88Enabled|r" or "|cffff7777Disabled|r"
+    end
+
+    local function SafeGet(getter, fallback)
+        local ok, value = pcall(getter)
+        if ok and value ~= nil then return value end
+        return fallback
+    end
+
+    local function OpenDebugTab()
+        if not (A.SpecUI and A.SpecUI.Open) then
+            print("|cff8882d5SPHelper|r: SpecUI not loaded.")
+            return
+        end
+        A.SpecUI:Open()
+        if C_Timer and C_Timer.After then
+            C_Timer.After(0.06, function()
+                if A.SpecUI and A.SpecUI.SwitchTab then
+                    A.SpecUI:SwitchTab(7, A.SpecUI._spec)
+                end
+            end)
+        end
+    end
+
+    local activeSpecID = A._activeSpecID
+    local activeSpec = activeSpecID and A.SpecManager and A.SpecManager.GetSpecByID and A.SpecManager:GetSpecByID(activeSpecID)
+    local specName = (activeSpec and activeSpec.meta and (activeSpec.meta.specName or activeSpec.meta.name or activeSpec.meta.id)) or "No active spec"
+    local specClass = (activeSpec and activeSpec.meta and activeSpec.meta.class) or select(2, UnitClass("player")) or "Unknown"
+    local rotation = nil
+    if activeSpec and activeSpec.meta then
+        local sdb = A.db and A.db.specs and A.db.specs[activeSpec.meta.id]
+        rotation = (sdb and sdb.rotation) or activeSpec.rotation
+    end
+    local rotationCount, helperCount = 0, 0
+    for _, entry in ipairs(rotation or {}) do
+        if type(entry) == "table" and entry.key then
+            rotationCount = rotationCount + 1
+            local helpers = entry.helpers
+            if type(helpers) == "table" and (helpers.fakeQueue or helpers.clipOverlay or helpers.tickMarkers or helpers.tickSound or helpers.tickFlash) then
+                helperCount = helperCount + 1
+            end
+        end
+    end
+
+    local title = content:CreateFontString(nil, "OVERLAY")
+    title:SetFont("Fonts\\FRIZQT__.TTF", 16, "OUTLINE")
+    title:SetPoint("TOPLEFT", content, "TOPLEFT", 16, y)
+    title:SetText("|cff8882d5SPHelper|r")
+    y = y - 22
+
+    Text(content, "Rotation, helper, and layout control center. The heavy editors stay in their own windows so this panel stays readable during setup.", 16, y, width, 10, {0.78, 0.78, 0.84, 1})
+    y = y - 34
+
+    local specPanel = Panel(content, 16, y, width, 92, "Active Rotation")
+    Text(specPanel, specName, 12, -28, width - 24, 12, {1, 1, 1, 1})
+    Text(specPanel, string.format("Class: %s     Abilities: %d     Helper-enabled channels: %d", tostring(specClass), rotationCount, helperCount), 12, -50, width - 24, 9, {0.75, 0.75, 0.80, 1})
+    Text(specPanel, "Specs, conditions, metadata, load rules, imports, exports, and per-spell helper options belong in the Rotation Editor.", 12, -68, width - 24, 9, {0.62, 0.62, 0.70, 1})
+    y = y - 104
+
+    local actions = Panel(content, 16, y, width, 96, "Open Tools")
+    ActionButton(actions, "Rotation Editor", 12, -30, 140, function()
+        if A.SpecUI and A.SpecUI.Open then A.SpecUI:Open() else print("|cff8882d5SPHelper|r: Spec UI not available.") end
+    end, "Edit rotations, conditions, metadata, load rules, imports, exports, and helper options.")
+    ActionButton(actions, "New Rotation", 164, -30, 120, function()
         if A.SpecUI and A.SpecUI.OpenNewSpecDialog then
             A.SpecUI.OpenNewSpecDialog()
         elseif A.SpecUI and A.SpecUI.Open then
-            -- Fallback: open Spec UI with nil to trigger dialog when no active spec
             pcall(function() A.SpecUI:Open(nil) end)
         else
             print("|cff8882d5SPHelper|r: Spec UI not available.")
         end
-    end)
-    y = y - 30
+    end, "Create a new editable rotation profile.")
+    ActionButton(actions, "Visual Layout", 296, -30, 120, function()
+        if A.OpenVisualsWindow then A.OpenVisualsWindow() else print("|cff8882d5SPHelper|r: Visuals window not available.") end
+    end, "Tune sizes, colors, row layout, frame scale, and previews.")
+    ActionButton(actions, "Debug", 428, -30, 80, OpenDebugTab, "Open the rotation debugger tab.")
+    ActionButton(actions, "Capture", 520, -30, 82, function()
+        if A.TroubleshooterChatCapture then
+            OpenDebugTab()
+            if C_Timer and C_Timer.After then
+                C_Timer.After(0.12, function() A.TroubleshooterChatCapture() end)
+            else
+                A.TroubleshooterChatCapture()
+            end
+        else
+            print("|cff8882d5SPHelper|r: Troubleshooter not available.")
+        end
+    end, "Capture the current rotation state for debugging.")
+    Text(actions, "Separate windows are intentional here: the editor, visuals, and debugger need more space than a single options page can give them cleanly.", 12, -68, width - 24, 9, {0.62, 0.62, 0.70, 1})
+    y = y - 108
 
-    MakeButton(content, "Open Visuals", 160, 24, function()
-        if A.OpenVisualsWindow then A.OpenVisualsWindow() end
-    end, y)
-    y = y - 36
+    local modules = Panel(content, 16, y, width, 132, "Modules")
+    local rows = {
+        { label = "Rotation Advisor", key = "rotation", get = function() return A.db.rotation.enabled end, set = function(v) A.db.rotation.enabled = v end, tip = "Shows the next recommended ability icons." },
+        { label = "Cast Bar", key = "castBar", get = function() return A.db.castBar.enabled end, set = function(v) A.db.castBar.enabled = v end, tip = "Shows cast/channel progress and channel helper overlays." },
+        {
+            label = A.TRACKER_NAME or "Target Tracker",
+            key = "dotTracker",
+            get = function() return A.db.dotTracker.enabled end,
+            set = function(v)
+                A.db.dotTracker.enabled = v
+                if v then
+                    EnsureDotTrackerReady()
+                elseif A.dotAnchor then
+                    A.dotAnchor:Hide()
+                end
+            end,
+            tip = "Tracks multiple enemies with their HP, debuffs and raid marks. Manually mark targets before a pull; right-click entries to remove them.",
+        },
+        { label = "Lock frame positions", key = "locked", get = function() return A.db.locked end, set = function(v) A.db.locked = v end, tip = "Lock prevents dragging; unlock lets you move SPHelper frames." },
+    }
+    local rowY = -30
+    for _, row in ipairs(rows) do
+        local enabled = SafeGet(row.get, false)
+        local cbContainer = MakeCheckbox(modules, row.label,
+            row.get,
+            function(v)
+                row.set(v)
+                if row.status then
+                    row.status:SetText(StatusText(v))
+                end
+            end,
+            rowY)
+        cbContainer:ClearAllPoints()
+        cbContainer:SetPoint("TOPLEFT", modules, "TOPLEFT", 12, rowY)
+        cbContainer:SetSize(260, 22)
+        cbContainer:EnableMouse(true)
+        Tooltip(cbContainer, row.label, row.tip)
+        local status = modules:CreateFontString(nil, "OVERLAY")
+        status:SetFont("Fonts\\FRIZQT__.TTF", 9, "OUTLINE")
+        status:SetPoint("TOPLEFT", modules, "TOPLEFT", 270, rowY - 3)
+        status:SetWidth(110)
+        status:SetJustifyH("LEFT")
+        status:SetText(StatusText(enabled))
+        row.status = status
+        rowY = rowY - 24
+    end
+    Text(modules, "Module on/off changes apply after /reload. Frame locking updates immediately.", 12, -118, width - 24, 8, {0.58, 0.58, 0.64, 1})
+    y = y - 144
 
-    -- Enable/disable toggles (require reload)
-    MakeSectionHeader(content, "Module toggles  (reload required)", y); y = y - 24
-
-    MakeCheckbox(content, "Enable cast bar",
-        function() return A.db.castBar.enabled end,
-        function(v) A.db.castBar.enabled = v end, y)
-    y = y - 26
-
-    MakeCheckbox(content, "Enable DoT tracker",
-        function() return A.db.dotTracker.enabled end,
-        function(v) A.db.dotTracker.enabled = v end, y)
-    y = y - 26
-
-    MakeCheckbox(content, "Enable rotation advisor",
-        function() return A.db.rotation.enabled end,
-        function(v) A.db.rotation.enabled = v end, y)
-    y = y - 26
-
-    MakeCheckbox(content, "Lock frame positions",
-        function() return A.db.locked end,
-        function(v) A.db.locked = v end, y)
-    y = y - 30
-
-    local note = content:CreateFontString(nil, "OVERLAY")
-    note:SetFont("Fonts\\FRIZQT__.TTF", 9)
-    note:SetPoint("TOPLEFT", content, "TOPLEFT", 16, y)
-    note:SetTextColor(0.6, 0.6, 0.6, 1)
-    note:SetText("Module toggles require /reload to take effect.")
-    y = y - 20
+    local utility = Panel(content, 16, y, width, 84, "Utilities")
+    local lockBtn
+    lockBtn = ActionButton(utility, A.db.locked and "Unlock Frames" or "Lock Frames", 12, -30, 118, function()
+        A.db.locked = not A.db.locked
+        lockBtn._label:SetText(A.db.locked and "Unlock Frames" or "Lock Frames")
+        print(A.db.locked and "|cff8882d5SPHelper|r: Frames locked." or "|cff8882d5SPHelper|r: Frames unlocked - drag to reposition.")
+    end, "Toggle frame dragging without leaving this panel.")
+    ActionButton(utility, "Fake Queue Macros", 142, -30, 142, function()
+        if A.ChannelHelper and A.ChannelHelper.PrintMacros then
+            A.ChannelHelper:PrintMacros()
+            print("|cff8882d5SPHelper|r: Use |cffffcc00/sph createmacros|r to choose which macros to create.")
+        else
+            print("|cff8882d5SPHelper|r: ChannelHelper not loaded.")
+        end
+    end, "Print macro templates for helper-enabled channel spells.")
+    ActionButton(utility, "Create Macros", 296, -30, 112, function()
+        if A.ChannelHelper and A.ChannelHelper.OpenMacroChooser then
+            A.ChannelHelper:OpenMacroChooser()
+        elseif A.ChannelHelper and A.ChannelHelper.CreateMacros then
+            A.ChannelHelper:CreateMacros()
+        else
+            print("|cff8882d5SPHelper|r: ChannelHelper not loaded.")
+        end
+    end, "Choose which Fake Queue macros to create or update.")
+    ActionButton(utility, "Reset", 520, -30, 82, function()
+        SPHelperDB = nil
+        A.InitDB()
+        print("|cff8882d5SPHelper|r: Settings reset. /reload to apply.")
+    end, "Reset saved SPHelper settings to defaults.")
+    Text(utility, "Slash shortcuts: /sph spec, /sph visuals, /sph capture, /sph debug, /sph scale 0.5-3.0.", 12, -62, width - 24, 8, {0.62, 0.62, 0.70, 1})
 end
 
 -- ====================================================================
@@ -666,8 +810,8 @@ function A:InitConfig()
             yOff = yOff - 42
             -- tick options removed from Visuals window
 
-            -- DoT Tracker visuals
-            MakeSectionHeader(content, "DoT Tracker", yOff); yOff = yOff - 22
+            -- Target Tracker visuals
+            MakeSectionHeader(content, A.TRACKER_NAME or "Target Tracker", yOff); yOff = yOff - 22
             MakeSlider(content, "Row width", 200, 500, 10,
                 function() return A.db.dotTracker.width end,
                 function(v) A.db.dotTracker.width = v; if A.DotTrackerResizeLayout then A.DotTrackerResizeLayout() end end, yOff)
@@ -689,7 +833,7 @@ function A:InitConfig()
                 function(v) A.db.dotTracker.blinkSpeed = v; if A.DotTrackerResizeLayout then A.DotTrackerResizeLayout() end end, yOff)
             yOff = yOff - 42
 
-            -- DoT Tracker additional visuals: max targets, portrait side, and expiry warning mode
+            -- Target Tracker additional visuals: max targets, portrait side, and expiry warning mode
             MakeSlider(content, "Max targets", 1, 20, 1,
                 function() return (A.db.dotTracker and A.db.dotTracker.maxTargets) or 8 end,
                 function(v) if not A.db.dotTracker then A.db.dotTracker = {} end; A.db.dotTracker.maxTargets = v; if A.DotTrackerResizeLayout then pcall(A.DotTrackerResizeLayout) end end, yOff)
@@ -725,11 +869,20 @@ function A:InitConfig()
                 function() return (A.db.dotTracker and A.db.dotTracker.newTargetPosition) or "bottom" end,
                 function(v) if not A.db.dotTracker then A.db.dotTracker = {} end; A.db.dotTracker.newTargetPosition = v; if A.DotTrackerResizeLayout then pcall(A.DotTrackerResizeLayout) end end, yOff, { bottom = "Bottom", top = "Top" })
             yOff = yOff - 30
-            MakeCycleButton(content, "Sort order:", { "addOrder", "tabOrder" },
-                function() return (A.db.dotTracker and A.db.dotTracker.sortMode) or "addOrder" end,
+            MakeDropdown(content, "Sort order:", { "tabOrder", "tabStable", "combatOrder", "alphabetical", "healthAsc", "raidIcon", "debuffExpiry", "addOrder" },
+                function() return (A.db.dotTracker and A.db.dotTracker.sortMode) or "tabOrder" end,
                 function(v) if not A.db.dotTracker then A.db.dotTracker = {} end; A.db.dotTracker.sortMode = v end, yOff,
-                { addOrder = "Add order", tabOrder = "Tab order" })
-            yOff = yOff - 30
+                {
+                    tabOrder = "Tab cycle (next first)",
+                    tabStable = "Stable tab assist",
+                    combatOrder = "Combat entry",
+                    alphabetical = "Alphabetical",
+                    healthAsc = "Lowest health",
+                    raidIcon = "Raid marker",
+                    debuffExpiry = "Expiring debuffs",
+                    addOrder = "Manual/add order",
+                })
+            yOff = yOff - 50
             MakeCycleButton(content, "Anchor position:", { "top", "bottom" },
                 function() return (A.db.dotTracker and A.db.dotTracker.anchorPosition) or "top" end,
                 function(v) if not A.db.dotTracker then A.db.dotTracker = {} end; A.db.dotTracker.anchorPosition = v; if A.DotTrackerResizeLayout then pcall(A.DotTrackerResizeLayout) end end, yOff, { top = "Top", bottom = "Bottom" })
@@ -840,7 +993,7 @@ function A:InitConfig()
                 print("|cff8882d5SPHelper|r: Usage: /sph swd always|execute|never")
             end
 
-        
+
 
         elseif msg == "visuals" then
             if A.OpenVisualsWindow then
@@ -884,6 +1037,35 @@ function A:InitConfig()
                 else
                     print("|cff8882d5SPHelper|r: Troubleshooter not available.")
                 end
+            end
+
+        elseif msg == "track" or msg:find("^track%s+") or msg == "tt" or msg:find("^tt%s+")
+            or msg == "dot" or msg:find("^dot%s+") then
+            local action = msg:match("^%S+%s+(%S+)") or "help"
+            local trackerName = A.TRACKER_NAME or "Target Tracker"
+            if action == "add" then
+                if EnsureDotTrackerReady() and A.DotTrackerAddCurrentTarget then
+                    A.DotTrackerAddCurrentTarget()
+                else
+                    print("|cff8882d5SPHelper|r: " .. trackerName .. " is disabled or unavailable for the active rotation.")
+                end
+            elseif action == "remove" then
+                if EnsureDotTrackerReady() and A.DotTrackerRemoveCurrentTarget then
+                    A.DotTrackerRemoveCurrentTarget()
+                else
+                    print("|cff8882d5SPHelper|r: " .. trackerName .. " is disabled or unavailable for the active rotation.")
+                end
+            elseif action == "clear" then
+                if EnsureDotTrackerReady() and A.DotTrackerClearManualTargets then
+                    A.DotTrackerClearManualTargets()
+                else
+                    print("|cff8882d5SPHelper|r: " .. trackerName .. " is disabled or unavailable for the active rotation.")
+                end
+            else
+                print("|cff8882d5SPHelper|r " .. trackerName .. " commands:")
+                print("  /sph track add     — Add your current target")
+                print("  /sph track remove  — Remove your current target")
+                print("  /sph track clear   — Clear manually added targets")
             end
 
         elseif msg == "debug" or msg:find("^debug%s+") then
@@ -943,13 +1125,15 @@ function A:InitConfig()
         elseif msg == "macros" then
             if A.ChannelHelper and A.ChannelHelper.PrintMacros then
                 A.ChannelHelper:PrintMacros()
-                print("|cff8882d5SPHelper|r: Use |cffffcc00/sph createmacros|r to auto-create these macros.")
+                print("|cff8882d5SPHelper|r: Use |cffffcc00/sph createmacros|r to choose which macros to create.")
             else
                 print("|cff8882d5SPHelper|r: ChannelHelper not loaded.")
             end
 
         elseif msg == "createmacros" then
-            if A.ChannelHelper and A.ChannelHelper.CreateMacros then
+            if A.ChannelHelper and A.ChannelHelper.OpenMacroChooser then
+                A.ChannelHelper:OpenMacroChooser()
+            elseif A.ChannelHelper and A.ChannelHelper.CreateMacros then
                 A.ChannelHelper:CreateMacros()
             else
                 print("|cff8882d5SPHelper|r: ChannelHelper not loaded.")
@@ -962,12 +1146,13 @@ function A:InitConfig()
             print("  /sph visuals    — Open visual layout options")
             print("  /sph capture    — Snapshot troubleshooter → chat + Debug tab")
             print("  /sph debug      — List or toggle module debug logging")
+            print("  /sph track add  — Add current target to the Target Tracker")
             print("  /sph lock       — Lock all frames")
             print("  /sph unlock     — Unlock frames for dragging")
             print("  /sph scale N    — Set UI scale (0.5-3.0)")
             print("  /sph swd MODE   — SW:D mode: always / execute / never")
             print("  /sph macros     — Print fake-queue macro templates")
-            print("  /sph createmacros — Auto-create FQ macros for active spec")
+            print("  /sph createmacros — Choose FQ macros to create/update")
             print("  /sph reset      — Reset all settings")
         end
     end

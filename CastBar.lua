@@ -425,12 +425,8 @@ function A:InitCastBar()
                                 if doFlash and A.ChannelHelper and A.ChannelHelper.ShouldPlayTickSelection then
                                     doFlash = A.ChannelHelper:ShouldPlayTickSelection(activeInfo, tickNum, "tickFlash")
                                 end
-                                local ts = doSound and (A.SpecVal and A.SpecVal("tickSound", nil) or nil) or "none"
-                                if not ts and A.db and A.db.castBar then ts = A.db.castBar.tickSound end
-                                ts = ts or "click"
-                                local tf = doFlash and (A.SpecVal and A.SpecVal("tickFlash", nil) or nil) or "none"
-                                if not tf and A.db and A.db.castBar then tf = A.db.castBar.tickFlash end
-                                tf = tf or "green"
+                                local ts = doSound and (A.GetConfiguredTickSoundKey and A.GetConfiguredTickSoundKey() or "click") or "none"
+                                local tf = doFlash and (A.GetConfiguredTickFlashKey and A.GetConfiguredTickFlashKey() or "green") or "none"
                                 if (ts and ts ~= "none") or (tf and tf ~= "none") then
                                     pcall(function() if A.PlayTickSound then A.PlayTickSound(ts) end end)
                                     pcall(function() if A.DoTickFlash then A.DoTickFlash(tf) end end)
@@ -580,12 +576,8 @@ function A:InitCastBar()
                     if doFlash and A.ChannelHelper and A.ChannelHelper.ShouldPlayTickSelection then
                         doFlash = A.ChannelHelper:ShouldPlayTickSelection(activeInfo, f.ticksDone, "tickFlash")
                     end
-                    local ts = doSound and (A.SpecVal and A.SpecVal("tickSound", nil) or nil) or "none"
-                    if not ts and A.db and A.db.castBar then ts = A.db.castBar.tickSound end
-                    ts = ts or "click"
-                    local tf = doFlash and (A.SpecVal and A.SpecVal("tickFlash", nil) or nil) or "none"
-                    if not tf and A.db and A.db.castBar then tf = A.db.castBar.tickFlash end
-                    tf = tf or "green"
+                    local ts = doSound and (A.GetConfiguredTickSoundKey and A.GetConfiguredTickSoundKey() or "click") or "none"
+                    local tf = doFlash and (A.GetConfiguredTickFlashKey and A.GetConfiguredTickFlashKey() or "green") or "none"
                     if (ts and ts ~= "none") or (tf and tf ~= "none") then
                         pcall(function() if A.PlayTickSound then A.PlayTickSound(ts) end end)
                         pcall(function() if A.DoTickFlash then A.DoTickFlash(tf) end end)
