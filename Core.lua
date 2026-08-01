@@ -7,13 +7,6 @@ SPHelper = SPHelper or {}
 local A = SPHelper
 local unpack = unpack or table.unpack
 
--- User-facing name of the multi-target tracker. Internally the module is
--- still keyed as `dotTracker` (DB key, InitDotTracker, A.DotTracker* API) to
--- avoid a saved-variable migration, but everything shown to the player uses
--- this name because the tracker handles more than DoTs (HP, raid marks,
--- manual target marking, observed tab-cycle ordering).
-A.TRACKER_NAME = "Target Tracker"
-
 local function PackValues(...)
     return { n = select("#", ...), ... }
 end
@@ -190,12 +183,6 @@ function A.GetTargetTimeToDie(guid)
     return rec.ttd
 end
 
-function A.GetTargetHealthDecayRate(guid)
-    local rec = guid and A._targetMetrics[guid]
-    if not rec then return nil end
-    return rec.rate or 0
-end
-
 function A.GetUnitTimeToDie(unit)
     if not unit or not UnitExists(unit) then return nil end
     local guid = UnitGUID(unit)
@@ -247,14 +234,6 @@ local function UpdateTravelRecord(store, key, sample, now)
     rec.samples = (rec.samples or 0) + 1
     rec.ema = ((rec.ema or sample) * 0.75) + (sample * 0.25)
     rec.updatedAt = now
-end
-
-function A.ClearSpellTravelMetrics()
-    A._spellTravel = {
-        byId = {},
-        byName = {},
-        pending = {},
-    }
 end
 
 function A.RecordSpellTravelSample(spellId, spellName, sample, now)
@@ -465,61 +444,6 @@ function A.GetLatency()
     return (latencyWorld or 50) / 1000
 end
 
-------------------------------------------------------------------------
--- Compute energy gained when powershifting into Cat Form.
--- The actual arithmetic is shared so other post-cast resource formulas can
--- reuse the same modifier structure from SpellDatabase.
-------------------------------------------------------------------------
-function A.ComputeResourceFromCalc(calc, fallbackValue)
-    if not calc then return fallbackValue or 0 end
-
-    local energy = tonumber(calc.base) or 0
-
-    -- Talent modifiers
-    if calc.talentModifiers then
-        for _, mod in ipairs(calc.talentModifiers) do
-            if mod.tab and mod.index then
-                local ok, _, _, _, _, rank = pcall(GetTalentInfo, mod.tab, mod.index)
-                if ok and rank and rank > 0 then
-                    energy = energy + rank * (tonumber(mod.energyPerRank) or 0)
-                end
-            end
-        end
-    end
-
-    -- Item modifiers (check equipped item in given inventory slot)
-    if calc.itemModifiers then
-        for _, mod in ipairs(calc.itemModifiers) do
-            if mod.slot and mod.itemId then
-                local ok, equipped = pcall(GetInventoryItemID, "player", mod.slot)
-                if ok and equipped == mod.itemId then
-                    energy = energy + (tonumber(mod.bonus) or 0)
-                end
-            end
-        end
-    end
-
-    return energy
-end
-
-function A.ComputePowershiftEnergy()
-    local def = A.GetSpellDefinition and A.GetSpellDefinition("Cat Form")
-    local calc = def and def.powershiftCalc
-    return A.ComputeResourceFromCalc(calc, 40)
-end
-
--- Remaining cooldown on a spell (0 if ready)
-function A.GetSpellCD(spellId)
-    if A.ResolveSpellID then
-        spellId = A.ResolveSpellID(spellId) or spellId
-    end
-    if type(spellId) ~= "number" then return 0 end
-    local start, dur, enabled = GetSpellCooldown(spellId)
-    if not start or start == 0 then return 0 end
-    local remaining = start + dur - GetTime()
-    return remaining > 0 and remaining or 0
-end
-
 -- Remaining cooldown IGNORING the GCD (treats GCD-only as 0)
 function A.GetSpellCDReal(spellId)
     if A.ResolveSpellID then
@@ -537,11 +461,43 @@ end
 -- Item cooldown accessor. `GetItemCooldown` is part of the TBC/Classic API
 -- and is always available on the TBC Anniversary client.
 function A.GetItemCooldownSafe(itemId)
+    if type(GetItemCooldown) ~= "function" then return 0, 0 end
     if type(itemId) ~= "number" then
         itemId = tonumber(itemId) or 0
     end
-    local start, dur, enable = GetItemCooldown(itemId)
+    local ok, start, dur, enable = pcall(GetItemCooldown, itemId)
+    if not ok then return 0, 0 end
     return start or 0, dur or 0, enable
+end
+
+-- Detect whether the item in an inventory slot has an on-use effect.
+-- Uses GetItemSpell which returns (spellName, spellId, spellSchool, spellTrigger)
+-- on Classic/TBC and (spellId, spellName, spellSchool, spellTrigger) on retail.
+-- r4 is always spellTrigger regardless of ordering.
+function A.ItemHasOnUseEffect(itemId)
+    if type(GetItemSpell) ~= "function" then
+        return true  -- can't detect, assume on-use
+    end
+    local r1, _, _, r4 = GetItemSpell(itemId)
+    if not r1 then
+        return false  -- no spell at all → passive item
+    end
+    -- r4 = spellTrigger in both orderings
+    if type(r4) == "string" then
+        return r4:upper() == "USE"
+    end
+    -- r4 is not a string (Classic might return nil for the trigger on older
+    -- builds). If the first value is a string, it's the spell name → on-use.
+    return type(r1) == "string"
+end
+
+-- Simple error reporter: logs the error and shows a message.
+function A.ReportError(module, operation, err, context)
+    -- Route to the debug log only — never spam the chat (red error handler)
+    -- with routine pcall failures that fire on every talent/equipment change.
+    if A.DebugLog then
+        A.DebugLog(module, operation .. " error: " .. tostring(err or "?"))
+    end
 end
 
 -- Return an estimated spell power for the player.
@@ -602,33 +558,177 @@ function A.GetHaste()
     return 0, 1
 end
 
--- Find a debuff by **spell name** on a unit cast by the player.
--- Uses the "PLAYER" filter which reliably restricts to your own debuffs.
--- Returns: name, icon, count, debuffType, duration, expirationTime, source, index
-function A.FindPlayerDebuff(unit, spellName)
-    for i = 1, 40 do
-        local name, icon, count, debuffType, duration, expirationTime,
-              source = UnitDebuff(unit, i, "PLAYER")
-        if not name then break end
-        if name == spellName then
-            return name, icon, count, debuffType, duration, expirationTime, source or "player", i
+------------------------------------------------------------------------
+-- ID-first aura resolution (NAG-style).
+--
+-- Name-based matching alone is fragile: TBC has several auras whose real
+-- in-game name differs from what a naive database uses (e.g. spell 1490 is
+-- "Curse of the Elements", not "Curse of Elements"), names can carry rank
+-- suffixes, and clients can be localized.  The modern Classic API returns
+-- the aura's spellId from UnitBuff/UnitDebuff, so we match by spell ID first
+-- (all TBC ranks of a spell via def.debuffAuraIds / resolveIds) and fall
+-- back to the existing exact/prefix name matching.
+------------------------------------------------------------------------
+
+-- Resolve a spell reference (catalog key, spell name, or spell ID) into a
+-- set of aura spell IDs and aura names to match against.  Merges exclusive
+-- sibling spells (e.g. Faerie Fire + Faerie Fire (Feral)) so either variant
+-- is detected on "any source" checks.
+-- Returns: { ids = {number,...}, names = {string,...} }
+function A.ResolveAuraRef(spellRef)
+    local ids = {}
+    local names = {}
+    local seenId = {}
+    local seenName = {}
+
+    local function addId(id)
+        if type(id) == "number" and id > 0 and not seenId[id] then
+            seenId[id] = true
+            ids[#ids + 1] = id
         end
+    end
+    local function addNameList(list)
+        if type(list) ~= "table" then return end
+        for _, nm in ipairs(list) do
+            if type(nm) == "string" and nm ~= "" and not seenName[nm] then
+                seenName[nm] = true
+                names[#names + 1] = nm
+            end
+        end
+    end
+    local function addDefIds(def)
+        if not def then return end
+        addId(def.baseId)
+        if def.debuffAuraIds then
+            for _, id in ipairs(def.debuffAuraIds) do addId(id) end
+        end
+        if def.resolveIds then
+            for _, id in ipairs(def.resolveIds) do addId(id) end
+        end
+    end
+    local function addDefNames(def)
+        if not def then return end
+        addNameList({ def.debuffAura, def.name })
+        if def.aliasNames then addNameList(def.aliasNames) end
+    end
+
+    local def = A.GetSpellDefinition and A.GetSpellDefinition(spellRef)
+    if def then
+        addDefIds(def)
+        addDefNames(def)
+        -- Exclusive-slot siblings share the aura (e.g. Faerie Fire variants).
+        if def.debuffSiblings then
+            for _, sibKey in ipairs(def.debuffSiblings) do
+                local sibDef = A.GetSpellDefinition and A.GetSpellDefinition(sibKey)
+                addDefIds(sibDef)
+                addDefNames(sibDef)
+            end
+        end
+        -- Known-rank ID from the resolved catalog entry (the rank the player casts).
+        if def.key then
+            local spell = A.SPELLS and A.SPELLS[def.key]
+            if spell and spell.id then addId(spell.id) end
+        end
+    end
+
+    -- Keep the raw reference as a fallback name (covers plain aura names that
+    -- are not catalog keys, e.g. "Icy Veins").
+    if type(spellRef) == "string" and spellRef ~= "" then
+        addNameList({ spellRef })
+    end
+
+    return { ids = ids, names = names }
+end
+
+-- Generic aura scanner.  `apiFn` is UnitDebuff or UnitBuff, `filter` an
+-- optional unit-aura filter (e.g. "PLAYER").  Matches ID-first, then exact
+-- name, then prefix name (rank suffixes).
+-- Returns: name, icon, count, auraType, duration, expirationTime, source, index, spellId
+-- NOTE: multi-return values are built explicitly (never via unpack on a table
+-- with nil holes — Lua 5.1 `#` on such tables is undefined).
+local function ScanAurasByRef(apiFn, unit, filter, ref)
+    if not apiFn or not unit or not ref then return nil end
+    local idSet = ref.ids and #ref.ids > 0
+    local names = ref.names or {}
+    local prefix = nil  -- {n, ic, ct, at, du, ex, so, ix, sid}
+
+    for i = 1, 40 do
+        local name, icon, count, auraType, duration, expirationTime, source,
+              _, _, spellId = apiFn(unit, i, filter)
+        if not name then break end
+
+        -- ID-first (NAG-style): the aura's spellId is authoritative.
+        if idSet then
+            for _, wantedId in ipairs(ref.ids) do
+                if spellId and spellId == wantedId then
+                    return name, icon, count or 0, auraType, duration or 0, expirationTime or 0, source or "player", i, spellId
+                end
+            end
+        end
+
+        -- Exact name match takes priority over prefix matches.
+        for _, wantedName in ipairs(names) do
+            if name == wantedName then
+                return name, icon, count or 0, auraType, duration or 0, expirationTime or 0, source or "player", i, spellId
+            end
+        end
+
+        -- Prefix match for rank differences (e.g. "Curse of the Elements" vs
+        -- "Curse of the Elements (Rank X)").
+        if not prefix then
+            local lowerName = name:lower()
+            for _, wantedName in ipairs(names) do
+                if wantedName ~= "" and lowerName:find(wantedName:lower(), 1, true) then
+                    prefix = { n = name, ic = icon, ct = count or 0, at = auraType, du = duration or 0,
+                               ex = expirationTime or 0, so = source or "player", ix = i, sid = spellId }
+                    break
+                end
+            end
+        end
+    end
+
+    if prefix then
+        return prefix.n, prefix.ic, prefix.ct, prefix.at, prefix.du, prefix.ex, prefix.so, prefix.ix, prefix.sid
     end
     return nil
 end
 
--- Find ANY debuff by spell name on a unit (regardless of caster).
--- Used for tracking debuffs on targets where we want to see all instances.
-function A.FindDebuff(unit, spellName)
-    for i = 1, 40 do
-        local name, icon, count, debuffType, duration, expirationTime,
-              source = UnitDebuff(unit, i)
-        if not name then break end
-        if name == spellName then
-            return name, icon, count, debuffType, duration, expirationTime, source, i
-        end
-    end
-    return nil
+-- Find a debuff by **spell ref** (catalog key, spell name, or spell ID) on a
+-- unit cast by the player.  Uses the "PLAYER" filter which reliably restricts
+-- to your own debuffs.  ID-first matching, name/prefix fallback.
+-- Returns: name, icon, count, debuffType, duration, expirationTime, source, index, spellId
+function A.FindPlayerDebuff(unit, spellRef)
+    return ScanAurasByRef(UnitDebuff, unit, "PLAYER", A.ResolveAuraRef(spellRef))
+end
+
+-- Find ANY debuff matching a spell ref on a unit (regardless of caster).
+-- ID-first matching, name/prefix fallback.
+function A.FindDebuff(unit, spellRef)
+    return ScanAurasByRef(UnitDebuff, unit, nil, A.ResolveAuraRef(spellRef))
+end
+
+-- Debuff lookup by ref with fuzzy prefix matching for rank differences.
+-- Returns: name, icon, count, debuffType, duration, expirationTime, source, index, spellId
+-- Used by condition evaluators and UI validation.
+function A.FindDebuffByName(unit, spellRef)
+    return A.FindDebuff(unit, spellRef)
+end
+
+-- Check if a unit has any debuff matching the given ref (fuzzy prefix match).
+function A.HasDebuff(unit, spellRef)
+    return A.FindDebuff(unit, spellRef) ~= nil
+end
+
+-- Find buff by spell ref with fuzzy prefix matching for rank differences.
+-- ID-first matching, name/prefix fallback.
+-- Returns: name, icon, count, duration, expirationTime, source, index, spellId
+function A.FindBuffByName(unit, spellRef)
+    return ScanAurasByRef(UnitBuff, unit, nil, A.ResolveAuraRef(spellRef))
+end
+
+-- Check if a unit has any buff matching the given ref (fuzzy prefix match).
+function A.HasBuff(unit, spellRef)
+    return A.FindBuffByName(unit, spellRef) ~= nil
 end
 
 -- Check if player knows a spell (has it in spellbook)
@@ -663,16 +763,6 @@ function A.GetContentType()
     if instanceType == "raid" then return "raid" end
     if instanceType == "party" then return "dungeon" end
     return "world"
-end
-
--- Return the target's raw HP, max HP, and percent (0-100)
-function A.GetTargetHP()
-    if not UnitExists("target") then return 0, 0, 0 end
-    local hp = UnitHealth("target") or 0
-    local maxHp = UnitHealthMax("target") or 0
-    local pct = 0
-    if maxHp > 0 then pct = (hp / maxHp) * 100 end
-    return hp, maxHp, pct
 end
 
 ------------------------------------------------------------------------
@@ -721,7 +811,7 @@ function A.IsShadowPriest()
 end
 
 ------------------------------------------------------------------------
--- WoW-style backdrop helper
+-- Pixel-perfect backdrop helper
 ------------------------------------------------------------------------
 function A.CreateBackdrop(frame, r, g, b, a, borderR, borderG, borderB, borderA)
     r, g, b, a = r or 0.08, g or 0.08, b or 0.08, a or 0.85
@@ -731,12 +821,9 @@ function A.CreateBackdrop(frame, r, g, b, a, borderR, borderG, borderB, borderA)
     borderA = borderA or 1
 
     frame:SetBackdrop({
-        bgFile   = "Interface\\Tooltips\\UI-Tooltip-Background",
-        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-        tile = true,
-        tileSize = 16,
-        edgeSize = 12,
-        insets = { left = 3, right = 3, top = 3, bottom = 3 },
+        bgFile   = "Interface\\BUTTONS\\WHITE8X8",
+        edgeFile = "Interface\\BUTTONS\\WHITE8X8",
+        edgeSize = 1,
     })
     frame:SetBackdropColor(r, g, b, a)
     frame:SetBackdropBorderColor(borderR, borderG, borderB, borderA)
@@ -787,9 +874,7 @@ function A.RegisterMovableFrame(frame, key, defaultPoint)
         if prevStop and prevStop ~= self.StopMovingOrSizing then
             -- Run any extra handler the caller had registered.
             local ok, err = pcall(prevStop, self, ...)
-            if not ok then
-                A.ReportError("CORE", "RegisterMovableFrame stop hook", err, { frame = key })
-            end
+            if not ok then A.DebugLog("ERR", "RegisterMovableFrame stop hook: " .. tostring(err)) end
         end
     end)
 end
@@ -929,79 +1014,6 @@ function A.DebugLog(module, msg)
     end
 end
 
-local function FormatErrorContext(context)
-    if context == nil then return nil end
-    if type(context) ~= "table" then
-        return tostring(context)
-    end
-
-    local keys = {}
-    for key in pairs(context) do
-        keys[#keys + 1] = key
-    end
-    table.sort(keys, function(a, b)
-        return tostring(a) < tostring(b)
-    end)
-
-    local parts = {}
-    for _, key in ipairs(keys) do
-        local value = context[key]
-        if value ~= nil then
-            parts[#parts + 1] = tostring(key) .. "=" .. tostring(value)
-        end
-    end
-    return table.concat(parts, " ")
-end
-
-function A.ReportError(module, action, err, context)
-    local key = NormalizeDebugModule(module or "ERR")
-    local now = GetTime()
-    local errText = tostring(err or "unknown error")
-    local contextText = FormatErrorContext(context)
-    local signature = table.concat({ key, tostring(action or "error"), errText, contextText or "" }, "\n")
-
-    A._chatErrorThrottle = A._chatErrorThrottle or {}
-    local lastSent = A._chatErrorThrottle[signature]
-    if lastSent and (now - lastSent) < 5 then
-        return false
-    end
-    A._chatErrorThrottle[signature] = now
-
-    local stack = (debugstack and debugstack(2, 12, 12)) or ""
-    local header = string.format("|cffff4444[SPHelper][%s]|r %s: %s", key, tostring(action or "error"), errText)
-    if contextText and contextText ~= "" then
-        header = header .. " | " .. contextText
-    end
-    if #header > 380 then
-        header = header:sub(1, 377) .. "..."
-    end
-
-    pcall(print, header)
-    if stack ~= "" then
-        local compactStack = stack:gsub("\n", " | ")
-        if #compactStack > 500 then
-            compactStack = compactStack:sub(1, 497) .. "..."
-        end
-        pcall(print, "|cffaa6666" .. compactStack .. "|r")
-    end
-
-    if not SPHelperDB then SPHelperDB = {} end
-    SPHelperDB.recentErrors = SPHelperDB.recentErrors or {}
-    table.insert(SPHelperDB.recentErrors, 1, {
-        time = now,
-        msg = header,
-        stack = stack,
-        module = key,
-        action = tostring(action or "error"),
-        context = contextText or "",
-    })
-    while #SPHelperDB.recentErrors > 80 do
-        table.remove(SPHelperDB.recentErrors)
-    end
-
-    return true
-end
-
 function A.DumpDebugLog(module)
     local buffer = A._debugBuffer or {}
     if #buffer == 0 then
@@ -1036,8 +1048,8 @@ A.defaults = {
     dotTracker  = { enabled = true, width = 300, height = 40, rowHeight = 40,
                     maxTargets = 8, warnSeconds = 3, blinkSpeed = 4, dotIconSize = 18,
                     portraitSide = "left", warnMode = "border",
-                    warnBorderSize = 4, warnBarAlpha = 0.35, warnIconAlpha = 0.6, newTargetPosition = "bottom", anchorPosition = "top", sortMode = "tabOrder" },
-    rotation    = { enabled = true, iconSize = 40, primaryIconSize = 40 },
+                    warnBorderSize = 4, warnBarAlpha = 0.35, warnIconAlpha = 0.6, newTargetPosition = "bottom", anchorPosition = "top", sortMode = "addOrder" },
+    rotation    = { enabled = true, iconSize = 58, primaryIconSize = 58, enableBonusSlot = true, bonusSpacing = 4 },
     debug       = { echo = false, bufferSize = 200, modules = {} },
     -- Per-frame saved positions (point/relPoint/x/y) keyed by frame name.
     framePositions = {},
@@ -1049,18 +1061,22 @@ A.defaults = {
     selectedPotionItem = 22832,
     selectedRuneItem   = 20520,
     swdMode     = "always",
-    swdWorld    = "always",
+    swdWorld    = "execute",
     swdDungeon  = "always",
-    swdRaid     = "execute",
-    swdSafetyPct = 10,
+    swdRaid     = "always",
+    swdSafetyPct = 0,
     sfManaThreshold      = 35,
     suggestPot           = true,
-    potManaThreshold     = 70,
+    potManaThreshold     = 20,
     suggestRune          = true,
-    runeManaThreshold    = 40,
+    runeManaThreshold    = 15,
     potEarly             = false,
     potionTrack = "auto",
     runeTrack   = "auto",
+    use_trinket_1            = true,
+    use_trinket_2            = true,
+    trinket_1_classification = "any",
+    trinket_2_classification = "any",
 }
 
 ------------------------------------------------------------------------
@@ -1073,18 +1089,22 @@ A.SPEC_DEFAULTS = {
         selectedPotionItem = 22832,
         selectedRuneItem   = 20520,
         swdMode     = "always",
-        swdWorld    = "always",
+        swdWorld    = "execute",
         swdDungeon  = "always",
-        swdRaid     = "execute",
-        swdSafetyPct = 10,
+        swdRaid     = "always",
+        swdSafetyPct = 0,
         sfManaThreshold      = 35,
         suggestPot           = true,
-        potManaThreshold     = 70,
+        potManaThreshold     = 20,
         suggestRune          = true,
-        runeManaThreshold    = 40,
+        runeManaThreshold    = 15,
         potEarly             = false,
         potionTrack = "auto",
         runeTrack   = "auto",
+        use_trinket_1            = true,
+        use_trinket_2            = true,
+        trinket_1_classification = "any",
+        trinket_2_classification = "any",
         -- Per-spell rotation toggles (only for optional/situational spells)
         use_DP               = true,
         use_SWD              = true,
@@ -1198,22 +1218,6 @@ function A.InitDB()
         if A.db.castBar.tickFlash == true  then A.db.castBar.tickFlash = "green" end
         if A.db.castBar.tickFlash == false then A.db.castBar.tickFlash = "none"  end
     end
-    if A.db.specs then
-        for _, sdb in pairs(A.db.specs) do
-            if type(sdb) == "table" then
-                if sdb.tickSound == true  then sdb.tickSound = "click" end
-                if sdb.tickSound == false then sdb.tickSound = "none"  end
-                if sdb.tickFlash == true  then sdb.tickFlash = "green" end
-                if sdb.tickFlash == false then sdb.tickFlash = "none"  end
-            end
-        end
-    end
-    if A.db.dotTracker and not A.db.dotTracker._tabSortDefaultMigrated then
-        if A.db.dotTracker.sortMode == nil or A.db.dotTracker.sortMode == "addOrder" then
-            A.db.dotTracker.sortMode = "tabOrder"
-        end
-        A.db.dotTracker._tabSortDefaultMigrated = true
-    end
     -- Migrate old castBar colorIndex (legacy) into new colorMode/color
     if A.db.castBar then
         if A.db.castBar.colorIndex then
@@ -1277,40 +1281,311 @@ function A.InitDB()
             end
         end --]]
     end
+
+    -- Initialize per-spec setting version tracking
+    A._InitSettingVersions()
 end
 
-local function ResolveTickSoundKey(key)
-    local k = key
-    if k == nil and A.SpecVal then k = A.SpecVal("tickSound", nil) end
-    if k == nil and A.db and A.db.castBar then k = A.db.castBar.tickSound end
-    if k == true then k = "click" end
-    if k == false then k = "none" end
-    return k or "click"
+------------------------------------------------------------------------
+-- Reset helpers — clear saved overrides so values fall back to file defaults.
+-- Each function targets a specific scope; none require /reload except the full wipe.
+------------------------------------------------------------------------
+
+--- Reset ALL SPHelper settings (visuals + frame positions + all spec overrides).
+--- Requires /reload to take effect. Called by `/sph reset` and `/sph reset all`.
+function A.ResetAll()
+    SPHelperDB = nil
+    A.InitDB()
 end
 
-local function ResolveTickFlashKey(key)
-    local k = key
-    if k == nil and A.SpecVal then k = A.SpecVal("tickFlash", nil) end
-    if k == nil and A.db and A.db.castBar then k = A.db.castBar.tickFlash end
-    if k == true then k = "green" end
-    if k == false then k = "none" end
-    return k or "green"
+--- Reset only visual/layout settings: scale, castBar, dotTracker, rotation visuals, framePositions.
+--- Keeps per-spec overrides (rotations + General tab settings) intact.
+--- Called by `/sph reset visuals`.
+function A.ResetVisuals()
+    if not A.db then return end
+    -- Restore each visual section from defaults
+    local d = A.defaults or {}
+    for _, key in ipairs({ "scale", "castBar", "dotTracker", "rotation" }) do
+        if d[key] ~= nil then
+            if type(d[key]) == "table" then
+                A.db[key] = {}
+                for k2, v2 in pairs(d[key]) do A.db[key][k2] = v2 end
+            else
+                A.db[key] = d[key]
+            end
+        end
+    end
+    -- Reset frame positions so modules re-anchor on next show
+    A.db.framePositions = {}
+
+    -- Apply visual changes immediately (no /reload needed)
+    if A.castBarFrame then A.castBarFrame:SetScale(A.db.scale or 1.0) end
+    if A.dotAnchor   then A.dotAnchor:SetScale(A.db.scale or 1.0)   end
+    if A.rotFrame    then A.rotFrame:SetScale(A.db.scale or 1.0)    end
+
+    -- Rebuild layouts with new defaults (safe to call even if module not loaded)
+    pcall(function() if A.CastBarResizeLayout then A.CastBarResizeLayout() end end)
+    pcall(function() if A.DotTrackerResizeLayout then A.DotTrackerResizeLayout() end end)
+    pcall(function() if A.RotationResizeLayout then A.RotationResizeLayout() end end)
 end
 
-function A.GetConfiguredTickSoundKey(key)
-    return ResolveTickSoundKey(key)
+--- Reset ALL per-spec overrides (rotations + General tab settings) for every spec.
+--- Keeps visual/layout settings and global toggles intact.
+--- Called by `/sph reset specs`.
+function A.ResetAllSpecs()
+    if not A.db then return end
+    A.db.specs = {}
 end
 
-function A.GetConfiguredTickFlashKey(key)
-    return ResolveTickFlashKey(key)
+--- Reset a single spec's overrides (rotation + General tab settings).
+--- Other specs are untouched; visuals are untouched.
+--- Called by `/sph reset spec <specID>`.
+function A.ResetSpec(specID)
+    if not specID or not A.db then return end
+    if A.db.specs and A.db.specs[specID] then
+        A.db.specs[specID] = nil
+    end
+end
+
+--- Reset only the General tab settings for a single spec (checkboxes, sliders).
+--- Keeps that spec's rotation override intact.
+--- Called by the "Reset Settings" button in the General tab and `/sph reset spec-settings <specID>`.
+function A.ResetSpecSettings(specID)
+    if not specID or not A.db then return end
+    local sdb = A.db.specs and A.db.specs[specID]
+    if not sdb then return end
+
+    -- Keys that are NOT General tab settings — preserve these:
+    local keepKeys = { rotation = true, loadConditionsOverride = true }
+
+    for key in pairs(sdb) do
+        if not keepKeys[key] then
+            sdb[key] = nil
+        end
+    end
+end
+
+--- Reset only the rotation override for a single spec.
+--- Keeps that spec's General tab settings intact.
+--- Called by the "Reset Rotation to Default" button in the Rotation tab and `/sph reset spec-rotation <specID>`.
+function A.ResetSpecRotation(specID)
+    if not specID or not A.db then return end
+    local sdb = A.db.specs and A.db.specs[specID]
+    if sdb then
+        sdb.rotation = nil
+    end
 end
 
 -- Play a tick sound (shared helper used by both the cast bar and tick manager)
 function A.PlayTickSound(key)
-    local k = ResolveTickSoundKey(key)
-    if k == "none" or not k then return end
+    local k = key or (A.db and A.db.castBar and A.db.castBar.tickSound) or "click"
+    if k == "none" or k == true or not k then return end
     local id = A.GetTickSoundId(k)
     if id then pcall(PlaySound, id, "SFX") end
+end
+
+----------------------------------------------------------------------------
+-- Setting Version Change System
+--
+-- Each spec declares settingVersion + settingChanges.  When the addon loads,
+-- saved versions are compared to declared versions.  Migrations and removals
+-- run silently; default-value changes prompt only if the user has a saved
+-- override (sdb[key] ~= nil).  New settings (not listed in settingChanges)
+-- never trigger a prompt.
+----------------------------------------------------------------------------
+
+-- StaticPopup dialog for per-setting default-value changes
+if not StaticPopupDialogs["SPHELPER_SETTING_CHANGE"] then
+    StaticPopupDialogs["SPHELPER_SETTING_CHANGE"] = {
+        text = "%s",
+        button1 = "Reset to default",
+        button2 = "Keep my value",
+        OnAccept = function(self, data)
+            local sdb = A.db and A.db.specs and A.db.specs[data.specID]
+            if sdb then
+                sdb[data.key] = nil  -- remove override → falls through to file default
+            end
+            -- Also clear any legacy flat copy so it cannot shadow the new default
+            if A.db and A.db[data.key] ~= nil then
+                A.db[data.key] = nil
+            end
+            A._ShowNextSettingChange()
+        end,
+        OnCancel = function(self, data)
+            A._ShowNextSettingChange()  -- keep saved value, move to next
+        end,
+        timeout = 0,
+        whileDead = true,
+        hideOnEscape = true,
+        preferredIndex = 3,
+    }
+end
+
+-- StaticPopup dialog for Full Reset confirmation (destructive)
+if not StaticPopupDialogs["SPHELPER_RESET_ALL"] then
+    StaticPopupDialogs["SPHELPER_RESET_ALL"] = {
+        text = "Full reset will wipe ALL SPHelper settings:\n- Visual/layout settings\n- Frame positions\n- All spec rotations and General tab settings.\n\nThis requires /reload to take effect. Continue?",
+        button1 = ACCEPT,
+        button2 = CANCEL,
+        OnAccept = function()
+            A.ResetAll()
+            print("|cff8882d5SPHelper|r: Full reset complete. /reload to apply.")
+        end,
+        timeout = 0,
+        whileDead = true,
+        hideOnEscape = true,
+        preferredIndex = 3,
+    }
+end
+
+-- StaticPopup dialog for Reset All Specs confirmation
+if not StaticPopupDialogs["SPHELPER_RESET_ALL_SPECS"] then
+    StaticPopupDialogs["SPHELPER_RESET_ALL_SPECS"] = {
+        text = "This will reset ALL spec overrides (rotations + General tab settings) for every spec.\n\nVisual/layout settings will be preserved. Continue?",
+        button1 = ACCEPT,
+        button2 = CANCEL,
+        OnAccept = function()
+            if A.ResetAllSpecs then A.ResetAllSpecs() end
+            print("|cff8882d5SPHelper|r: All spec overrides reset (rotations + General tab settings). Visuals unchanged.")
+        end,
+        timeout = 0,
+        whileDead = true,
+        hideOnEscape = true,
+        preferredIndex = 3,
+    }
+end
+
+--- Initialize _settingVersions tracking in the DB.
+-- Detects fresh install vs upgrade from pre-version addon.
+-- Fresh install: pre-populates all versions silently (no prompts).
+-- Upgrade: leaves _settingVersions as {} so settingVersion > 0 triggers processing.
+function A._InitSettingVersions()
+    if A.db._settingVersions ~= nil then return end
+
+    A.db._settingVersions = {}
+
+    -- Check if any spec sub-table has user data → indicates an upgrade, not fresh install
+    local hasSavedData = false
+    for _, specData in pairs(A.db.specs or {}) do
+        if type(specData) == "table" and next(specData) then
+            hasSavedData = true
+            break
+        end
+    end
+
+    if not hasSavedData then
+        -- Fresh install: pre-populate all versions so no prompts fire
+        local specs = A.SpecManager and A.SpecManager:GetRegisteredSpecs()
+        if specs then
+            for specID, spec in pairs(specs) do
+                if spec.settingVersion then
+                    A.db._settingVersions[specID] = spec.settingVersion
+                end
+            end
+        end
+    end
+    -- If hasSavedData: leave _settingVersions as {} — all specs with
+    -- settingVersion > 0 will be processed (silent migrations/removals,
+    -- prompts only for default changes where user has a saved override).
+end
+
+--- Process setting version changes for all registered specs.
+-- Handles silent migrations, removals, and queues prompts for default-value
+-- changes where the user has a saved override.  Should be called after
+-- InitDB and after specs are fully registered (safe at ADDON_LOADED time).
+function A.ProcessSettingChanges()
+    if not A.SpecManager or not A.SpecManager.GetRegisteredSpecs then return end
+    if not A.db or not A.db._settingVersions then return end
+
+    local queue = {}
+
+    for specID, spec in pairs(A.SpecManager:GetRegisteredSpecs()) do
+        if spec.settingVersion and spec.settingChanges then
+            local savedVer = A.db._settingVersions[specID] or 0
+            if savedVer < spec.settingVersion then
+                local sdb = A.db.specs and A.db.specs[specID]
+
+                -- Process each version between saved and current
+                for ver = savedVer + 1, spec.settingVersion do
+                    local changes = spec.settingChanges[ver]
+                    if changes then
+                        -- Silent: migrate renamed keys
+                        if changes.migrate then
+                            for oldKey, newKey in pairs(changes.migrate) do
+                                if sdb and sdb[oldKey] ~= nil and sdb[newKey] == nil then
+                                    sdb[newKey] = sdb[oldKey]
+                                    sdb[oldKey] = nil
+                                end
+                            end
+                        end
+
+                        -- Silent: clean up removed keys
+                        if changes.removed then
+                            for _, key in ipairs(changes.removed) do
+                                if sdb then sdb[key] = nil end
+                            end
+                        end
+
+                        -- Default-value changes: prompt only if user has a saved override
+                        if changes.defaults then
+                            for _, key in ipairs(changes.defaults) do
+                                if sdb and sdb[key] ~= nil then
+                                    -- Resolve a human-readable label
+                                    local label = key
+                                    if spec.settingDefs and spec.settingDefs[key] then
+                                        label = spec.settingDefs[key].label or key
+                                    elseif spec.castBarOptions then
+                                        for _, opt in ipairs(spec.castBarOptions) do
+                                            if opt.key == key then label = opt.label or key; break end
+                                        end
+                                    end
+                                    local specName = (spec.meta and spec.meta.specName) or specID
+                                    local newDefault = spec.settingDefs and spec.settingDefs[key] and spec.settingDefs[key].default
+                                    queue[#queue + 1] = {
+                                        specID = specID,
+                                        key = key,
+                                        label = label,
+                                        specName = specName,
+                                        savedValue = sdb[key],
+                                        newDefault = newDefault,
+                                    }
+                                end
+                                -- If user never touched it: silently takes new default (sdb[key] stays nil)
+                            end
+                        end
+                    end
+                end
+
+                -- Advance saved version (whether or not anything was queued)
+                A.db._settingVersions[specID] = spec.settingVersion
+            end
+        end
+    end
+
+    A._settingChangeQueue = queue
+    A._ShowNextSettingChange()
+end
+
+function A._ShowNextSettingChange()
+    local queue = A._settingChangeQueue
+    if not queue or #queue == 0 then
+        A._settingChangeQueue = nil
+        return
+    end
+
+    local item = table.remove(queue, 1)
+    local text = ("SPHelper: %s\n\n" ..
+                  "The setting \"%s\" has a new default value.\n\n" ..
+                  "Your saved value: %s\n" ..
+                  "New default: %s\n\n" ..
+                  "Reset this setting to the new default, or keep your current value?")
+        :format(item.specName, item.label, tostring(item.savedValue), tostring(item.newDefault))
+    -- Note: on the Anniversary client StaticPopup_Show has the modern signature
+    -- (which, text_arg1, text_arg2, data, insertedFrame, ...) — data is the 4th
+    -- positional arg. Passing the item as the 5th arg would make it land in
+    -- insertedFrame and crash SetupInsertedFrame (attempt to call SetParent on
+    -- a plain table).
+    StaticPopup_Show("SPHELPER_SETTING_CHANGE", text, nil, item)
 end
 
 -- Apply a gradient to a texture. Requires a base texture (WHITE8X8) to be
@@ -1331,8 +1606,8 @@ end
 
 -- Perform a tick screen-flash with proper gradient edges and smooth fade-out.
 function A.DoTickFlash(key)
-    local k = ResolveTickFlashKey(key)
-    if k == "none" or not k then return end
+    local k = key or (A.db and A.db.castBar and A.db.castBar.tickFlash)
+    if k == "none" or k == true or not k then return end
     local col = A.GetTickFlashColor(k)
     if not col then return end
     local mode = A.GetTickFlashMode(k)
@@ -1590,46 +1865,6 @@ do
 end
 
 ------------------------------------------------------------------------
--- Visibility management (show/hide all frames based on spec)
-------------------------------------------------------------------------
-function A.SetAllVisible(visible)
-    A._visible = visible
-    if visible then
-        -- CastBar is NOT shown here; it shows itself via ShowBar() on cast start
-        -- Show DoT anchor only when in combat or when preview is active
-        if A.dotAnchor then
-            if UnitAffectingCombat("player") or A.dotTrackerPreviewActive then
-                A.dotAnchor:Show()
-            else
-                A.dotAnchor:Hide()
-            end
-        end
-    else
-        if A.castBarFrame then A.castBarFrame:Hide() end
-        if A.dotAnchor   then A.dotAnchor:Hide()   end
-        if A.rotFrame    then A.rotFrame:Hide()    end
-    end
-end
-
--- Print recent stored errors to chat (call via: /script SPHelper.DumpRecentErrors())
-function A.DumpRecentErrors()
-    if not SPHelperDB or not SPHelperDB.recentErrors or #SPHelperDB.recentErrors == 0 then
-        print("SPHelper: no recent errors recorded.")
-        return
-    end
-    print("SPHelper: recent errors (most recent first):")
-    for i, e in ipairs(SPHelperDB.recentErrors) do
-        print(string.format("[%d] %s", i, e.msg or ""))
-        if e.context and e.context ~= "" then
-            print("    context: " .. e.context)
-        end
-        if e.stack and e.stack ~= "" then
-            print(e.stack)
-        end
-    end
-end
-
-------------------------------------------------------------------------
 -- Addon load event
 ------------------------------------------------------------------------
 local loader = CreateFrame("Frame")
@@ -1637,6 +1872,9 @@ loader:RegisterEvent("ADDON_LOADED")
 loader:SetScript("OnEvent", function(self, event, addon)
     if addon ~= "SPHelper" then return end
     A.InitDB()
+
+    -- Check for setting version changes (must be after InitDB + after all specs loaded)
+    A.ProcessSettingChanges()
 
     -- TickManager is global (not spec-specific) — always init
     if A.InitTickManager then A.InitTickManager() end
@@ -1675,7 +1913,7 @@ loader:SetScript("OnEvent", function(self, event, addon)
         if hasActive then
             print("|cff8882d5SPHelper|r loaded.  /sph to configure.")
         else
-            print("|cff8882d5SPHelper|r loaded (no matching spec active).  /sph to configure.")
+            print("|cff8882d5SPHelper|r loaded — no spec enabled for this character yet.  Type |cffffcc00/sph|r to enable a built-in spec (only the Shadow Priest spec is on by default).")
         end
     end)
 

@@ -13,7 +13,7 @@ local A = SPHelper
 
 function A:InitCastBar()
     local db = A.db.castBar
-    if not db.enabled then return end
+    if not db then return end
 
     local BAR_W = db.width
     local BAR_H = db.height
@@ -24,6 +24,7 @@ function A:InitCastBar()
     local f = CreateFrame("Frame", "SPHelperCastBar", UIParent, "BackdropTemplate")
     f:SetSize(BAR_W + 2, BAR_H + 2)
     f:SetPoint("CENTER", UIParent, "CENTER", 0, -180)
+    f:Show()
     f:SetMovable(true)
     f:EnableMouse(true)
     f:SetClampedToScreen(true)
@@ -449,10 +450,28 @@ function A:InitCastBar()
         end
     end)
 
+    A.ShowBar = ShowBar
+    A.HideBar = HideBar
+
     ----------------------------------------------------------------
     -- Event handling
     ----------------------------------------------------------------
+    A:InitCastBarEvents()
+
+    f:Hide()
+end
+
+function A:InitCastBarEvents()
+    if A.castBarEvents then
+        A.castBarEvents:UnregisterAllEvents()
+        A.castBarEvents:SetScript("OnEvent", nil)
+        A.castBarEvents = nil
+    end
+    local f = A.castBarFrame
+    if not f then return end
+
     local events = CreateFrame("Frame")
+    A.castBarEvents = events
     events:RegisterEvent("UNIT_SPELLCAST_START")
     events:RegisterEvent("UNIT_SPELLCAST_STOP")
     events:RegisterEvent("UNIT_SPELLCAST_FAILED")
@@ -464,6 +483,7 @@ function A:InitCastBar()
     events:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
 
     events:SetScript("OnEvent", function(self, event, ...)
+        if not A.db.castBar.enabled then return end
         if f._preview then return end  -- ignore during preview
 
         if event == "UNIT_SPELLCAST_START" then
@@ -473,7 +493,9 @@ function A:InitCastBar()
                 A.ChannelHelper:OnChannelStop()
             end
             local name, _, _, startMS, endMS = UnitCastingInfo("player")
-            if name then ShowBar(name, startMS, endMS, false) end
+            if name then
+                if A.ShowBar then A.ShowBar(name, startMS, endMS, false) end
+            end
 
         elseif event == "UNIT_SPELLCAST_STOP"
             or event == "UNIT_SPELLCAST_FAILED"
@@ -486,7 +508,9 @@ function A:InitCastBar()
             if f.casting then
                 C_Timer.After(0.06, function()
                     if not UnitCastingInfo("player") and not UnitChannelInfo("player") then
-                        if f.casting then HideBar() end
+                        if f.casting then
+                            if A.HideBar then A:HideBar() end
+                        end
                     end
                 end)
             end
@@ -507,7 +531,9 @@ function A:InitCastBar()
             if unit ~= "player" then return end
             local _, _, spellID = ...
             local name, _, _, startMS, endMS = UnitChannelInfo("player")
-            if name then ShowBar(name, startMS, endMS, true, spellID) end
+            if name then
+                if A.ShowBar then A.ShowBar(name, startMS, endMS, true, spellID) end
+            end
 
         elseif event == "UNIT_SPELLCAST_CHANNEL_UPDATE" then
             -- Channel pushback: re-read channel end time
@@ -527,7 +553,9 @@ function A:InitCastBar()
             if f.channeling then
                 C_Timer.After(0.06, function()
                     if not UnitChannelInfo("player") and not UnitCastingInfo("player") then
-                        if f.channeling then HideBar() end
+                        if f.channeling then
+                            if A.HideBar then A:HideBar() end
+                        end
                     end
                 end)
             end
@@ -586,8 +614,6 @@ function A:InitCastBar()
             end
         end
     end)
-
-    f:Hide()
 end
 
 ------------------------------------------------------------------------
@@ -603,6 +629,11 @@ if SPHelper.SpecManager then
         end,
         OnSpecDeactivate = function(self, spec)
             self._initialized = false
+            if SPHelper.castBarEvents then
+                SPHelper.castBarEvents:UnregisterAllEvents()
+                SPHelper.castBarEvents:SetScript("OnEvent", nil)
+                SPHelper.castBarEvents = nil
+            end
             if SPHelper.castBarFrame then
                 SPHelper.castBarFrame:UnregisterAllEvents()
                 SPHelper.castBarFrame:Hide()

@@ -105,9 +105,13 @@ local function GetFadeAlphas(cfg, cycle)
     end
 end
 
+-- Maximum number of bonus slots shown to the left of primary (trinkets, potions, runes, shadowfiend, etc.)
+local MAX_BONUS_SLOTS = 6
+
 function A:InitRotation()
     local db = A.db.rotation
     if not db.enabled then return end
+    if db.showKeybinds == nil then db.showKeybinds = true end
 
     local ICON    = db.primaryIconSize or db.iconSize
     local SMALL   = math.floor((db.iconSize or 40) * 0.6)
@@ -126,8 +130,14 @@ function A:InitRotation()
         if not A.db.locked then self:StartMoving() end
     end)
     f:SetScript("OnDragStop", function(self) self:StopMovingOrSizing() end)
+    local opacity = (A.db.rotation and A.db.rotation.opacity) or 100
+    f:SetAlpha(opacity / 100)
     f:Show()
     A.rotFrame = f
+    A.RotationRefreshOpacity = function()
+        local o = (A.db.rotation and A.db.rotation.opacity) or 100
+        if A.rotFrame then A.rotFrame:SetAlpha(o / 100) end
+    end
     if A.RegisterMovableFrame then
         A.RegisterMovableFrame(f, "rotation",
             { point = "CENTER", relPoint = "CENTER", x = 0, y = -240 })
@@ -169,6 +179,18 @@ function A:InitRotation()
         cdOverlay:SetDrawEdge(true)
         pcall(function() cdOverlay:SetHideCountdownNumbers(true) end)
         frame.cdOverlay = cdOverlay
+
+        -- Raised frame for keybind text (after cdOverlay so it renders on top)
+        local bindFrame = CreateFrame("Frame", nil, frame)
+        bindFrame:SetAllPoints(frame)
+        bindFrame:SetFrameLevel(frame:GetFrameLevel() + 2)
+        local bindText = bindFrame:CreateFontString(nil, "OVERLAY")
+        bindText:SetFont("Fonts\\FRIZQT__.TTF", math.max(9, math.floor(size * 0.26)), "OUTLINE")
+        bindText:SetPoint("TOPRIGHT", bindFrame, "TOPRIGHT", -1, -1)
+        bindText:SetJustifyH("RIGHT")
+        bindText:SetTextColor(1, 1, 0.8, 1)
+        bindText:SetText("")
+        frame.bindText = bindText
 
         return frame
     end
@@ -336,6 +358,18 @@ function A:InitRotation()
     end
 
     ----------------------------------------------------------------
+    -- Bonus slots (optional actions: trinkets, potions, runes, shadowfiend, etc.)
+    -- Up to MAX_BONUS_SLOTS static frames, positioned left of primary by
+    -- RotationResizeLayout, shown/hidden in the display loop.
+    ----------------------------------------------------------------
+    f.bonusSlots = {}
+    for i = 1, MAX_BONUS_SLOTS do
+        local b = MakeIcon(f, SMALL, nil, -SMALL - 3, 0)
+        b:Hide()
+        f.bonusSlots[i] = b
+    end
+
+    ----------------------------------------------------------------
     -- Spell icon cache
     ----------------------------------------------------------------
     local spellIcons = {}
@@ -366,6 +400,13 @@ function A:InitRotation()
     -- Consumable icons
     spellIcons["POTION"] = (A.GetItemIconCached and A.GetItemIconCached(22832)) or GetItemIcon(22832) or "Interface\\Icons\\INV_Potion_76"
     spellIcons["RUNE"]   = (A.GetItemIconCached and A.GetItemIconCached(20520)) or GetItemIcon(20520) or "Interface\\Icons\\INV_Misc_Rune_04"
+    spellIcons["TRINKET1"] = "Interface\\Icons\\INV_Jewelry_Trinket_01"
+    spellIcons["TRINKET2"] = "Interface\\Icons\\INV_Jewelry_Trinket_02"
+
+    ----------------------------------------------------------------
+    -- Apply full layout (fixes bonus slot size/position at startup)
+    ----------------------------------------------------------------
+    if A.RotationResizeLayout then A.RotationResizeLayout() end
 
     ----------------------------------------------------------------
     -- Recently-cast tracking (prevents re-suggesting mid-travel spells)
@@ -450,11 +491,34 @@ function A:InitRotation()
         ICON  = db.primaryIconSize or db.iconSize
         SMALL = math.floor((db.iconSize or 40) * 0.6)
 
-        f:SetSize(ICON + SMALL * 3 + 20, ICON + 4)
+        local bonusEnabled = db.enableBonusSlot ~= false
+        local bonusSpacing = db.bonusSpacing or 4
+
+        local maxBonusSlots = bonusEnabled and MAX_BONUS_SLOTS or 0
+        local extraW = maxBonusSlots > 0 and (SMALL + bonusSpacing) * maxBonusSlots or 0
+
+        f:SetSize(ICON + SMALL * 3 + 20 + extraW, ICON + 4)
 
         primary:SetSize(ICON, ICON)
         primary.cdText:SetFont("Fonts\\FRIZQT__.TTF",
             math.max(9, math.floor(ICON * 0.28)), "OUTLINE")
+
+        -- Position bonus slots to the left of primary
+        if f.bonusSlots then
+            local prev = primary
+            for i = 1, 4 do
+                local slot = f.bonusSlots[i]
+                if slot then
+                    slot:SetSize(SMALL, SMALL)
+                    slot:ClearAllPoints()
+                    slot:SetPoint("RIGHT", prev, "LEFT", -bonusSpacing, 0)
+                    slot.cdText:SetFont("Fonts\\FRIZQT__.TTF",
+                        math.max(9, math.floor(SMALL * 0.28)), "OUTLINE")
+                    -- Show/hide handled in the display loop, not here
+                    prev = slot
+                end
+            end
+        end
 
         local prev = primary
         for i = 1, 3 do
@@ -466,6 +530,7 @@ function A:InitRotation()
                 math.max(9, math.floor(SMALL * 0.28)), "OUTLINE")
             prev = q
         end
+        if A.RotationRefreshOpacity then A.RotationRefreshOpacity() end
     end
 
     ----------------------------------------------------------------
@@ -732,24 +797,188 @@ function A:InitRotation()
         f:Hide()
     end
 
+    -- Keybind lookup: cache spellId -> bound key(s) (e.g. "1", "F6", "ALT-1 / Q").
+    -- Computes the paged action slot and binding command for each physical
+    -- button position using the standard page variables (which always reflect
+    -- the current action bar configuration without relying on frame fields).
+    local BINDING_BARS = {
+        { "ACTIONBUTTON",          function() return CURRENT_ACTIONBAR_PAGE end },
+        { "MULTIACTIONBAR1BUTTON", function() return BOTTOMLEFT_ACTIONBAR_PAGE end },
+        { "MULTIACTIONBAR2BUTTON", function() return BOTTOMRIGHT_ACTIONBAR_PAGE end },
+        { "MULTIACTIONBAR3BUTTON", function() return RIGHT_ACTIONBAR_PAGE end },
+        { "MULTIACTIONBAR4BUTTON", function() return LEFT_ACTIONBAR_PAGE end },
+    }
+    local bindCache = {}
+    local function GetBindForKey(key)
+        if bindCache[key] ~= nil then return bindCache[key] end
+        local spell = A.SPELLS[key]
+        -- TRINKET1/TRINKET2 are not in the spell catalog; resolve dynamically
+        if not spell and (key == "TRINKET1" or key == "TRINKET2") then
+            local invSlot = (key == "TRINKET1") and 13 or 14
+            local _, itemId = pcall(GetInventoryItemID, "player", invSlot)
+            if itemId then
+                local _, _, spellId = pcall(GetItemSpell, itemId)
+                if spellId then
+                    spell = { id = spellId, name = GetSpellInfo(spellId) }
+                end
+            end
+        end
+        if not spell or not spell.id then
+            bindCache[key] = ""
+            return ""
+        end
+        local found = {}
+        -- Regular bars: iterate buttons 1-12, compute paged slot from page var
+        for _, bar in ipairs(BINDING_BARS) do
+            local page = bar[2]()
+            if page then
+                for btn = 1, 12 do
+                    local slot = btn + (page - 1) * 12
+                    local actionType, actionId = GetActionInfo(slot)
+                    local matched = false
+                    if actionType == "spell" then
+                        matched = (actionId == spell.id) or (GetSpellInfo(actionId) == spell.name)
+                    elseif actionType == "item" then
+                        local ok, _, sId = pcall(GetItemSpell, actionId)
+                        if ok and sId then
+                            matched = (sId == spell.id)
+                        end
+                    elseif actionType == "macro" then
+                        local _, macroSpell = pcall(GetMacroSpell, actionId)
+                        if macroSpell and macroSpell > 0 then
+                            matched = (macroSpell == spell.id) or (GetSpellInfo(macroSpell) == spell.name)
+                        end
+                    end
+                    if matched then
+                        local cmd = bar[1] .. btn
+                        local k1, k2 = GetBindingKey(cmd)
+                        local bind = k1 or k2
+                        if bind and not found[bind] then
+                            found[bind] = true
+                        end
+                    end
+                end
+            end
+        end
+        -- Bonus/stance bar: only active when GetBonusBarOffset() > 0
+        local bonusOff = GetBonusBarOffset()
+        if bonusOff and bonusOff > 0 then
+            local page = NUM_ACTIONBAR_PAGES + bonusOff
+            for btn = 1, 12 do
+                local slot = btn + (page - 1) * 12
+                local actionType, actionId = GetActionInfo(slot)
+                local matched = false
+                if actionType == "spell" then
+                    matched = (actionId == spell.id) or (GetSpellInfo(actionId) == spell.name)
+                elseif actionType == "item" then
+                    local ok, _, sId = pcall(GetItemSpell, actionId)
+                    if ok and sId then
+                        matched = (sId == spell.id)
+                    end
+                elseif actionType == "macro" then
+                    local _, macroSpell = pcall(GetMacroSpell, actionId)
+                    if macroSpell and macroSpell > 0 then
+                        matched = (macroSpell == spell.id) or (GetSpellInfo(macroSpell) == spell.name)
+                    end
+                end
+                if matched then
+                    -- Stance bar shares keybinds with main bar (ACTIONBUTTON)
+                    local k1, k2 = GetBindingKey("ACTIONBUTTON" .. btn)
+                    local bind = k1 or k2
+                    -- Some setups let you bind the stance bar separately
+                    if not bind then
+                        local b1, b2 = GetBindingKey("BONUSACTIONBUTTON" .. btn)
+                        bind = b1 or b2
+                    end
+                    if bind and not found[bind] then
+                        found[bind] = true
+                    end
+                end
+            end
+        end
+        local keys = {}
+        for bind in pairs(found) do
+            keys[#keys + 1] = bind
+        end
+        table.sort(keys)
+        local result = #keys > 0 and table.concat(keys, " / ") or ""
+        bindCache[key] = result
+        return result
+    end
+
     local function Refresh()
         if previewActive then return end
+        -- Clear keybind cache each tick so ability moves show up promptly
+        wipe(bindCache)
+        local now = GetTime()
+        local SPELLS = A.SPELLS
+        local dbRot = A.db.rotation
+        local GetSpellCDReal = A.GetSpellCDReal
+        local FindPlayerDebuff = A.FindPlayerDebuff
+        local showBinds = dbRot and dbRot.showKeybinds
 
-        local hasValidTarget = UnitExists("target") and not UnitIsDead("target") and UnitCanAttack("player", "target")
-        if A._visible == false or (not inCombat and not hasValidTarget) then
+        if A.db.rotation and not A.db.rotation.enabled then
             ClearDisplay()
             return
         end
 
         local prio, activeSpec = GetPriority()
 
+        -- Collect optional entries (trinkets, potions) for the bonus slot.
+        -- Cross-reference against the spec file's `optional = true` flags
+        -- to handle DB-saved rotations that strip the attribute.
+        -- Ready optional entries go ONLY to the bonus slot (not queue).
+        -- On-cooldown optional entries stay in the queue.
+        local bonusDb = A.db and A.db.rotation
+        local bonusEnabled = bonusDb and bonusDb.enableBonusSlot ~= false
+        local optionalPrio
+        if prio and activeSpec and activeSpec.rotation then
+            local optKeys = {}
+            for _, re in ipairs(activeSpec.rotation) do
+                if re.optional and re.key then optKeys[re.key] = true end
+            end
+            if next(optKeys) then
+                local now = GetTime()
+                local normal, bonus, cooldownOpt = {}, {}, {}
+                for _, ent in ipairs(prio) do
+                    if optKeys[ent.key] then
+                        local isReady = not ent.eta or ent.eta <= 0.05
+                        if isReady then
+                            bonus[#bonus + 1] = ent
+                        else
+                            cooldownOpt[#cooldownOpt + 1] = ent
+                        end
+                    else
+                        normal[#normal + 1] = ent
+                    end
+                end
+                -- Rebuild prio: normal → on-cooldown optional (ready optional are bonus-only)
+                local ordered = {}
+                for _, ent in ipairs(normal) do ordered[#ordered + 1] = ent end
+                for _, ent in ipairs(cooldownOpt) do ordered[#ordered + 1] = ent end
+
+                if #bonus > 0 and bonusEnabled then
+                    local slotCount = math.min(#bonus, MAX_BONUS_SLOTS)
+                    optionalPrio = {}
+                    for i = 1, slotCount do
+                        optionalPrio[i] = bonus[i]
+                    end
+                    -- Extras beyond capacity: stay bonus-only (not duplicated in queue)
+                else
+                    -- Bonus slot disabled: ready optionals fall back to normal queue
+                    for _, ent in ipairs(bonus) do ordered[#ordered + 1] = ent end
+                end
+                prio = ordered
+            end
+        end
+
         -- nil = no valid target
         if prio == nil then
             if inCombat then
                 -- Give a short grace period before clearing (avoids flicker on target swap)
                 if not noTargetSince then
-                    noTargetSince = GetTime()
-                elseif (GetTime() - noTargetSince) > 0.5 then
+                    noTargetSince = now
+                elseif (now - noTargetSince) > 0.5 then
                     ClearDisplay()
                 end
             else
@@ -832,23 +1061,34 @@ function A:InitRotation()
                     if icon then return icon end
                 end
                 return spellIcons["RUNE"]
+            elseif key == "TRINKET1" or key == "TRINKET2" then
+                local slot = (key == "TRINKET1") and 13 or 14
+                local ok, itemId = pcall(GetInventoryItemID, "player", slot)
+                if ok and itemId then
+                    local icon = (A.GetItemIconCached and A.GetItemIconCached(itemId)) or GetItemIcon(itemId)
+                    if icon then return icon end
+                end
+                return spellIcons[key] or spellIcons["TRINKET1"]
             else
                 return GetCachedSpellIcon(key)
             end
         end
 
-        -- Range check helper: returns true if the key's spell/item is in range for the current target
+        -- Range check helper: returns true if the key's spell/item is in range for the current target.
+        -- Only offensive spells (per spell database flag) are checked; self-buffs like Cat Form are always "in range".
         local function IsKeyInRange(key)
             if not UnitExists("target") then return true end
-            if key == "POTION" or key == "RUNE" then return true end
-            local spell = A.SPELLS[key]
-            if spell and spell.name then
+            if key == "POTION" or key == "RUNE" or key == "TRINKET1" or key == "TRINKET2" then return true end
+            local spell = SPELLS[key]
+            if spell and spell.id then
+                if spell.meta and spell.meta.flags and not spell.meta.flags.offensive then
+                    return true
+                end
                 local ok, inRange = pcall(IsSpellInRange, spell.name, "target")
                 if ok and type(inRange) == "number" then
                     return (inRange == 1)
                 end
             end
-            -- If we cannot determine range, assume in-range to avoid false negatives
             return true
         end
 
@@ -856,7 +1096,6 @@ function A:InitRotation()
         -- show timer text. Regular spell icons stay clean; real cooldowns are
         -- represented by the gray sweep overlay instead.
         local function GetRemainingNowForKey(key)
-            local now = GetTime()
             if key == "POTION" then
                 local potId = A.db.selectedPotionItem
                 if type(potId) == "string" then potId = tonumber(potId) end
@@ -873,16 +1112,24 @@ function A:InitRotation()
                     if s and d and s > 0 then return math.max(s + d - now, 0) end
                 end
                 return 0
+            elseif key == "TRINKET1" or key == "TRINKET2" then
+                local slot = (key == "TRINKET1") and 13 or 14
+                local ok, itemId = pcall(GetInventoryItemID, "player", slot)
+                if ok and itemId then
+                    local s,d = A.GetItemCooldownSafe(itemId)
+                    if s and d and s > 0 then return math.max(s + d - now, 0) end
+                end
+                return 0
             end
-            -- Generic: try cooldown lookup via A.SPELLS[key]
-            local spell = A.SPELLS[key]
+            -- Generic: try cooldown lookup via SPELLS[key]
+            local spell = SPELLS[key]
             if spell then
                 if spell.id then
-                    local cd = A.GetSpellCDReal and A.GetSpellCDReal(spell.id)
+                    local cd = GetSpellCDReal and GetSpellCDReal(spell.id)
                     if cd and cd > 0 then return math.max(cd, 0) end
                 end
-                -- Dot debuff: check remaining uptime on target
-                if spell.name and UnitExists("target") and A.FindPlayerDebuff then
+                -- Dot debuff: check remaining uptime on target (ID-first lookup by catalog key)
+                if UnitExists("target") and FindPlayerDebuff then
                     local spec = nil
                     if A.SpecManager then
                         local activeSpecs = A.SpecManager:GetActiveSpecs()
@@ -898,7 +1145,7 @@ function A:InitRotation()
                         end
                     end)()
                     if isDot then
-                        local _,_,_,_,_,exp = A.FindPlayerDebuff("target", spell.name)
+                        local _,_,_,_,_,exp = FindPlayerDebuff("target", key)
                         if exp then return math.max(exp - now, 0) end
                         return 0
                     end
@@ -907,30 +1154,28 @@ function A:InitRotation()
             return 0
         end
 
+        local function LiveRemaining(ent)
+            if not ent then return 0 end
+            if ent.cooldownEnd then
+                return math.max(ent.cooldownEnd - now, 0)
+            end
+            return (ent.eta and ent.eta > 0) and ent.eta or 0
+        end
+
         local function VisibleRemaining(ent)
-            if not ent or not ent.showTimer then return 0 end
-            return math.max(ent.timerRemaining or 0, 0)
+            if not ent then return 0 end
+            if ent.showTimer and ent.timerRemaining then
+                return math.max(ent.timerRemaining, 0)
+            end
+            if ent.cooldownEnd then
+                return math.max(ent.cooldownEnd - now, 0)
+            end
+            return (ent.eta and ent.eta > 0) and ent.eta or 0
         end
 
         local p = prio[1]
         local p2 = prio[2]
         local primaryFade = UseFadePrimary(activeSpec, p, p2)
-
-        -- Use eta from the rotation engine: this is "time until cast window opens" for all
-        -- spell types (DoT hold time, cooldown remaining, 0 = ready now). This avoids
-        -- showing the full DoT remaining time (e.g. 5s) when what matters is "wait 2s more".
-        --
-        -- For live, ticking countdowns (so timers don't freeze during a cast/channel)
-        -- we prefer the absolute `cooldownEnd` timestamp anchored at evaluation time
-        -- and fall back to the eta when no anchor was provided.
-        local nowLive = GetTime()
-        local function LiveRemaining(ent)
-            if not ent then return 0 end
-            if ent.cooldownEnd then
-                return math.max(ent.cooldownEnd - nowLive, 0)
-            end
-            return (ent.eta and ent.eta > 0) and ent.eta or 0
-        end
 
         local primaryLive = VisibleRemaining(p)
         local inRangePrimary = p and IsKeyInRange(p.key)
@@ -943,68 +1188,97 @@ function A:InitRotation()
         }, {
             live = secondaryLive,
             inRange = inRangeSecondary,
-        }, nowLive)
+        }, now)
 
         local primarySignature = tostring(p and p.key or "nil")
         if primaryShown and p2 then
             primarySignature = primarySignature .. "|" .. tostring(p2.key)
         end
 
-        -- GCD / spell cooldown sweep on primary icon.
-        -- Suppress the overlay when the fade is active: CooldownFrameTemplate
-        -- renders at OVERLAY and would hide the ARTWORK fade textures.
-        -- Include GCDs (dur > 0) so the GCD sweep is visible after every cast.
-        -- Track whether the overlay is showing so we can suppress our custom
-        -- cdText in that case — on TBC Anniversary, SetHideCountdownNumbers is
-        -- unavailable, so CooldownFrameTemplate always renders its own countdown
-        -- number.  Showing our cdText simultaneously would produce two numbers.
+        -- GCD / cooldown display on the primary icon.
+        --
+        -- GCD is detected with the same probe the engine uses (id 29515,
+        -- duration <= 2.5 s — see RotationEngine.GetGCDRemaining), so it only
+        -- reflects a REAL global cooldown: channel ticks (e.g. Mind Flay) never
+        -- light it up, and the active channel is never drawn with a fake
+        -- cooldown sweep (CastBar shows channel state).
+        --
+        -- On TBC Anniversary, CooldownFrameTemplate draws the swipe but no
+        -- countdown number (SetHideCountdownNumbers doesn't exist), so the
+        -- countdown is rendered by our own cdText — number + swipe together,
+        -- like retail.
+        local gStart, gDur = GetSpellCooldown(29515)
+        local gcdRem = 0
+        if gStart and gStart > 0 and gDur and gDur > 0 and gDur <= 2.5 then
+            gcdRem = math.max(gStart + gDur - now, 0)
+        end
+        local primarySpell = p and SPELLS[p.key]
+        local sStart, sDur = 0, 0
+        if primarySpell and primarySpell.id then
+            local s, d = GetSpellCooldown(primarySpell.id)
+            if s and d then sStart, sDur = s, d end
+        end
+        local castNameNow = select(1, GetPlayerCastInfo())
+        local primaryIsActiveChannel = primarySpell and primarySpell.name and castNameNow
+                                       and primarySpell.name == castNameNow
+        local realCDRem = (sDur > 2.5 and not primaryIsActiveChannel) and math.max(sStart + sDur - now, 0) or 0
+
         local primaryOverlayActive = false
         if primary.cdOverlay then
             if primaryShown then
+                -- Fade split active: suppress the overlay (it would hide the
+                -- ARTWORK fade textures) and keep the live countdown text.
                 pcall(CooldownFrame_Set, primary.cdOverlay, 0, 0, 0)
+            elseif realCDRem > 0 then
+                -- Real multi-second spell cooldown: swipe + countdown number.
+                pcall(CooldownFrame_Set, primary.cdOverlay, sStart, sDur, 1)
+                primaryOverlayActive = true
+                primary.cdText:SetText(A.FormatTime(realCDRem))
+            elseif gcdRem > 0 then
+                -- Genuine global cooldown (probe-based; channel ticks never
+                -- report one after the initial GCD): swipe + countdown number.
+                pcall(CooldownFrame_Set, primary.cdOverlay, gStart, gDur, 1)
+                primaryOverlayActive = true
+                primary.cdText:SetText(A.FormatTime(gcdRem))
             else
-                local spell = p and A.SPELLS[p.key]
-                if spell then
-                    local start, dur = GetSpellCooldown(spell.id)
-                    if start and dur and dur > 0 then
-                        pcall(CooldownFrame_Set, primary.cdOverlay, start, dur, 1)
-                        primaryOverlayActive = true
-                    else
-                        pcall(CooldownFrame_Set, primary.cdOverlay, 0, 0, 0)
-                    end
-                else
-                    pcall(CooldownFrame_Set, primary.cdOverlay, 0, 0, 0)
-                end
+                pcall(CooldownFrame_Set, primary.cdOverlay, 0, 0, 0)
             end
         end
 
-        if primaryOverlayActive then
-            -- CooldownFrameTemplate shows its own countdown; suppress our cdText
-            -- to avoid two overlapping numbers on the same icon.
-            primary.cdText:SetText("")
-            if not inRangePrimary then
-                if not primaryShown then primary.icon:SetVertexColor(0.7, 0.2, 0.2) end
-            end
-        elseif primaryLive and primaryLive > 0 then
-            primary.cdText:SetText(A.FormatTime(primaryLive))
-            -- Dim the icon while it's still on cooldown; if out of range tint red
-            if not inRangePrimary then
-                if not primaryShown then primary.icon:SetVertexColor(0.7, 0.2, 0.2) end
-            end
-        else
-            if p.clip then
-                primary.cdText:SetText("Clip")
+        if not primaryOverlayActive then
+            -- When actively channeling the primary spell, don't show remaining
+            -- channel time on the rotation advisor icon — the CastBar already
+            -- displays that. Only show GCD initially (handled above), then blank.
+            if not primaryIsActiveChannel and primaryLive and primaryLive > 0 then
+                primary.cdText:SetText(A.FormatTime(primaryLive))
+                -- Dim the icon while it's still on cooldown; if out of range tint red
+                if not inRangePrimary then
+                    if not primaryShown then primary.icon:SetVertexColor(0.7, 0.2, 0.2) end
+                end
             else
-                primary.cdText:SetText("")
-            end
-            if not inRangePrimary then
-                if not primaryShown then primary.icon:SetVertexColor(0.8, 0.2, 0.2) end
+                if p.clip then
+                    primary.cdText:SetText("Clip")
+                else
+                    primary.cdText:SetText("")
+                end
+                if not inRangePrimary then
+                    if not primaryShown then primary.icon:SetVertexColor(0.8, 0.2, 0.2) end
+                end
             end
         end
         if lastPriSignature ~= primarySignature then
             A.DebugLog("ROT", "display: " .. (lastPriSignature or "nil") .. " -> " .. primarySignature)
             A.CreateBackdrop(primary, 0, 0, 0, 0.85, 1, 0.85, 0, 1)
             lastPriSignature = primarySignature
+        end
+        -- Update keybind overlay on primary icon
+        if showBinds then
+            local primaryBind = (p and GetBindForKey(p.key)) or ""
+            primary.bindText:SetText(primaryBind)
+            primary.bindText:Show()
+        else
+            primary.bindText:SetText("")
+            primary.bindText:Hide()
         end
 
         -- queueStart must be defined before the display state block and the
@@ -1019,11 +1293,13 @@ function A:InitRotation()
                 q.icon:SetTexture(GetDisplayIcon(ent.key))
                 -- Drive the cooldown sweep only from real spell CDs (dur > 1.5 s).
                 -- Showing the GCD sweep on queue icons creates a confusing spinning
-                -- overlay that competes with the energy countdown text.
+                -- overlay that competes with the energy countdown text.  The
+                -- currently-channeled spell is also excluded (the client reports
+                -- the channel as a fake cooldown; CastBar shows channel state).
                 local qHasRealCD = false
                 if q.cdOverlay then
-                    local qspell = A.SPELLS[ent.key]
-                    if qspell and qspell.id then
+                    local qspell = SPELLS[ent.key]
+                    if qspell and qspell.id and not (castNameNow and qspell.name == castNameNow) then
                         local qstart, qdur = GetSpellCooldown(qspell.id)
                         if qstart and qdur and qdur > 1.5 then
                             pcall(CooldownFrame_Set, q.cdOverlay, qstart, qdur, 1)
@@ -1035,16 +1311,12 @@ function A:InitRotation()
                         pcall(CooldownFrame_Set, q.cdOverlay, 0, 0, 0)
                     end
                 end
+                local inRangeQ = IsKeyInRange(ent.key)
                 if ent.clip then
                     q.cdText:SetText("Clip")
                     q.icon:SetVertexColor(1, 1, 1)
                 else
-                    -- Use the same live-anchored countdown as the primary icon
-                    -- so queue timers tick smoothly even mid-cast/channel.
-                    -- When the overlay is already displaying a real spell-CD sweep,
-                    -- suppress cdText to avoid two numbers on the same icon.
                     local live = VisibleRemaining(ent)
-                    local inRangeQ = IsKeyInRange(ent.key)
                     if live and live > 0 then
                         if qHasRealCD then
                             q.cdText:SetText("")
@@ -1054,11 +1326,8 @@ function A:InitRotation()
                         if not inRangeQ then
                             q.icon:SetVertexColor(0.8, 0.2, 0.2)
                         elseif ent.chained then
-                            -- Chained: queued in cast sequence, not actually blocked.
-                            -- Keep bright so the player can see it's coming up soon.
                             q.icon:SetVertexColor(1, 1, 1)
                         else
-                            -- Blocked by CD / resource: dim to signal unavailable.
                             q.icon:SetVertexColor(0.6, 0.6, 0.6)
                         end
                     else
@@ -1070,9 +1339,104 @@ function A:InitRotation()
                         end
                     end
                 end
+                if showBinds then
+                    local qBind = GetBindForKey(ent.key)
+                    q.bindText:SetText(qBind)
+                    q.bindText:Show()
+                else
+                    q.bindText:SetText("")
+                    q.bindText:Hide()
+                end
                 q:Show()
             else
                 q:Hide()
+            end
+        end
+
+        -- Bonus slots: one slot per optional entry (trinkets, potions, etc.)
+        -- Positioned to the left of the primary ability, additive to the queue.
+        do
+            local bonusDb = A.db.rotation
+            local bonusEnabled = bonusDb.enableBonusSlot ~= false
+            local entries = optionalPrio or {}
+            for bi = 1, MAX_BONUS_SLOTS do
+                local slot = f.bonusSlots[bi]
+                local optEnt = entries[bi]
+                if bonusEnabled and slot and optEnt then
+                    slot.icon:SetTexture(GetDisplayIcon(optEnt.key))
+                    local inRangeB = IsKeyInRange(optEnt.key)
+                    -- Cooldown sweep (trinkets use item cooldown, potions use item, else spell)
+                    if slot.cdOverlay then
+                        if optEnt.key == "TRINKET1" or optEnt.key == "TRINKET2" then
+                            local slotIdx = (optEnt.key == "TRINKET1") and 13 or 14
+                            local ok, itemId = pcall(GetInventoryItemID, "player", slotIdx)
+                            if ok and itemId then
+                                local s, d = A.GetItemCooldownSafe(itemId)
+                                if s and d and d > 0 then
+                                    pcall(CooldownFrame_Set, slot.cdOverlay, s, d, 1)
+                                else
+                                    pcall(CooldownFrame_Set, slot.cdOverlay, 0, 0, 0)
+                                end
+                            end
+                        elseif optEnt.key == "POTION" then
+                            local potId = A.db.selectedPotionItem
+                            if type(potId) == "string" then potId = tonumber(potId) end
+                            if potId and potId ~= "none" then
+                                local s, d = A.GetItemCooldownSafe(potId)
+                                if s and d and d > 0 then
+                                    pcall(CooldownFrame_Set, slot.cdOverlay, s, d, 1)
+                                else
+                                    pcall(CooldownFrame_Set, slot.cdOverlay, 0, 0, 0)
+                                end
+                            end
+                        elseif optEnt.key == "RUNE" then
+                            local runeId = A.db.selectedRuneItem
+                            if type(runeId) == "string" then runeId = tonumber(runeId) end
+                            if runeId and runeId ~= "none" then
+                                local s, d = A.GetItemCooldownSafe(runeId)
+                                if s and d and d > 0 then
+                                    pcall(CooldownFrame_Set, slot.cdOverlay, s, d, 1)
+                                else
+                                    pcall(CooldownFrame_Set, slot.cdOverlay, 0, 0, 0)
+                                end
+                            end
+                        else
+                            local bSpell = SPELLS[optEnt.key]
+                            if bSpell and bSpell.id then
+                                local s, d = GetSpellCooldown(bSpell.id)
+                                if s and d and d > 0 then
+                                    pcall(CooldownFrame_Set, slot.cdOverlay, s, d, 1)
+                                else
+                                    pcall(CooldownFrame_Set, slot.cdOverlay, 0, 0, 0)
+                                end
+                            else
+                                pcall(CooldownFrame_Set, slot.cdOverlay, 0, 0, 0)
+                            end
+                        end
+                    end
+                    local bLive = VisibleRemaining(optEnt)
+                    if bLive and bLive > 0 then
+                        slot.cdText:SetText(A.FormatTime(bLive))
+                        slot.icon:SetVertexColor(0.6, 0.6, 0.6)
+                    else
+                        slot.cdText:SetText("")
+                        slot.icon:SetVertexColor(1, 1, 1)
+                    end
+                    if not inRangeB then
+                        slot.icon:SetVertexColor(0.8, 0.2, 0.2)
+                    end
+                    if showBinds then
+                        local bBind = GetBindForKey(optEnt.key)
+                        slot.bindText:SetText(bBind)
+                        slot.bindText:Show()
+                    else
+                        slot.bindText:SetText("")
+                        slot.bindText:Hide()
+                    end
+                    slot:Show()
+                elseif slot then
+                    slot:Hide()
+                end
             end
         end
 
@@ -1094,7 +1458,7 @@ function A:InitRotation()
                 primaryTimer  = primary.cdText:GetText(),
                 fadeActive    = primaryShown,
                 queue         = qs,
-                updatedAt     = GetTime(),
+                updatedAt     = now,
             }
         end
     end
@@ -1128,8 +1492,14 @@ function A:InitRotation()
     evRot:RegisterEvent("PLAYER_REGEN_ENABLED")
     evRot:RegisterEvent("PLAYER_REGEN_DISABLED")
     evRot:RegisterEvent("UNIT_POWER_UPDATE")
+    pcall(function() evRot:RegisterEvent("UPDATE_BINDINGS") end)
+    pcall(function() evRot:RegisterEvent("UPDATE_ACTIONBAR") end)
+    pcall(function() evRot:RegisterEvent("ACTIONBAR_PAGE_CHANGED") end)
     evRot:SetScript("OnEvent", function(self, event, arg1)
-        if event == "PLAYER_REGEN_DISABLED" then
+        if event == "UPDATE_BINDINGS" or event == "UPDATE_ACTIONBAR" or event == "ACTIONBAR_PAGE_CHANGED" then
+            wipe(bindCache)
+            return
+        elseif event == "PLAYER_REGEN_DISABLED" then
             inCombat = true
             A.DebugLog("EVT", "combat START")
         elseif event == "PLAYER_REGEN_ENABLED" then

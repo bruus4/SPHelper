@@ -25,7 +25,8 @@ local function BuildTrackedDebuffs()
             local spellData = A.SPELLS[def.spellKey]
             local spellDef = A.GetSpellDefinition and A.GetSpellDefinition(def.spellKey)
             result[#result + 1] = {
-                key   = def.key,
+                key      = def.key,
+                spellKey = def.spellKey,
                 spell = function() return spellData end,
                 dur   = def.duration or (spellDef and spellDef.duration) or 15,
                 color = def.color or def.key:upper(),
@@ -41,7 +42,8 @@ local function BuildTrackedDebuffs()
             local spellData = A.SPELLS[def.spellKey]
             local spellDef = A.GetSpellDefinition and A.GetSpellDefinition(def.spellKey)
             result[#result + 1] = {
-                key   = def.key,
+                key      = def.key,
+                spellKey = def.spellKey,
                 spell = function() return spellData end,
                 dur   = def.duration or (spellDef and spellDef.duration) or 15,
                 color = def.color or def.key:upper(),
@@ -227,6 +229,7 @@ function A:InitDotTracker()
         end
         return nil
     end
+    A.FindUnitForGUID = FindUnitForGUID
 
     local function HasActiveDot(data, now)
         if not data then return false end
@@ -414,8 +417,7 @@ function A:InitDotTracker()
 
     local function UpdateAnchorVisibility()
         if not anchor then return end
-        if A._visible == false
-            or not (A.db.dotTracker and A.db.dotTracker.enabled) then
+        if not (A.db.dotTracker and A.db.dotTracker.enabled) then
             anchor:Hide(); return
         end
         if previewActive or A.dotTrackerPreviewActive
@@ -769,7 +771,8 @@ function A:InitDotTracker()
         for _, def in ipairs(TRACKED_DEBUFFS) do
             local sp = def.spell()
             if sp and sp.name then
-                local name, icon, count, debuffType, duration, expirationTime = A.FindPlayerDebuff(unit, sp.name)
+                -- ID-first lookup via the catalog key (all ranks/sibling IDs, name fallback)
+                local name = A.FindPlayerDebuff(unit, def.spellKey or sp.name)
                 if name and expirationTime and expirationTime > now then
                     hasTrackedDebuff = true
                     break
@@ -798,7 +801,8 @@ function A:InitDotTracker()
         for _, def in ipairs(TRACKED_DEBUFFS) do
             local sp = def.spell()
             if sp and sp.name then
-                local name, icon, count, debuffType, duration, expirationTime = A.FindPlayerDebuff(unit, sp.name)
+                -- ID-first lookup via the catalog key (all ranks/sibling IDs, name fallback)
+                local name, icon, count, debuffType, duration, expirationTime = A.FindPlayerDebuff(unit, def.spellKey or sp.name)
                 if name and expirationTime and expirationTime > now then
                     data.name = unitName or data.name
                     data[def.key .. "_dur"] = duration

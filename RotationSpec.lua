@@ -150,7 +150,7 @@ A.RotationSpec = {
             priorityHint = 60,
             conditions = {
                 { type = "item_ready_and_owned", item_pref_db = "selectedPotionItem" },
-                { type = "resource_pct_lt", resource = "mana", pct = function(db) return (db and db.potManaThreshold or 70) / 100 end }
+                { type = "resource_pct_lt", resource = "mana", pct = function(db) return (db and db.potManaThreshold or 10) / 100 end }
             },
             notes = "Configurable potion suggestion; `potEarly` alters placement in engine",
         },
@@ -161,7 +161,7 @@ A.RotationSpec = {
             priorityHint = 50,
             conditions = {
                 { type = "item_ready_and_owned", item_pref_db = "selectedRuneItem" },
-                { type = "resource_pct_lt", resource = "mana", pct = function(db) return (db and db.runeManaThreshold or 40) / 100 end }
+                { type = "resource_pct_lt", resource = "mana", pct = function(db) return (db and db.runeManaThreshold or 10) / 100 end }
             },
         },
 

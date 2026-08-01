@@ -14,7 +14,7 @@ local CH = A.ChannelHelper
 -- Macro-driven /run scripts on the Anniversary client start tripping the
 -- script-time budget a little below 189 ms. Keep a hard safety margin below
 -- that limit so FQ never leaves an action button in a broken state.
-CH.FAKE_QUEUE_SCRIPT_SAFE_MS = 150
+CH.FAKE_QUEUE_SCRIPT_SAFE_MS = 189
 
 local function ClampFakeQueueMaxMs(ms)
     ms = tonumber(ms) or 0
@@ -26,10 +26,6 @@ local function ClampFakeQueueMaxMs(ms)
 end
 
 function CH:GetEffectiveFakeQueueMaxMs()
-    local active = self._activeChannelInfo
-    if active and active.fakeQueueMaxMs ~= nil then
-        return ClampFakeQueueMaxMs(active.fakeQueueMaxMs)
-    end
     return ClampFakeQueueMaxMs(self._config and self._config.fakeQueueMaxMs or 0)
 end
 
@@ -106,7 +102,7 @@ end
 local function BuildChannelDefinitionFromEntry(spec, entry, index)
     if not entry or not entry.key or type(entry.helpers) ~= "table" then return nil end
     local helpers = entry.helpers
-    if not (helpers.fakeQueue or helpers.clipOverlay or helpers.tickSound or helpers.tickFlash or helpers.tickMarkers) then
+    if not (helpers.clipOverlay or helpers.tickSound or helpers.tickFlash or helpers.tickMarkers) then
         return nil
     end
 
@@ -116,7 +112,6 @@ local function BuildChannelDefinitionFromEntry(spec, entry, index)
     end
 
     local options = GetEntryHelperOptions(spec, entry, index)
-    local fqOpts = options.fakeQueue or {}
     local clipOpts = options.clipOverlay or options.channel or {}
     local markerOpts = options.tickMarkers or {}
     local soundOpts = options.tickSound or {}
@@ -131,12 +126,6 @@ local function BuildChannelDefinitionFromEntry(spec, entry, index)
         ticks = tonumber(def.ticks) or 0,
         duration = def.duration or def.castTime,
         tickInterval = def.tickInterval,
-        fakeQueue = helpers.fakeQueue == true,
-        fakeQueueMaxMs = fqOpts.maxMs,
-        fqFireOffsetMs = fqOpts.fireOffsetMs,
-        fqDiag = fqOpts.diagnostics,
-        fqAutoAdjust = fqOpts.autoAdjust,
-        fqAllowNegative = fqOpts.allowNegative,
         clipOverlay = helpers.clipOverlay == true,
         minDuration = clipOpts.minDuration,
         clipReasons = clipOpts.clipReasons or {},
@@ -229,12 +218,6 @@ local function NormalizeChannelSpellEntry(entry, fallbackKey, fallbackName)
         spellKey = spellKey,
         spellName = spellName,
         ticks = ticks,
-        fakeQueue = ResolveEntryFlag("fakeQueue", defaultOn),
-        fakeQueueMaxMs = entry.fakeQueueMaxMs,
-        fqFireOffsetMs = entry.fqFireOffsetMs,
-        fqDiag = entry.fqDiag,
-        fqAutoAdjust = entry.fqAutoAdjust,
-        fqAllowNegative = entry.fqAllowNegative,
         clipOverlay = ResolveEntryFlag("clipOverlay", defaultOn),
         minDuration = entry.minDuration,
         clipReasons = entry.clipReasons or {},
@@ -395,7 +378,7 @@ function CH:GetChannelInfoForSpell(spellName, spellID)
     local info = {
         castType = "channel",
         ticks = (def and def.ticks) or 3,
-        fakeQueue = ResolveFlag("fakeQueue", false),
+
         clipOverlay = ResolveFlag("clipOverlay", false),
         tickSound = ResolveFlag("tickSound", false),
         tickSoundTicks = def and def.tickSoundTicks or {},
@@ -489,21 +472,7 @@ CH._config = {
     fakeQueueEnabled = true,
     fakeQueueMaxMs   = CH.FAKE_QUEUE_SCRIPT_SAFE_MS,
     clipMarginMs     = 50,
-    -- FQ precision tuning --------------------------------------------------
-    -- fqFireOffsetMs: milliseconds added to the predicted tick time before
-    -- the FQ busy-wait exits.  0 = fire at the predicted tick; negative =
-    -- fire that many ms before the tick (pre-compensates for network lag so
-    -- the cast reaches the server at tick time).  Typical ideal value:
-    --   -(oneWayLatency_ms)  →  cast arrives at server right at the tick.
-    -- Tune using the diagnostic output printed after each FQ activation.
-    fqFireOffsetMs   = 30,  -- safety buffer ms on top of baked-in latency compensation
-    -- fqDiag: when true, print per-tick timing diagnostics after each FQ.
-    fqDiag           = true,
-    -- fqAutoAdjust: [EXPERIMENTAL] when true, automatically nudge fqFireOffsetMs each
-    -- tick to drive the EMA drift toward 0.  Requires fqDiag data (needs ~5 warmup ticks).
-    fqAutoAdjust     = false,
-    -- Allow negative fq offsets when explicitly enabled in the spec UI.
-    fqAllowNegative  = false,
+    fqFireOffsetMs   = 15,  -- ms after perfect timing to release (0 = exactly at tick, +15 = 15ms after)
     inputLagMs       = 0,   -- populated from GetNetStats
 }
 
@@ -528,12 +497,7 @@ function CH:LoadChannelSpells(spec)
             self.KNOWN_CHANNELS[cs.spellName] = {
                 castType    = "channel",
                 ticks       = cs.ticks or 3,
-                fakeQueue   = fromRotation and (cs.fakeQueue == true) or A.SpecVal(prefix .. "fakeQueue", cs.fakeQueue ~= false),
-                fakeQueueMaxMs = cs.fakeQueueMaxMs,
-                fqFireOffsetMs = cs.fqFireOffsetMs,
-                fqDiag = cs.fqDiag,
-                fqAutoAdjust = cs.fqAutoAdjust,
-                fqAllowNegative = cs.fqAllowNegative,
+
                 clipOverlay = fromRotation and (cs.clipOverlay == true) or A.SpecVal(prefix .. "clipOverlay", cs.clipOverlay ~= false),
                 minDuration = cs.minDuration,
                 clipReasons = cs.clipReasons or {},
@@ -572,12 +536,6 @@ function CH:UpdateConfig(spec)
     -- Read from per-spec DB
     self._config.fakeQueueEnabled = A.SpecVal("channelFakeQueue", true)
     self._config.clipCues         = A.SpecVal("channelClipCues",  true)
-    local diagVal = A.SpecVal("fqDiag", true)
-    self._config.fqDiag = (diagVal == true or diagVal == 1)
-    local autoVal = A.SpecVal("fqAutoAdjust", false)
-    self._config.fqAutoAdjust = (autoVal == true or autoVal == 1)
-    local allowNeg = A.SpecVal("fqAllowNegative", false)
-    self._config.fqAllowNegative = (allowNeg == true or allowNeg == 1)
 
     if tonumber(rawMaxMs) and tonumber(rawMaxMs) > self._config.fakeQueueMaxMs then
         if A.SetSpecVal then
@@ -625,25 +583,7 @@ function CH:OnChannelStart(spellName, startTime, endTime, spellID)
 end
 
 function CH:OnChannelStop()
-    -- If an FQ run happened but the target tick never arrived, report a
-    -- clipped event so the user can see that the release did not produce
-    -- the awaited tick. This helps identify when an early release skipped
-    -- the tick (clipped too soon).
-    if self._fqLastHeldMs and self._fqTargetTickN and (self._state.ticksSoFar < self._fqTargetTickN) then
-        if self._config.fqDiag then
-            local held = self._fqLastHeldMs or 0
-            print(string.format("|cff8882d5SPHelper|r: FQ held |cffffcc00%dms|r — tick did NOT occur |cffff4444(clipped)|r", held))
-            print(string.format("|cff8882d5SPHelper FQ diag|r target tick=%d/%d  lat=%dms  off=%dms",
-                self._fqTargetTickN or 0, self._state.tickCount or 0, math.floor((self._state.latency or 0) * 1000), self._config.fqFireOffsetMs))
-        end
-    end
-
-    -- Clear any pending FQ state
-    self._fqExitDbp     = nil
-    self._fqTargetTickN = nil
-    self._fqLastHeldMs  = nil
     A._fqBlocking       = false
-
     self._state.active = false
     self._activeChannelInfo = nil
     HideAllClipOverlays(self)
@@ -659,107 +599,7 @@ end
 
 function CH:OnTick()
     if not self._state.active then return end
-    -- Record precise arrival time FIRST, before any work, for accurate delta.
-    local cleuDbp = debugprofilestop()
     self._state.ticksSoFar = self._state.ticksSoFar + 1
-
-    -- Drift diagnostic: how long before/after the actual CLEU did the FQ exit?
-    -- delta_ms < 0: FQ exited BEFORE this tick CLEU arrived (good, cast queued early)
-    -- delta_ms > 0: FQ exited AFTER  this tick CLEU arrived (bad, visible delay)
-    if self._fqExitDbp
-       and self._fqTargetTickN == self._state.ticksSoFar then
-        local delta_ms = self._fqExitDbp - cleuDbp   -- fqExit relative to CLEU arrival
-        -- Running EMA (smoother: heavier history to reduce noise)
-        if not self._fqDriftEMA then self._fqDriftEMA = delta_ms end
-        local hist_w, samp_w = 0.85, 0.15
-        self._fqDriftEMA = self._fqDriftEMA * hist_w + delta_ms * samp_w
-        self._fqSampleCount = (self._fqSampleCount or 0) + 1
-        -- Friendly summary for the user: show how long the FQ held and how
-        -- long between release and the tick arrival. Color the number green
-        -- when the tick occurred after the release (good), red when the
-        -- tick occurred before the release (release too late) — see
-        -- OnChannelStop for the case where the tick never occurred.
-        if self._config.fqDiag then
-            local held_ms = self._fqLastHeldMs or 0
-            local rel_ms = math.floor((cleuDbp - self._fqExitDbp) + 0.5)  -- positive => tick after release
-            local col = rel_ms >= 0 and "|cff00ff00" or "|cffff4444"
-            local rel_text = string.format("%+dms", rel_ms)
-            print(string.format("|cff8882d5SPHelper|r: FQ held |cffffcc00%dms|r  —  tick %s%s|r", held_ms, col, rel_text))
-        end
-
-        -- No transient overlay action here; overlay is shown continuously
-        -- for the clip window while channeling (handled in UpdateCastbarOverlay).
-
-        -- Detailed diagnostics printed only when enabled.
-        -- With latency baked in, ideal delta_ms = -(2*lat_ms) + fqFireOffsetMs.
-        -- When offset=0: cast arrives AT the tick → delta = -(2*lat_ms).
-        -- When offset=+N: cast arrives N ms after tick → delta = -(2*lat_ms)+N.
-        if self._config.fqDiag then
-            local lat_ms = math.floor(self._state.latency * 1000)
-            -- SAFETY_MS is the built-in buffer above the tick boundary.
-            local SAFETY_MS = 30
-            local ideal = -(2 * lat_ms) + SAFETY_MS  -- e.g. lat=82 → -164+30 = -134ms
-            print(string.format(
-                "|cff8882d5SPHelper FQ diag|r t%d/%d  delta |cffffcc00%+.0fms|r  avg |cffffcc00%+.0fms|r  ideal %+dms  lat=%dms  off=%+dms",
-                self._state.ticksSoFar, self._state.tickCount,
-                delta_ms, self._fqDriftEMA, ideal, lat_ms,
-                self._config.fqFireOffsetMs))
-        end
-        if self._config.fqAutoAdjust then
-            local warmupSamples = 8
-            local gain    = 0.15  -- fraction of error per step
-            local maxStep = 10    -- ms cap per step
-            local deadband = 5    -- ignore errors smaller than this (ms)
-            -- SAFETY_MS: target cast arrival N ms after tick, not at the boundary.
-            -- With latency baked in, ideal delta = -(2*lat) + SAFETY_MS.
-            -- Offset = 0 is the minimum safe point; auto-tune aims for +SAFETY_MS.
-            local SAFETY_MS = 30
-            if (self._fqSampleCount or 0) >= warmupSamples then
-                local lat_ms = math.floor(self._state.latency * 1000)
-                local ideal  = -(2 * lat_ms) + SAFETY_MS
-                -- Hard floor: by default offset must stay >= 0 to avoid early
-                -- releases that bypass baked-in latency compensation.
-                -- If the spec explicitly enables negative offsets, allow a
-                -- reasonable negative range for advanced users.
-                local hardFloor = (self._config.fqAllowNegative and -200) or 0
-                local err = self._fqDriftEMA - ideal
-                if math.abs(err) > deadband then
-                    local raw = math.abs(err * gain)
-                    local s = math.floor(raw + 0.5)
-                    if s > maxStep then s = maxStep end
-                    local step = (err >= 0) and s or -s
-                    local newOff = math.min(200,
-                        math.max(hardFloor,
-                            self._config.fqFireOffsetMs - step))
-                    if newOff ~= self._config.fqFireOffsetMs then
-                        self._config.fqFireOffsetMs = newOff
-                        if A.SetSpecVal then pcall(A.SetSpecVal, "fqFireOffsetMs", newOff) end
-                        -- If the SpecUI is open on the CastBar tab, refresh it so
-                        -- the slider reflects the new DB value immediately.
-                        pcall(function()
-                            if A.SpecUI and A.SpecUI.frame and A.SpecUI.frame:IsShown() and A.SpecUI._activeTab == 4 then
-                                if A.SpecUI.RefreshCurrentTab then
-                                    A.SpecUI:RefreshCurrentTab()
-                                else
-                                    A.SpecUI:SwitchTab(4, nil, true)
-                                end
-                            end
-                        end)
-                        if self._config.fqDiag then
-                            print(string.format(
-                                "|cff8882d5SPHelper FQ auto-tune|r: err |cffffcc00%+.0fms|r ideal %+dms step %+dms -> offset -> |cffffcc00%+dms|r",
-                                err, ideal, step, newOff))
-                        end
-                    end
-                end
-            end
-        end
-    end
-    -- Clear FQ state so we do not process diagnostics for ticks that had no FQ.
-    self._fqExitDbp     = nil
-    self._fqTargetTickN = nil
-    self._fqLastHeldMs  = nil
-
     self:_RecalcClipWindow()
 end
 
@@ -971,42 +811,8 @@ end
 -- at the optimal moment.
 ------------------------------------------------------------------------
 
-function CH:GetFakeQueueOptionsForSpell(spellArg)
-    if not spellArg or not A.SpecManager or not A.SpecManager.GetActiveSpecs then return nil end
-    local needle = tostring(spellArg)
-    local activeSpecs = A.SpecManager:GetActiveSpecs() or {}
-    for _, spec in pairs(activeSpecs) do
-        local rotation = GetRotationForSpec(spec)
-        if type(rotation) == "table" then
-            for index, entry in ipairs(rotation) do
-                if entry and entry.helpers and entry.helpers.fakeQueue == true then
-                    local def = A.GetSpellDefinition and A.GetSpellDefinition(entry.key)
-                    local spellID = def and (def.id or def.baseId) or (A.ResolveSpellID and A.ResolveSpellID(entry.key))
-                    local spellName = def and def.name or entry.key
-                    if needle == tostring(entry.key) or needle == tostring(spellName) or (spellID and needle == tostring(spellID)) then
-                        local options = GetEntryHelperOptions(spec, entry, index)
-                        return options.fakeQueue or {}
-                    end
-                end
-            end
-        end
-    end
-    return nil
-end
-
 function CH:FakeQueue(spellArg)
-    local spellFQOptions = self.GetFakeQueueOptionsForSpell and self:GetFakeQueueOptionsForSpell(spellArg) or nil
     local maxWaitMs = self:GetEffectiveFakeQueueMaxMs()
-    if (not self._state.active) and spellFQOptions and spellFQOptions.maxMs ~= nil then
-        maxWaitMs = ClampFakeQueueMaxMs(spellFQOptions.maxMs)
-    end
-    local diagEnabled = self._config and self._config.fqDiag
-    if spellFQOptions and spellFQOptions.diagnostics ~= nil then
-        diagEnabled = spellFQOptions.diagnostics ~= false
-    end
-    if self._state.active and self._activeChannelInfo and self._activeChannelInfo.fqDiag ~= nil then
-        diagEnabled = self._activeChannelInfo.fqDiag ~= false
-    end
     local maxWait = maxWaitMs / 1000
     if maxWait <= 0 then return end
 
@@ -1035,30 +841,21 @@ function CH:FakeQueue(spellArg)
         if hint and hint.fireAt then
             local now = GetTime()
             local needed = hint.fireAt - now
-            if needed <= 0 or needed > maxWait then
-                if diagEnabled and needed > maxWait then
-                    if not self._lastDotFQSkipPrint or (now - self._lastDotFQSkipPrint) >= 2.0 then
-                        self._lastDotFQSkipPrint = now
-                        print(string.format(
-                            "|cff8882d5SPHelper|r: DoT FQ skipped — wait |cffffcc00%dms|r exceeds budget |cffffcc00%dms|r",
-                            math.floor(needed * 1000 + 0.5), maxWaitMs))
-                    end
-                end
-                return
+
+            -- If the fire-at delay is too long or already past, check whether
+            -- a DoT tick is imminent (within budget). If so, delay for the
+            -- tick so it lands before the refresh, avoiding a clipped tick.
+            if (needed <= 0 or needed > maxWait) and hint.nextTickIn
+                and hint.nextTickIn > 0 and hint.nextTickIn <= maxWait then
+                needed = hint.nextTickIn
             end
+
+            if needed <= 0 or needed > maxWait then return end
             local needed_ms = needed * 1000
             local start_dbp = debugprofilestop()
             A._fqBlocking = true
             repeat until (debugprofilestop() - start_dbp) >= needed_ms
             A._fqBlocking = false
-            if diagEnabled then
-                local now2 = GetTime()
-                if not self._lastDotFQPrint or (now2 - self._lastDotFQPrint) >= 2.0 then
-                    self._lastDotFQPrint = now2
-                    print(string.format("|cff8882d5SPHelper|r: DoT FQ held |cffffcc00%dms|r (%s)",
-                        math.floor(needed_ms + 0.5), spellArg or "?"))
-                end
-            end
         end
         return
     end
@@ -1067,39 +864,26 @@ function CH:FakeQueue(spellArg)
     -- Channel-clip mode (original behaviour)
     -- ------------------------------------------------------------------
     if not self._config.fakeQueueEnabled then return end
-    if self._activeChannelInfo and self._activeChannelInfo.fakeQueue == false then return end
 
     local s = self._state
 
     -- ---------------------------------------------------------------
     -- Compute the next upcoming tick time we should wait for.
     --
-    -- The cast travels to the server in one-way latency (lat_s seconds).
-    -- To arrive exactly AT the server tick:
-    --   release at: T_tick - lat_s
-    -- fqFireOffsetMs adds a fine-tune buffer ON TOP of that compensation:
-    --   0ms   = release exactly at T_tick - lat_s  (boundary: cast arrives at tick)
-    --   +30ms = release 30ms later   → cast arrives 30ms AFTER tick (safe)
-    --   -20ms = release 20ms earlier → cast arrives 20ms BEFORE tick (risky/clipped)
-    -- Latency compensation (-lat_s) is baked in; offset is only a small adjustment.
+    -- lat_s = one-way latency to server (seconds).
+    --   release at: T_tick - lat_s + fineOffset
+    -- With offset = 0, the cast arrives at the server exactly at T_tick.
+    -- With offset = +15ms (default), the cast arrives 15ms after T_tick (safe).
     -- ---------------------------------------------------------------
     local lat_s      = s.latency            -- one-way latency in seconds
-    local offsetMs   = self._config.fqFireOffsetMs
-    if self._activeChannelInfo and self._activeChannelInfo.fqFireOffsetMs ~= nil then
-        offsetMs = tonumber(self._activeChannelInfo.fqFireOffsetMs) or offsetMs
-    end
-    local fineOffset = offsetMs / 1000  -- fine-tune seconds
+    local fineOffset = self._config.fqFireOffsetMs / 1000
     local now        = GetTime()
 
     local targetTime = nil
-    local targetTickN = nil
     for n = (s.ticksSoFar + 1), s.tickCount do
-        -- T_tick - lat_s = exact release for cast to arrive at server tick.
-        -- + fineOffset adds the small user/auto-tune buffer.
         local tickTime = s.startTime + (n * s.tickInterval) - lat_s + fineOffset
         if tickTime > now then
-            targetTime  = tickTime
-            targetTickN = n
+            targetTime = tickTime
             break
         end
     end
@@ -1110,19 +894,7 @@ function CH:FakeQueue(spellArg)
 
     -- Skip if the target is more than maxWait away (would freeze too long)
     -- or already past (nothing to wait for).
-    if needed > maxWait then
-        if diagEnabled then
-            local now2 = GetTime()
-            if not self._lastFQSkipPrint or (now2 - self._lastFQSkipPrint) >= 2.0 then
-                self._lastFQSkipPrint = now2
-                print(string.format(
-                    "|cff8882d5SPHelper|r: FQ skipped |cffffcc00%dms|r wait exceeds safe macro budget |cffffcc00%dms|r",
-                    math.floor((needed * 1000) + 0.5),
-                    maxWaitMs))
-            end
-        end
-        return
-    end
+    if needed > maxWait then return end
     if needed <= 0 then return end
 
     -- ---------------------------------------------------------------
@@ -1139,21 +911,6 @@ function CH:FakeQueue(spellArg)
     repeat until (debugprofilestop() - start_dbp) >= needed_ms
     A._fqBlocking    = false
 
-    -- Record exit timestamp for drift diagnostic in OnTick().
-    self._fqExitDbp     = debugprofilestop()
-    self._fqTargetTickN = targetTickN
-    -- Save held duration (ms) so OnTick / OnChannelStop can report it later
-    self._fqLastHeldMs   = math.floor(needed_ms + 0.5)
-
-    -- Throttled console notice (shows wait only; detailed tick timing printed in OnTick)
-    local waited_ms = math.floor(needed_ms + 0.5)
-    if waited_ms >= 1 and diagEnabled then
-        local now2 = GetTime()
-        if not CH._lastFQPrint or (now2 - CH._lastFQPrint) >= 2.0 then
-            CH._lastFQPrint = now2
-            print(string.format("|cff8882d5SPHelper|r: FQ held |cffffcc00%dms|r", waited_ms))
-        end
-    end
 end
 
 -- Expose global function for macros
@@ -1208,7 +965,7 @@ function CH:GetMacroSpells()
             local rotation = GetRotationForSpec(spec)
             if rotation then
                 for _, entry in ipairs(rotation) do
-                    if entry and entry.key and entry.helpers and entry.helpers.fakeQueue == true then
+                    if entry and entry.key and entry.helpers then
                         local spell = A.GetSpellDefinition and A.GetSpellDefinition(entry.key)
                         if spell and spell.name then
                             add(spell.name)
@@ -1223,15 +980,11 @@ function CH:GetMacroSpells()
     if not hasExplicitHelpers then
         if self._channelSpellDefs and #self._channelSpellDefs > 0 then
             for _, cs in ipairs(self._channelSpellDefs) do
-                if cs.fakeQueue ~= false then
-                    add(cs.spellName)
-                end
+                add(cs.spellName)
             end
         elseif self.KNOWN_CHANNELS then
-            for spellName, info in pairs(self.KNOWN_CHANNELS) do
-                if not info or info.fakeQueue ~= false then
-                    add(spellName)
-                end
+            for spellName, _ in pairs(self.KNOWN_CHANNELS) do
+                add(spellName)
             end
         end
 
@@ -1244,7 +997,7 @@ function CH:GetMacroSpells()
                     for _, entry in ipairs(rotation) do
                         if entry.key and entry.conditions then
                             for _, cond in ipairs(entry.conditions) do
-                                if cond and cond.type == "projected_dot_time_left_lt" then
+                                if cond and (cond.type == "projected_dot_time_left_lt" or cond.type == "dot_missing") then
                                     local spell = A.SPELLS and A.SPELLS[entry.key]
                                     if spell and spell.name then
                                         add(spell.name)

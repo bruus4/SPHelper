@@ -8,6 +8,7 @@
 # Core must load first
 Core.lua
 SpellDatabase.lua
+TalentDatabase.lua
 
 # Spec system (manager then validator, before helpers and specs)
 SpecManager.lua
@@ -31,3 +32,21 @@ Config.lua
 specs\Shadow_Priest.lua
 specs\Druid_Balance.lua
 specs\Feral_Druid.lua
+specs\Hunter_BeastMastery.lua
+specs\Hunter_Marksmanship.lua
+specs\Hunter_Survival.lua
+specs\Mage_Arcane.lua
+specs\Mage_Fire.lua
+specs\Mage_Frost.lua
+specs\Paladin_Retribution.lua
+specs\Rogue_Assassination.lua
+specs\Rogue_Combat.lua
+specs\Rogue_Subtlety.lua
+specs\Shaman_Elemental.lua
+specs\Shaman_Enhancement.lua
+specs\Warlock_Affliction.lua
+specs\Warlock_Demonology.lua
+specs\Warlock_Demonology_Leveling.lua
+specs\Warlock_Destruction.lua
+specs\Warrior_Arms.lua
+specs\Warrior_Fury.lua

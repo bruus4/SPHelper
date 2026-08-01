@@ -17,6 +17,22 @@ local spec = {
         version  = 1,
     },
 
+    -- Setting version tracking.
+    -- Increment settingVersion when changes affect saved settings users may
+    -- have customized.  Document each version's changes in settingChanges.
+    -- See Core.lua A.ProcessSettingChanges for how these are consumed.
+    settingVersion = 3,
+    settingChanges = {
+        [2] = {
+            defaults = { "veDungeon" },   -- default value changed → prompt if user has override
+            notes    = { "veDungeon default changed from 'always' to 'elite+'" },
+        },
+        [3] = {
+            defaults = { "swdWorld", "swdRaid", "swdSafetyPct", "potManaThreshold", "runeManaThreshold" },
+            notes    = { "SW:D defaults: world='execute', raid='always', safety 0%. Mana potion 20%, rune 15%." },
+        },
+    },
+
     loadConditions = {
         class          = "PRIEST",
         talentTab      = 3,          -- Shadow talent tree
@@ -52,6 +68,7 @@ local spec = {
       { key = "vampiric_touch",    spellKey = "Vampiric Touch", color = "VT",  isDot = true },
       { key = "mind_soothe",       spellKey = "Mind Soothe", duration = 15, color = "MS", isDot = false },  -- no DB duration (Mind Soothe is not a standard aura)
       { key = "shackle_undead",    spellKey = "Shackle Undead", color = "SU",  isDot = false },
+      { key = "vampiric_embrace", spellKey = "Vampiric Embrace", color = "VE", isDot = false },
     },
 
     trackedBuffs = {
@@ -65,59 +82,95 @@ local spec = {
     -- The General tab is auto-generated from these definitions in the
     -- order they are first referenced in the rotation, followed by any
     -- remaining settings in settingOrder.
+    -- Settings with a `group` field are visually grouped together under
+    -- that group header with a separator line between groups.
     -------------------------------------------------------------------
     settingDefs = {
-        use_SWD           = { type = "checkbox", label = "Use Shadow Word: Death", default = true,
-                              tooltip = "Include Shadow Word: Death in the rotation (see per-content SW:D settings below)." },
-        use_DP            = { type = "checkbox", label = "Use Devouring Plague",   default = true,
-                              tooltip = "Include Devouring Plague in the rotation." },
-        use_SF            = { type = "checkbox", label = "Use Shadowfiend",        default = true,
-                              tooltip = "Include Shadowfiend in the rotation." },
-        sfManaThreshold   = { type = "slider",   label = "Shadowfiend mana %",    default = 35, min = 5, max = 100, step = 5,
-                              tooltip = "Suggest Shadowfiend when mana drops below this percentage." },
-        suggestPot        = { type = "checkbox", label = "Suggest mana potion",    default = true,
-                              tooltip = "Show mana potion in rotation suggestions when low on mana." },
-        potManaThreshold  = { type = "slider",   label = "Potion mana %",         default = 70, min = 5, max = 100, step = 5,
-                              tooltip = "Suggest mana potion when mana drops below this percentage." },
-        suggestRune       = { type = "checkbox", label = "Suggest dark rune",      default = true,
-                              tooltip = "Show dark/demonic rune in rotation suggestions when low on mana." },
-        runeManaThreshold = { type = "slider",   label = "Rune mana %",           default = 40, min = 5, max = 100, step = 5,
-                              tooltip = "Suggest rune when mana drops below this percentage." },
-        vtMinTTD          = { type = "slider",   label = "Vampiric Touch min target TTD",  default = 12, min = 0, max = 30, step = 1,
-                              tooltip = "Only suggest Vampiric Touch when the target will live at least this many seconds. 0 = disabled." },
-        swpMinTTD         = { type = "slider",   label = "Shadow Word: Pain min target TTD", default = 8, min = 0, max = 30, step = 1,
-                              tooltip = "Only suggest Shadow Word: Pain when the target will live at least this many seconds. 0 = disabled." },
-        multidotMaxVTTargets  = { type = "slider", label = "Vampiric Touch max targets",     default = 3, min = 1, max = 8, step = 1,
-                              tooltip = "Maximum targets to keep Vampiric Touch on. 1 = single-target only." },
-        multidotMaxSWPTargets = { type = "slider", label = "Shadow Word: Pain max targets",   default = 4, min = 1, max = 8, step = 1,
-                              tooltip = "Maximum targets to keep Shadow Word: Pain on. 1 = single-target only." },
-        swdWorld          = { type = "dropdown", label = "Shadow Word: Death (world)",   default = "always",  values = {"always","execute","never"},
-                              tooltip = "When to suggest SW:D in open world. 'execute' = below kill threshold only." },
-        swdDungeon        = { type = "dropdown", label = "Shadow Word: Death (dungeon)", default = "always",  values = {"always","execute","never"},
-                              tooltip = "When to suggest SW:D in dungeons." },
-        swdRaid           = { type = "dropdown", label = "Shadow Word: Death (raid)",    default = "execute", values = {"always","execute","never"},
-                              tooltip = "When to suggest SW:D in raids. 'execute' recommended to avoid self-damage." },
-        swdSafetyPct      = { type = "slider",   label = "SW:D safety margin %",        default = 10, min = 0, max = 50, step = 1,
-                              tooltip = "Extra HP margin for SW:D kill prediction. Higher = more conservative." },
-        ["ifInsert.enabled"]     = { type = "checkbox", label = "Suggest Inner Focus",    default = true,
-                              tooltip = "Insert Inner Focus before a spell for free crit + mana save." },
-        ["ifInsert.onlyForBoss"] = { type = "checkbox", label = "Inner Focus bosses only", default = true,
-                              tooltip = "Only suggest Inner Focus on boss encounters." },
-        ["ifInsert.before"]      = { type = "dropdown", label = "Inner Focus before",      default = "Mind Blast",
-                              values = {"Mind Blast","Shadow Word: Pain","Devouring Plague"},
-                              tooltip = "Which spell to cast Inner Focus before." },
+        -- Shadow Word: Death group
+        use_SWD           = { type = "checkbox", label = "Use Shadow Word: Death", default = true, group = "Shadow Word: Death",
+                               tooltip = "Include Shadow Word: Death in the rotation (see per-content SW:D settings below)." },
+        swdWorld          = { type = "dropdown", label = "SW:D (world)",   default = "execute",  values = {"always","execute","never"}, group = "Shadow Word: Death",
+                               tooltip = "When to suggest SW:D in open world. 'execute' = below kill threshold only." },
+        swdDungeon        = { type = "dropdown", label = "SW:D (dungeon)", default = "always",  values = {"always","execute","never"}, group = "Shadow Word: Death",
+                               tooltip = "When to suggest SW:D in dungeons." },
+        swdRaid           = { type = "dropdown", label = "SW:D (raid)",    default = "always", values = {"always","execute","never"}, group = "Shadow Word: Death",
+                               tooltip = "When to suggest SW:D in raids. 'execute' recommended to avoid self-damage." },
+        swdSafetyPct      = { type = "slider",   label = "SW:D safety margin %",        default = 0, min = 0, max = 50, step = 1, group = "Shadow Word: Death",
+                               tooltip = "Extra HP margin for SW:D kill prediction. Higher = more conservative." },
+
+        -- Vampiric Touch group
+        vtMinTTD          = { type = "slider",   label = "VT min target TTD",  default = 12, min = 0, max = 30, step = 1, group = "Vampiric Touch",
+                               tooltip = "Only suggest Vampiric Touch when the target will live at least this many seconds. 0 = disabled." },
+        multidotMaxVTTargets  = { type = "slider", label = "VT max targets",     default = 5, min = 1, max = 8, step = 1, group = "Vampiric Touch",
+                               tooltip = "Maximum targets to keep Vampiric Touch on. 1 = single-target only." },
+
+        -- Shadow Word: Pain group
+        swpMinTTD         = { type = "slider",   label = "SW:P min target TTD", default = 8, min = 0, max = 30, step = 1, group = "Shadow Word: Pain",
+                               tooltip = "Only suggest Shadow Word: Pain when the target will live at least this many seconds. 0 = disabled." },
+        multidotMaxSWPTargets = { type = "slider", label = "SW:P max targets",   default = 4, min = 1, max = 8, step = 1, group = "Shadow Word: Pain",
+                               tooltip = "Maximum targets to keep Shadow Word: Pain on. 1 = single-target only." },
+
+        -- Devouring Plague group
+        use_DP            = { type = "checkbox", label = "Use Devouring Plague",   default = true, group = "Devouring Plague",
+                               tooltip = "Include Devouring Plague in the rotation." },
+
+        -- Inner Focus group
+        ["ifInsert.enabled"]     = { type = "checkbox", label = "Suggest Inner Focus",    default = true, group = "Inner Focus",
+                               tooltip = "Insert Inner Focus before a spell for free crit + mana save." },
+        ["ifInsert.onlyForBoss"] = { type = "checkbox", label = "Inner Focus bosses only", default = true, group = "Inner Focus",
+                               tooltip = "Only suggest Inner Focus on boss encounters." },
+        ["ifInsert.before"]      = { type = "dropdown", label = "Inner Focus before",      default = "Mind Blast", group = "Inner Focus",
+                               values = {"Mind Blast","Shadow Word: Pain","Devouring Plague"},
+                               tooltip = "Which spell to cast Inner Focus before." },
+
+        -- Vampiric Embrace group
+        veWorld   = { type = "dropdown", label = "VE (world)",   default = "elite+", group = "Vampiric Embrace",
+                               values = {"always", "elite+", "boss", "never"},
+                               tooltip = "Use Vampiric Embrace on world mobs by classification." },
+        veDungeon = { type = "dropdown", label = "VE (dungeon)", default = "elite+", group = "Vampiric Embrace",
+                               values = {"always", "elite+", "boss", "never"},
+                               tooltip = "Use Vampiric Embrace on elite+ enemies in 5-man dungeons." },
+        veRaid    = { type = "dropdown", label = "VE (raid)",    default = "never", group = "Vampiric Embrace",
+                               values = {"always", "elite+", "boss", "never"},
+                               tooltip = "Use Vampiric Embrace in raids (boss recommended to manage threat)." },
+
+        -- Bonus abilities group (trinkets, potions, runes, shadowfiend)
+        use_trinket_1            = { type = "checkbox", label = "Use trinket 1 (on-use)",  default = true, group = "Bonus Abilities",
+                                       tooltip = "Activate trinket 1 on cooldown automatically." },
+        trinket_1_classification = { type = "dropdown", label = "Trinket 1 target type",   default = "any", group = "Bonus Abilities",
+                                       tooltip = "Restrict trinket 1 to: any, normal, elite, or boss.",
+                                       values = { "any", "normal", "elite", "boss" } },
+        use_trinket_2            = { type = "checkbox", label = "Use trinket 2 (on-use)",  default = true, group = "Bonus Abilities",
+                                       tooltip = "Activate trinket 2 on cooldown automatically." },
+        trinket_2_classification = { type = "dropdown", label = "Trinket 2 target type",   default = "any", group = "Bonus Abilities",
+                                       tooltip = "Restrict trinket 2 to: any, normal, elite, or boss.",
+                                       values = { "any", "normal", "elite", "boss" } },
+        use_SF            = { type = "checkbox", label = "Use Shadowfiend",        default = true, group = "Bonus Abilities",
+                               tooltip = "Include Shadowfiend in the rotation (shown as bonus slot)." },
+        sfManaThreshold   = { type = "slider",   label = "Shadowfiend mana %",    default = 35, min = 5, max = 100, step = 5, group = "Bonus Abilities",
+                               tooltip = "Suggest Shadowfiend when mana drops below this percentage." },
+        suggestPot        = { type = "checkbox", label = "Suggest mana potion",    default = true, group = "Bonus Abilities",
+                               tooltip = "Show mana potion in rotation suggestions when low on mana." },
+        potManaThreshold  = { type = "slider",   label = "Potion mana %",         default = 20, min = 5, max = 100, step = 5, group = "Bonus Abilities",
+                               tooltip = "Suggest mana potion when mana drops below this percentage." },
+        suggestRune       = { type = "checkbox", label = "Suggest dark rune",      default = true, group = "Bonus Abilities",
+                               tooltip = "Show dark/demonic rune in rotation suggestions when low on mana." },
+        runeManaThreshold = { type = "slider",   label = "Rune mana %",           default = 15, min = 5, max = 100, step = 5, group = "Bonus Abilities",
+                               tooltip = "Suggest rune when mana drops below this percentage." },
     },
 
     -- Preferred rendering order for settings that aren't rotation-referenced.
     settingOrder = {
-        "use_SWD", "use_DP", "use_SF",
-        "sfManaThreshold",
+        "use_SWD", "swdWorld", "swdDungeon", "swdRaid", "swdSafetyPct",
+        "vtMinTTD", "multidotMaxVTTargets",
+        "swpMinTTD", "multidotMaxSWPTargets",
+        "use_DP",
+        "ifInsert.enabled", "ifInsert.onlyForBoss", "ifInsert.before",
+        "veWorld", "veDungeon", "veRaid",
+        "use_trinket_1", "trinket_1_classification", "use_trinket_2", "trinket_2_classification",
+        "use_SF", "sfManaThreshold",
         "suggestPot", "potManaThreshold",
         "suggestRune", "runeManaThreshold",
-        "vtMinTTD", "swpMinTTD",
-        "multidotMaxVTTargets", "multidotMaxSWPTargets",
-        "swdWorld", "swdDungeon", "swdRaid", "swdSafetyPct",
-        "ifInsert.enabled", "ifInsert.onlyForBoss", "ifInsert.before",
     },
 
     -------------------------------------------------------------------
@@ -133,10 +186,7 @@ local spec = {
             fakeQueue   = true,   -- enable FQ for this spell
             clipOverlay = true,   -- show green clip zone
         minDuration = 1.0,    -- minimum channel duration required before clipping
-        -- Only DoT refreshes are allowed to clip Mind Flay here. Mind Blast is
-        -- intentionally excluded so it cannot preempt the channel before the
-        -- filler chain has actually finished.
-        clipReasons = { "Vampiric Touch", "Shadow Word: Pain" },
+        clipReasons = { "Mind Blast", "Vampiric Touch", "Shadow Word: Pain" },
             tickSound   = true,   -- tick sound feedback
             tickFlash   = true,   -- tick flash feedback
             tickMarkers = true,   -- show tick markers on bar
@@ -178,9 +228,11 @@ local spec = {
     -- Rotation — core spells (Vampiric Touch, Shadow Word: Pain, Mind Blast, Mind Flay) are always on.
     -- Optional/situational spells (Devouring Plague, Shadow Word: Death, Shadowfiend) have enable toggles.
     -------------------------------------------------------------------
-    legacyRotation = {
+    rotation = {
         _fromFile = true,
         { key = "SWD_EXEC", conditions = {{ type = "spell_can_kill_target", spellKey = "Shadow Word: Death", safetyKey = "swdSafetyPct" }, { type = "cooldown_ready", spellKey = "Shadow Word: Death" }, { type = "spec_option_enabled", optionKey = "use_SWD" }} },
+        { key = "TRINKET1", optional = true, conditions = {{ type = "spec_option_enabled", optionKey = "use_trinket_1" }, { type = "target_valid" }, { type = "trinket_ready", slot = 13 }, { type = "classification_any_target", settingKey = "trinket_1_classification" }} },
+        { key = "TRINKET2", optional = true, conditions = {{ type = "spec_option_enabled", optionKey = "use_trinket_2" }, { type = "target_valid" }, { type = "trinket_ready", slot = 14 }, { type = "classification_any_target", settingKey = "trinket_2_classification" }} },
         { key = "Inner Focus",       conditions = {{ type = "spec_option_enabled", optionKey = "ifInsert.enabled" }, { type = "option_gated_classification", optionKey = "ifInsert.onlyForBoss", classification = "boss" }, { type = "cooldown_ready", spellKey = "Inner Focus" }, { type = "buff_property_compare", buff = "Inner Focus", property = "stacks", op = "==", value = 0 }}, insertBeforeKey = "ifInsert.before" },
         { key = "Vampiric Touch",       conditions = {
           { type = "projected_dot_time_left_lt", spellKey = "Vampiric Touch" },
@@ -192,8 +244,70 @@ local spec = {
           { type = "state_compare",              subject = "target_ttd", op = ">=", value = "swpMinTTD" },
           { type = "other_targets_with_debuff_lt", spellKey = "Shadow Word: Pain", count = "multidotMaxSWPTargets", seconds = 2, minTTD = "swpMinTTD" },
         } },
+        { key = "Vampiric Embrace",  conditions = {
+          { type = "cooldown_ready", spellKey = "Vampiric Embrace" },
+          { type = "in_combat" },
+          { type = "target_valid" },
+          { type = "debuff_property_compare", debuff = "Vampiric Embrace", source = "player", property = "remaining", op = "<=", value = 5 },
+          { type = "any_of", conditions = {
+            -- World: check veWorld setting
+            { type = "all_of", conditions = {
+              { type = "content_type", contentType = "world" },
+              { type = "any_of", conditions = {
+                { type = "setting_compare", optionKey = "veWorld", op = "==", value = "always" },
+                { type = "all_of", conditions = {
+                  { type = "setting_compare", optionKey = "veWorld", op = "==", value = "elite+" },
+                  { type = "any_of", conditions = {
+                    { type = "target_classification", classification = "elite" },
+                    { type = "target_classification", classification = "boss" },
+                  }},
+                }},
+                { type = "all_of", conditions = {
+                  { type = "setting_compare", optionKey = "veWorld", op = "==", value = "boss" },
+                  { type = "target_classification", classification = "boss" },
+                }},
+              }},
+            }},
+            -- Dungeon: check veDungeon setting
+            { type = "all_of", conditions = {
+              { type = "content_type", contentType = "dungeon" },
+              { type = "any_of", conditions = {
+                { type = "setting_compare", optionKey = "veDungeon", op = "==", value = "always" },
+                { type = "all_of", conditions = {
+                  { type = "setting_compare", optionKey = "veDungeon", op = "==", value = "elite+" },
+                  { type = "any_of", conditions = {
+                    { type = "target_classification", classification = "elite" },
+                    { type = "target_classification", classification = "boss" },
+                  }},
+                }},
+                { type = "all_of", conditions = {
+                  { type = "setting_compare", optionKey = "veDungeon", op = "==", value = "boss" },
+                  { type = "target_classification", classification = "boss" },
+                }},
+              }},
+            }},
+            -- Raid: check veRaid setting
+            { type = "all_of", conditions = {
+              { type = "content_type", contentType = "raid" },
+              { type = "any_of", conditions = {
+                { type = "setting_compare", optionKey = "veRaid", op = "==", value = "always" },
+                { type = "all_of", conditions = {
+                  { type = "setting_compare", optionKey = "veRaid", op = "==", value = "elite+" },
+                  { type = "any_of", conditions = {
+                    { type = "target_classification", classification = "elite" },
+                    { type = "target_classification", classification = "boss" },
+                  }},
+                }},
+                { type = "all_of", conditions = {
+                  { type = "setting_compare", optionKey = "veRaid", op = "==", value = "boss" },
+                  { type = "target_classification", classification = "boss" },
+                }},
+              }},
+            }},
+          }},
+        } },
         { key = "Mind Blast",       conditions = {{ type = "cooldown_ready", spellKey = "Mind Blast" }} },
-        { key = "Shadowfiend",       conditions = {{ type = "spec_option_enabled", optionKey = "use_SF" }, { type = "in_combat" }, { type = "target_valid" }, { type = "state_compare", subject = "player_mana_pct", op = "<", value = "sfManaThreshold" }, { type = "cooldown_ready", spellKey = "Shadowfiend" }} },
+        { key = "Shadowfiend", optional = true, conditions = {{ type = "spec_option_enabled", optionKey = "use_SF" }, { type = "in_combat" }, { type = "target_valid" }, { type = "state_compare", subject = "player_mana_pct", op = "<", value = "sfManaThreshold" }, { type = "cooldown_ready", spellKey = "Shadowfiend" }} },
         { key = "Shadow Word: Death",      conditions = {
           { type = "spec_option_enabled", optionKey = "use_SWD" },
           { type = "cooldown_ready", spellKey = "Shadow Word: Death" },
@@ -233,19 +347,11 @@ local spec = {
             }},
           }},
         } },
-        { key = "Devouring Plague",       conditions = {{ type = "spec_option_enabled", optionKey = "use_DP" }, { type = "debuff_property_compare", debuff = "Devouring Plague", source = "player", property = "remaining", op = "==", value = 0 }, { type = "cooldown_ready", spellKey = "Devouring Plague" }} },
-        { key = "POTION",   conditions = {{ type = "spec_option_enabled", optionKey = "suggestPot" }, { type = "state_compare", subject = "player_mana_pct", op = "<", value = "potManaThreshold" }, { type = "item_ready_and_owned" }} },
-        { key = "RUNE",     conditions = {{ type = "spec_option_enabled", optionKey = "suggestRune" }, { type = "state_compare", subject = "player_mana_pct", op = "<", value = "runeManaThreshold" }, { type = "item_ready_and_owned" }} },
-        -- Mind Flay is the filler.  `always` keeps it in the engine's candidate
-        -- list during the channel so the channel-clip machinery in
-        -- _BuildResultFromCandidates fires correctly: Mind Flay stays at
-        -- position 1 (with clip=true) while it channels, clip-reason spells
-        -- (MB, VT, SWP) surface at position 2 when they are ready, and the
-        -- rest of the queue populates with upcoming dot deadlines.
-        -- `isFiller = true` allows the engine to repeat Mind Flay in queue
-        -- slots 3 and 4 when no higher-priority spell is queued there,
-        -- so all four icon slots are always populated during a Mind Flay chain.
-        { key = "Mind Flay", isFiller = true, repeatLimit = 2, conditions = {{ type = "always" }} },
+        -- Devouring Plague: 20s duration; require target to live at least 15s to avoid wasting on dying targets
+        { key = "Devouring Plague",       conditions = {{ type = "spec_option_enabled", optionKey = "use_DP" }, { type = "debuff_property_compare", debuff = "Devouring Plague", source = "player", property = "remaining", op = "==", value = 0 }, { type = "cooldown_ready", spellKey = "Devouring Plague" }, { type = "state_compare", subject = "target_ttd", op = ">=", value = 15 }} },
+        { key = "POTION", optional = true, conditions = {{ type = "spec_option_enabled", optionKey = "suggestPot" }, { type = "state_compare", subject = "player_mana_pct", op = "<", value = "potManaThreshold" }, { type = "item_ready_by_key", itemKey = "selectedPotionItem" }} },
+        { key = "RUNE", optional = true, conditions = {{ type = "spec_option_enabled", optionKey = "suggestRune" }, { type = "state_compare", subject = "player_mana_pct", op = "<", value = "runeManaThreshold" }, { type = "item_ready_by_key", itemKey = "selectedRuneItem" }} },
+        { key = "Mind Flay",       conditions = {{ type = "always" }}, isFiller = true, repeatLimit = 3 },
     },
 
     -------------------------------------------------------------------
@@ -303,9 +409,7 @@ local spec = {
         end
         ctx.swpDuration = 18 + rank * 3
     end,
-  }
-
-  spec.rotation = A.SpecTemplates.BuildShadowPriestRotation(spec)
+}
 
 -- Register with SpecManager
 if A.SpecManager then

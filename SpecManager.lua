@@ -63,6 +63,21 @@ function SM:CallHelper(name, method, ...)
     return nil
 end
 
+local function NormalizeVersion(version)
+    if version == nil then return nil end
+    if type(version) == "string" then
+        local trimmed = version:match("^%s*(.-)%s*$")
+        if trimmed == "" then return nil end
+        local numeric = tonumber(trimmed)
+        if numeric ~= nil then return numeric end
+        return trimmed
+    end
+
+    local numeric = tonumber(version)
+    if numeric ~= nil then return numeric end
+    return version
+end
+
 ------------------------------------------------------------------------
 -- Spec registration
 ------------------------------------------------------------------------
@@ -95,15 +110,44 @@ function SM:RegisterSpec(spec)
         for k, v in pairs(spec.loadConditions) do spec._fileLoadConditions[k] = v end
     end
 
-    -- Apply any DB-stored override immediately so registration reflects runtime state
-    if A.db and A.db.specs and A.db.specs[spec.meta.id] and A.db.specs[spec.meta.id].loadConditionsOverride then
-        spec.loadConditions = A.db.specs[spec.meta.id].loadConditionsOverride
+    local specDB = A.db and A.db.specs and A.db.specs[spec.meta.id]
+    -- Legacy or stale versions should fall back to the file rotation.
+    local fileVersion = NormalizeVersion(spec.meta.version)
+    local savedVersion = NormalizeVersion(specDB and specDB.metaOverride and specDB.metaOverride.version)
+    local versionMatches = fileVersion ~= nil and savedVersion ~= nil and fileVersion == savedVersion
+
+    if specDB and not versionMatches and specDB.rotation ~= nil then
+        -- For premade specs (author == "SPHelper"), show confirmation popup
+        if spec.meta.author == "SPHelper" then
+            -- Defer popup to after addon load completes
+            C_Timer.After(2, function()
+                if StaticPopup_Show then
+                    StaticPopup_Show("SPHELPER_SPEC_RESET", spec.meta.specName or spec.meta.id, nil, {
+                        specID = spec.meta.id,
+                        spec = spec,
+                    })
+                end
+            end)
+        else
+            -- User-created spec: clear rotation silently
+            specDB.rotation = nil
+        end
     end
 
-    if A.db and A.db.specs and A.db.specs[spec.meta.id] and type(A.db.specs[spec.meta.id].metaOverride) == "table" then
-        local metaOverride = A.db.specs[spec.meta.id].metaOverride
+    -- Apply any DB-stored override immediately so registration reflects runtime state
+    if specDB and specDB.loadConditionsOverride then
+        spec.loadConditions = specDB.loadConditionsOverride
+    end
+
+    -- Apply DB-stored helpers override if present
+    if specDB and specDB.helpers and type(specDB.helpers) == "table" and #specDB.helpers > 0 then
+        spec.helpers = specDB.helpers
+    end
+
+    if specDB and type(specDB.metaOverride) == "table" then
+        local metaOverride = specDB.metaOverride
         for _, field in ipairs({ "specName", "class", "author", "version", "description" }) do
-            if metaOverride[field] ~= nil then
+            if metaOverride[field] ~= nil and (field ~= "version" or versionMatches) then
                 spec.meta[field] = metaOverride[field]
             end
         end
@@ -113,16 +157,8 @@ function SM:RegisterSpec(spec)
     local wasRegistered = self._available[id] ~= nil
     self._available[id] = spec
     if not wasRegistered then
-        print("|cff8882d5SPHelper|r: Spec registered: " .. tostring(id))
-        -- Log effective loadConditions
-        local lc = spec.loadConditions or {}
-        local parts = {}
-        for k, v in pairs(lc) do parts[#parts + 1] = tostring(k) .. "=" .. tostring(v) end
-        if #parts > 0 then
-            print("|cff8882d5SPHelper|r: LoadConditions: " .. table.concat(parts, ", "))
-        else
-            print("|cff8882d5SPHelper|r: LoadConditions: (none)")
-        end
+        -- No chat spam: spec registration is internal bookkeeping.
+        if A and A.DebugLog then pcall(A.DebugLog, "SPEC", "Spec registered: " .. tostring(id)) end
     else
         -- Avoid duplicate user-facing prints on re-registration; record debug entry
         if A and A.DebugLog then pcall(A.DebugLog, "SPEC", "Spec re-registered: " .. tostring(id)) end
@@ -149,10 +185,7 @@ function SM:ActivateSpec(id)
     local spec = self._available[id]
     if not spec then return end
 
-    print("|cff8882d5SPHelper|r: Activating spec: " .. tostring(id))
-    if spec.helpers and #spec.helpers > 0 then
-        print("|cff8882d5SPHelper|r: Spec helpers: " .. table.concat(spec.helpers, ", "))
-    end
+    if A and A.DebugLog then pcall(A.DebugLog, "SPEC", "Activating spec: " .. tostring(id)) end
 
     self._active[id] = spec
     A._activeSpecID = id
@@ -234,22 +267,39 @@ function SM:ReEvaluate()
     -- Determine desired active specs but avoid deactivating/re-activating
     -- everything on every reevaluation. Compute the set of specs that
     -- should be active, then only apply the diff against `self._active`.
+    --
+    -- Activation policy:
+    --   • The built-in Shadow Priest spec (the reference spec) auto-activates
+    --     when its load conditions match.
+    --   • All OTHER built-in specs are opt-in: they only activate after the
+    --     player explicitly enables them via /sph (A.db.specs[id].enabled).
+    --   • User-created specs (author ~= "SPHelper") keep auto-activation by
+    --     load conditions.
     local candidates = {}  -- list of { id, spec, specificity }
     local _, playerClass = UnitClass("player")
     for id, spec in pairs(self._available) do
         if spec.meta and spec.meta.class and playerClass and spec.meta.class ~= playerClass then
             -- Skip specs for other classes silently
         else
-            local shouldActivate = true
-            if A.SpecValidator and A.SpecValidator.CheckLoadConditions then
-                shouldActivate = A.SpecValidator:CheckLoadConditions(spec)
+            local isBuiltin = spec.meta and spec.meta.author == "SPHelper"
+            local optIn = isBuiltin and spec.meta.id ~= "shadow_priest"
+            local enabled = true
+            if optIn then
+                local specDB = A.db and A.db.specs and A.db.specs[id]
+                enabled = specDB ~= nil and specDB.enabled == true
             end
-            if shouldActivate then
-                candidates[#candidates + 1] = {
-                    id = id,
-                    spec = spec,
-                    specificity = LoadConditionSpecificity(spec),
-                }
+            if enabled then
+                local shouldActivate = true
+                if A.SpecValidator and A.SpecValidator.CheckLoadConditions then
+                    shouldActivate = A.SpecValidator:CheckLoadConditions(spec)
+                end
+                if shouldActivate then
+                    candidates[#candidates + 1] = {
+                        id = id,
+                        spec = spec,
+                        specificity = LoadConditionSpecificity(spec),
+                    }
+                end
             end
         end
     end
@@ -329,4 +379,30 @@ function SM:ResetSpecToDefault(id)
     end
     self:DeactivateSpec(id)
     self:ActivateSpec(id)
+end
+
+--- Explicitly enable or disable a built-in spec (persisted opt-in).
+-- Built-in specs other than the reference Shadow Priest spec are disabled
+-- until the player opts in via /sph.  Returns true if the spec is active
+-- after the change.
+function SM:SetSpecEnabled(id, enabled)
+    if not id then return false end
+    A.db.specs = A.db.specs or {}
+    A.db.specs[id] = A.db.specs[id] or {}
+    A.db.specs[id].enabled = enabled == true
+    self:ReEvaluate()
+    return self._active[id] ~= nil
+end
+
+--- Is this spec currently enabled (opt-in flag) or auto-activated?
+function SM:IsSpecEnabled(id)
+    local spec = self._available[id]
+    if not spec then return false end
+    local isBuiltin = spec.meta and spec.meta.author == "SPHelper"
+    if not isBuiltin or spec.meta.id == "shadow_priest" then
+        -- Reference spec + user-created specs: auto by conditions
+        return self._active[id] ~= nil
+    end
+    local specDB = A.db and A.db.specs and A.db.specs[id]
+    return specDB ~= nil and specDB.enabled == true
 end

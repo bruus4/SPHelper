@@ -77,6 +77,8 @@ SV.ALLOWED_CONDITION_TYPES = {
     spell_property_compare      = true,
     buff_property_compare       = true,
     debuff_property_compare     = true,
+    should_apply_debuff         = true,  -- Uses SpellDatabase metadata (debuffStackingMode, debuffMutuallyExclusive)
+    player_has_debuff           = true,  -- Checks if THIS player has the debuff on target
     unit_cast_compare           = true,
     unit_interruptible          = true,
     is_stealthed                = true,
@@ -85,12 +87,12 @@ SV.ALLOWED_CONDITION_TYPES = {
     -- Logical grouping helpers used by RotationEngine
     any_of                      = true,
     all_of                      = true,
-    ["not"]                    = true,
+    ["not"]                     = true,
     -- Aliases for logical grouping
     any                         = true,
     all                         = true,
-    ["or"]                     = true,
-    ["and"]                    = true,
+    ["or"]                      = true,
+    ["and"]                     = true,
     -- Composable setting comparison
     setting_compare             = true,
     -- Kill-prediction condition
@@ -98,6 +100,20 @@ SV.ALLOWED_CONDITION_TYPES = {
     -- Aggro detection
     has_aggro                   = true,
     not_has_aggro               = true,
+    -- Trinket on-use check
+    trinket_ready               = true,
+    classification_from_setting = true,
+    classification_any_target = true,
+    -- Phase 10 / TBC spec additions
+    is_moving                   = true,
+    not_is_moving               = true,
+    pet_alive                   = true,
+    pet_attacking               = true,
+    creature_type               = true,
+    totem_active                = true,
+    totem_remaining_lt          = true,
+    totem_name                  = true,
+    swing_time_remaining        = true,
 }
 
 ------------------------------------------------------------------------
@@ -116,7 +132,9 @@ function SV:Validate(spec)
     if type(m.id) ~= "string" or m.id == "" then return false, "meta.id must be a non-empty string" end
     if type(m.class) ~= "string" then return false, "meta.class must be a string" end
     if type(m.specName) ~= "string" then return false, "meta.specName must be a string" end
-    if m.version == nil then return false, "meta.version is required" end
+    if m.version ~= nil and type(m.version) ~= "string" and type(m.version) ~= "number" then
+        return false, "meta.version must be a string or number when provided"
+    end
 
     -- helpers list
     if spec.helpers ~= nil and type(spec.helpers) ~= "table" then
@@ -213,7 +231,17 @@ function SV:CheckLoadConditions(spec)
         local playerLvl = tonumber(UnitLevel("player")) or 0
         local minLvl = tonumber(lc.minLevel) or 0
         if playerLvl < minLvl then
-            print("|cffff4444[SPHelper] CheckLoadConditions: level too low (" .. tostring(playerLvl) .. " < " .. tostring(minLvl) .. ")|r")
+            if A and A.DebugLog then pcall(A.DebugLog, "SPEC", "level too low (" .. tostring(playerLvl) .. " < " .. tostring(minLvl) .. ")") end
+            return false
+        end
+    end
+
+    -- Maximum level (e.g. leveling specs that stop at 69)
+    if lc.maxLevel then
+        local playerLvl = tonumber(UnitLevel("player")) or 0
+        local maxLvl = tonumber(lc.maxLevel) or 0
+        if playerLvl > maxLvl then
+            if A and A.DebugLog then pcall(A.DebugLog, "SPEC", "level too high (" .. tostring(playerLvl) .. " > " .. tostring(maxLvl) .. ")") end
             return false
         end
     end
@@ -231,7 +259,7 @@ function SV:CheckLoadConditions(spec)
             local ok, _, _, _, _, rank = pcall(GetTalentInfo, req.tab, req.index)
             local actualRank = (ok and rank) or 0
             if actualRank < (req.minRank or 1) then
-                print("|cffff4444[SPHelper] CheckLoadConditions: missing required talent tab=" .. tostring(req.tab) .. " idx=" .. tostring(req.index) .. "|r")
+                if A and A.DebugLog then pcall(A.DebugLog, "SPEC", "missing required talent tab=" .. tostring(req.tab) .. " idx=" .. tostring(req.index)) end
                 return false
             end
         end
@@ -253,7 +281,8 @@ function SV:CheckLoadConditions(spec)
             if not requiredTab then
                 -- Try matching by tree name (case-insensitive)
                 for tab = 1, numTabs do
-                    local name = select(1, GetTalentTabInfo(tab)) or ""
+                    -- TBC Anniversary: id, name, description, icon, pointsSpent = GetTalentTabInfo(index)
+                    local name = select(2, GetTalentTabInfo(tab)) or ""
                     if name and requiredRaw and name:lower() == requiredRaw:lower() then
                         requiredTab = tab
                         break
@@ -262,9 +291,13 @@ function SV:CheckLoadConditions(spec)
             end
         end
 
+        -- Log talent distribution for debugging spec detection issues
+        -- TBC Anniversary API: id, name, description, icon, pointsSpent = GetTalentTabInfo(index)
+        local talentSummary = {}
         for tab = 1, numTabs do
-            local name, _, pointsSpent = GetTalentTabInfo(tab)
+            local _, name, _, _, pointsSpent = GetTalentTabInfo(tab)
             local pts = tonumber(pointsSpent) or 0
+            table.insert(talentSummary, string.format("%s:%d", name or ("Tab"..tab), pts))
             if pts > maxPoints then
                 maxPoints = pts
                 maxTab    = tab
@@ -272,17 +305,28 @@ function SV:CheckLoadConditions(spec)
         end
 
         if maxPoints == 0 then
-            -- Talent information unavailable; skip talentTab check
+            -- Talent information unavailable; skip talentTab check (e.g. character creation screen)
             return true
         end
 
         if not requiredTab then
-            print("|cffff4444[SPHelper] CheckLoadConditions: could not resolve talentTab '" .. tostring(lc.talentTab) .. "'|r")
+            if A and A.DebugLog then pcall(A.DebugLog, "SPEC", "could not resolve talentTab '" .. tostring(lc.talentTab) .. "'") end
             return false
         end
+
+        -- Log spec detection decision for debugging (only when mismatch occurs)
         if maxTab ~= requiredTab then
-            print("|cffff4444[SPHelper] CheckLoadConditions: talentTab mismatch (primary=" .. tostring(maxTab) .. " required=" .. tostring(requiredTab) .. ")|r")
+            if A and A.DebugLog then
+                pcall(A.DebugLog, "SPEC", string.format("talentTab mismatch for %s (talents=[%s], primary=%d, required=%d)",
+                    spec.meta and spec.meta.id or "unknown", table.concat(talentSummary, ","), maxTab, requiredTab))
+            end
             return false
+        end
+
+        -- Debug log when spec matches (helpful for verifying correct detection)
+        if A.DebugLog then
+            A.DebugLog(string.format("Spec %s activated: talents=[%s], primary=%d",
+                spec.meta and spec.meta.id or "unknown", table.concat(talentSummary, ","), maxTab))
         end
     end
 
