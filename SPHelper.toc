@@ -30,6 +30,7 @@ Config.lua
 # SPHelper.SpecManager:RegisterSpec(spec), then list the file here.
 # Load order: Core → SpecManager → SpecValidator → Helpers → SpecUI/Config → Specs
 specs\Shadow_Priest.lua
+specs\Shadow_Priest_Leveling.lua
 specs\Druid_Balance.lua
 specs\Feral_Druid.lua
 specs\Hunter_BeastMastery.lua

@@ -8,7 +8,7 @@
 --
 -- Rotation outline (Cat DPS):
 --   1. Emergency Bear Form when HP drops below threshold.
---   2. Cat stealth opener and pre-pull Tiger's Fury.
+--   2. Cat stealth opener; Tiger's Fury pre-pull and at energy cap in combat.
 --   3. Armor/debuff maintenance.
 --   4. Finishers: Rip on sustainable targets, Ferocious Bite on execute/dying.
 --   5. Builder pair: Shred when ideal, Mangle as the paired fallback.
@@ -103,7 +103,7 @@ local spec = {
         use_ferocious_bite         = { type = "checkbox", label = "[Cat] Use Ferocious Bite",     default = true,
                                        tooltip = "Use Ferocious Bite when target is dying fast or for trash/execute." },
         use_tigers_fury            = { type = "checkbox", label = "[Cat] Use Tiger's Fury",       default = true,
-                                       tooltip = "Use Tiger's Fury as a pre-pull opener when starting out of stealth and at full energy." },
+                                       tooltip = "Use Tiger's Fury pre-pull at full energy, and in combat when energy is capped — the only times it's worth casting." },
         use_powershift             = { type = "checkbox", label = "[Cat] Suggest powershift",     default = true,
                                        tooltip = "Suggest Cat Form again when energy is low enough to justify a powershift." },
         powershift_min_mana_pct    = { type = "slider",   label = "[Cat] Powershift minimum mana %",   default = 0, min = 0, max = 100, step = 1,
@@ -165,7 +165,7 @@ local spec = {
         rip_min_ttd                = { type = "slider",   label = "[Cat] Rip minimum target TTD",      default = 10, min = 0, max = 20, step = 1,
                                        tooltip = "Only suggest Rip when the target is expected to live at least this many seconds. 0 = disabled." },
         dying_fast_pct             = { type = "slider",   label = "[Cat] Dying fast threshold (%HP/sec)", default = 5, min = 1, max = 20, step = 1,
-                                       tooltip = "Use Ferocious Bite instead of Rip when target loses this % HP per second." },
+                                       tooltip = "With at least 4 combo points and under 5s target time-to-die, use Ferocious Bite when the target loses this % HP per second." },
         ferocious_bite_hp_threshold= { type = "slider",   label = "[Cat] Ferocious Bite HP threshold (absolute)", default = 0, min = 0, max = 100000, step = 1,
                                        tooltip = "Suggest Ferocious Bite when target HP is <= this absolute amount (0 = disabled)." },
     },
@@ -352,6 +352,21 @@ local spec = {
             },
         },
 
+        -- In-combat Tiger's Fury at energy cap (guides: never rotationally; only when
+        -- energy is capped and a tick would otherwise be wasted, e.g. after forced movement).
+        -- resource_required_gte (hard-fail) keeps this from ever showing an ETA countdown.
+        {
+            key        = "Tiger's Fury",
+            conditions = {
+                { type = "spec_option_enabled", optionKey = "use_tigers_fury" },
+                { type = "cat_form" },
+                { type = "in_combat" },
+                { type = "not_stealthed" },
+                { type = "resource_required_gte",        amount = 100 },
+                { type = "cooldown_ready",      spellKey  = "Tiger's Fury" },
+            },
+        },
+
         -- Ravage – stealth opener when behind target (60 energy cost)
         {
             key        = "Ravage",
@@ -418,7 +433,10 @@ local spec = {
         },
 
         -- ── CAT FINISHERS ───────────────────────────────────────────
-        -- Ferocious Bite: execute-phase dump for fast-dying targets.
+        -- Ferocious Bite (execute): only spend combo points early when the bite
+        -- can actually kill the target, or when the target is dying fast with a
+        -- short TTD (Rip wouldn't pay off and waiting risks losing the kill).
+        -- Otherwise the spec keeps building toward the 4-5 CP bite below.
         {
             key        = "Ferocious Bite",
             conditions = {
@@ -428,14 +446,27 @@ local spec = {
                 { type = "spec_option_enabled", optionKey = "use_ferocious_bite" },
                 { type = "state_compare", subject = "combo_points", op = ">=", value = 3 },
                 { type = "any_of", conditions = {
-                    { type = "target_dying_fast",   pctPerSec = "dying_fast_pct", direction = "faster" },
+                    { type = "state_compare", subject = "resource", op = ">=", value = 35 },
+                    { type = "clearcasting" },
+                }},
+                { type = "any_of", conditions = {
+                    -- Kill confirmed: minimum bite damage at current CP finishes the target.
+                    { type = "spell_can_kill_target", spellKey = "Ferocious Bite" },
+                    -- Dying fast AND short TTD: dump points before the target dies.
+                    { type = "all_of", conditions = {
+                        { type = "state_compare", subject = "combo_points", op = ">=", value = 4 },
+                        { type = "target_dying_fast",   pctPerSec = "dying_fast_pct", direction = "faster" },
+                        { type = "state_compare", subject = "target_ttd", op = "<", value = 5 },
+                    }},
+                    -- Manual override: absolute HP threshold (0 = disabled).
                     { type = "state_compare", subject = "target_hp", op = "<=", value = "ferocious_bite_hp_threshold" },
                 }},
             },
         },
 
         -- Rip on targets that will live long enough to justify it. Never clip; suppress immediate re-suggest after a cast.
-        -- Priority above Ferocious Bite so a fresh 5-CP target gets Rip first (matches logged rotation).
+        -- Sits above the 5-CP Ferocious Bite dump so a fresh 5-CP target gets Rip first (matches logged rotation).
+        -- The execute Ferocious Bite above only fires when the bite can kill or the target is dying, where Rip isn't right anyway.
         {
             key        = "Rip",
             conditions = {
@@ -457,6 +488,9 @@ local spec = {
         -- Ferocious Bite: regular energy dump at 5 CP, only when Rip is already
         -- healthy (or Rip is disabled / target won't live long enough for Rip).
         -- Matches the logged rotation: Shred to 5 CP → Rip → Shred → Ferocious Bite.
+        -- Cast only at 35-59 energy: Bite's extra-energy-to-damage conversion is
+        -- inefficient, so at 60+ energy another Shred is worth more (guides).
+        -- Never with Clearcasting: consume the proc with Shred, then Bite.
         {
             key        = "Ferocious Bite",
             conditions = {
@@ -465,9 +499,10 @@ local spec = {
                 { type = "not_stealthed" },
                 { type = "spec_option_enabled", optionKey = "use_ferocious_bite" },
                 { type = "state_compare", subject = "combo_points", op = ">=", value = 5 },
-                { type = "any_of", conditions = {
+                { type = "all_of", conditions = {
                     { type = "state_compare", subject = "resource", op = ">=", value = 35 },
-                    { type = "clearcasting" },
+                    { type = "state_compare", subject = "resource", op = "<", value = 60 },
+                    { type = "not", condition = { type = "clearcasting" } },
                 }},
                 { type = "any_of", conditions = {
                     -- Rip healthy: dump combo points into Ferocious Bite.
@@ -497,7 +532,9 @@ local spec = {
         },
 
         -- ── CAT BUILDERS ────────────────────────────────────────────
-        -- Split builder pair: Shred is the preferred builder; Mangle is the paired fallback.
+        -- Split builder pair: Shred is the preferred builder (behind target only —
+        -- guides: Shred can only be used from behind); Mangle is the paired fallback
+        -- and takes over automatically when stuck attacking from the front.
         {
             key        = "Shred",
             explicitPriority = 10,
@@ -506,6 +543,7 @@ local spec = {
                 { type = "target_valid" },
                 { type = "spec_option_enabled", optionKey = "use_shred" },
                 { type = "not_stealthed" },
+                { type = "behind_target" },
                 { type = "any_of", conditions = {
                     { type = "state_compare", subject = "resource", op = ">=", value = 42 },
                     { type = "clearcasting" },

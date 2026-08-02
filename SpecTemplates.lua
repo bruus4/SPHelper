@@ -96,6 +96,9 @@ function T.PlayerHasDebuff(spellKey)
     -- Used for mutual exclusivity checks (e.g., warlock curse slot: don't cast Curse X if we already have Curse Y).
     return cond("player_has_debuff", { spellKey = spellKey })
 end
+function T.BuffMissingOnPlayer(buffName)
+    return cond("not_buff_on_player", { buff = buffName })
+end
 function T.BuffPropertyCompare(buff, property, op, value)
     return cond("buff_property_compare", {
         buff = buff,
@@ -148,6 +151,9 @@ function T.NotRecentlyCast(spellKey, window) return cond("not_recently_cast", { 
 function T.NextPowerTickLt(seconds) return cond("next_power_tick_with_gcd_lt", { seconds = seconds }) end
 function T.IsMoving() return cond("is_moving") end
 function T.NotIsMoving() return cond("not_is_moving") end
+function T.MeleeRange() return cond("melee_range") end
+function T.NotMeleeRange() return cond("not_melee_range") end
+function T.WandEquipped() return cond("wand_equipped") end
 function T.PetAlive() return cond("pet_alive") end
 function T.PetAttacking() return cond("pet_attacking") end
 function T.CreatureType(typeName) return cond("creature_type", { typeName = typeName }) end

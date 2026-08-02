@@ -114,6 +114,10 @@ SV.ALLOWED_CONDITION_TYPES = {
     totem_remaining_lt          = true,
     totem_name                  = true,
     swing_time_remaining        = true,
+    -- Leveling-spec additions (Shadow_Priest_Leveling)
+    melee_range                 = true,
+    not_melee_range             = true,
+    wand_equipped               = true,
 }
 
 ------------------------------------------------------------------------

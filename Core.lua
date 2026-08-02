@@ -1836,31 +1836,17 @@ do
         -- Print locally
         pcall(print, out)
 
-        -- Try to send to the previously-joined diagnostics channel; attempt
-        -- to join if we haven't yet. If sending fails, store the error in
-        -- saved variables so the user can inspect later.
-        local sentToChannel = false
+        -- Persist the error locally in saved variables so the user can
+        -- inspect it later. The remote diagnostics channel was removed
+        -- for release builds.
         pcall(function()
-            if not A._sphelperChannelID then
-                if A.EnsureSphelperChannel then pcall(A.EnsureSphelperChannel) end
-            end
-            if A._sphelperChannelID and A._sphelperChannelID > 0 then
-                pcall(function() SendChatMessage(out, "CHANNEL", nil, A._sphelperChannelID) end)
-                sentToChannel = true
-            end
+            if not SPHelperDB then SPHelperDB = {} end
+            SPHelperDB.recentErrors = SPHelperDB.recentErrors or {}
+            local entry = { time = GetTime(), msg = s, stack = (debugstack and debugstack()) or "" }
+            table.insert(SPHelperDB.recentErrors, 1, entry)
+            -- keep it bounded
+            while #SPHelperDB.recentErrors > 80 do table.remove(SPHelperDB.recentErrors) end
         end)
-
-        -- Persist the error locally if it wasn't sent to channel
-        if not sentToChannel then
-            pcall(function()
-                if not SPHelperDB then SPHelperDB = {} end
-                SPHelperDB.recentErrors = SPHelperDB.recentErrors or {}
-                local entry = { time = GetTime(), msg = s, stack = (debugstack and debugstack()) or "" }
-                table.insert(SPHelperDB.recentErrors, 1, entry)
-                -- keep it bounded
-                while #SPHelperDB.recentErrors > 80 do table.remove(SPHelperDB.recentErrors) end
-            end)
-        end
     end)
 end
 
@@ -1894,7 +1880,9 @@ loader:SetScript("OnEvent", function(self, event, addon)
             A._sphelperChannelID = chanID
         end
     end
-    pcall(A.EnsureSphelperChannel)
+    -- Disabled: remote diagnostics channel not needed for release builds.
+    -- Errors are still logged locally in SPHelperDB.recentErrors when the channel is unavailable.
+    -- pcall(A.EnsureSphelperChannel)
 
     -- Ensure config (slash commands / options panel) is initialized even
     -- if no spec becomes active. This makes `/sph` available for all classes.

@@ -402,6 +402,7 @@ function A:InitRotation()
     spellIcons["RUNE"]   = (A.GetItemIconCached and A.GetItemIconCached(20520)) or GetItemIcon(20520) or "Interface\\Icons\\INV_Misc_Rune_04"
     spellIcons["TRINKET1"] = "Interface\\Icons\\INV_Jewelry_Trinket_01"
     spellIcons["TRINKET2"] = "Interface\\Icons\\INV_Jewelry_Trinket_02"
+    spellIcons["WAND"] = "Interface\\Icons\\INV_Wand_01"
 
     ----------------------------------------------------------------
     -- Apply full layout (fixes bonus slot size/position at startup)
@@ -1069,6 +1070,14 @@ function A:InitRotation()
                     if icon then return icon end
                 end
                 return spellIcons[key] or spellIcons["TRINKET1"]
+            elseif key == "WAND" then
+                -- Wand is not in the spell catalog; show the equipped wand's icon
+                local ok, itemId = pcall(GetInventoryItemID, "player", 18)
+                if ok and itemId then
+                    local icon = (A.GetItemIconCached and A.GetItemIconCached(itemId)) or GetItemIcon(itemId)
+                    if icon then return icon end
+                end
+                return spellIcons["WAND"]
             else
                 return GetCachedSpellIcon(key)
             end
@@ -1078,7 +1087,7 @@ function A:InitRotation()
         -- Only offensive spells (per spell database flag) are checked; self-buffs like Cat Form are always "in range".
         local function IsKeyInRange(key)
             if not UnitExists("target") then return true end
-            if key == "POTION" or key == "RUNE" or key == "TRINKET1" or key == "TRINKET2" then return true end
+            if key == "POTION" or key == "RUNE" or key == "TRINKET1" or key == "TRINKET2" or key == "WAND" then return true end
             local spell = SPELLS[key]
             if spell and spell.id then
                 if spell.meta and spell.meta.flags and not spell.meta.flags.offensive then
@@ -1119,6 +1128,9 @@ function A:InitRotation()
                     local s,d = A.GetItemCooldownSafe(itemId)
                     if s and d and s > 0 then return math.max(s + d - now, 0) end
                 end
+                return 0
+            elseif key == "WAND" then
+                -- Wands attack on their own timer; no cooldown to display
                 return 0
             end
             -- Generic: try cooldown lookup via SPELLS[key]

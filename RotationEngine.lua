@@ -1537,6 +1537,31 @@ function RE:BuildContext(spec)
     local ok_move, moveSpeed = pcall(GetUnitSpeed, "player")
     if ok_move and moveSpeed and moveSpeed > 0 then moving = true end
 
+    -- Melee range check: distance² ≤ 36 (6 yards squared). Used by leveling specs
+    -- to decide when to switch from wand to direct spells.
+    local inMeleeRange = false
+    if UnitExists("target") then
+        local ok_dist, distSq = pcall(UnitDistanceSquared, "player", "target")
+        if ok_dist and distSq ~= nil and distSq <= 36 then
+            inMeleeRange = true
+        end
+    end
+
+    -- Wand detection: check inventory slot 18 (ranged weapon) for a wand-type item.
+    -- Used by leveling specs to decide whether wand is available as filler.
+    local wandEquipped = false
+    do
+        local rLink = GetInventoryItemLink("player", 18)
+        if rLink then
+            -- Wands have "Wand" in their tooltip class string or item type substring.
+            -- GetItemInfo returns (name, link, quality, level, minLevel, type, subtype, ...)
+            local _, _, _, _, _, itemType, itemSubType = GetItemInfo(rLink)
+            if itemSubType and itemSubType:lower() == "wand" then
+                wandEquipped = true
+            end
+        end
+    end
+
     -- Pet state
     local petAlive, petAttacking = false, false
     if UnitExists("pet") then
@@ -1607,13 +1632,15 @@ function RE:BuildContext(spec)
         channelTickInterval   = channelTickInterval,
         channelTicksRemaining = channelTicksRemaining,
         channelTimeToNextTick = channelTimeToNextTick,
-        moving      = moving,
-        petAlive    = petAlive,
-        petAttacking = petAttacking,
-        totem       = totem,
-        swingMH     = swingMH,
-        swingOH     = swingOH,
-        swingR      = swingR,
+        moving         = moving,
+        inMeleeRange   = inMeleeRange,
+        wandEquipped   = wandEquipped,
+        petAlive       = petAlive,
+        petAttacking   = petAttacking,
+        totem          = totem,
+        swingMH        = swingMH,
+        swingOH        = swingOH,
+        swingR         = swingR,
     }
 
     -- Clip-aware cast remaining (DISABLED).
@@ -1950,9 +1977,12 @@ end
 RE._condEval["cooldown_ready"] = function(cond, ctx, spec, db)
     local key = cond.spellKey
     if not key then return false end
+    local spell = A.SPELLS and A.SPELLS[key]
+    -- Gate on spell knowledge FIRST: an unlearned catalog spell has no real
+    -- cooldown (GetProjectedSpellCooldown would report 0 and suggest it).
+    if spell and not A.KnowsSpell(spell.id) then return false end
     local cd = GetProjectedSpellCooldown(key, ctx)
     if cd ~= nil then return cd == 0 end
-    local spell = A.SPELLS and A.SPELLS[key]
     if spell then
         return A.KnowsSpell(spell.id) and A.GetSpellCDReal(spell.id) == 0
     end
@@ -1962,6 +1992,10 @@ end
 RE._condEval["dot_missing"] = function(cond, ctx, spec, db)
     local key = cond.spellKey
     if key then
+        -- Gate on spell knowledge: an unlearned DoT would otherwise be
+        -- reported as "missing" and suggested.
+        local spell = A.SPELLS and A.SPELLS[key]
+        if spell and not A.KnowsSpell(spell.id) then return false end
         local state = GetTrackedDebuffState(spec, ctx, key)
         if state then
             return (state.remaining or 0) <= 0
@@ -2939,6 +2973,22 @@ end
 
 RE._condEval["not_is_moving"] = function(cond, ctx, spec, db)
     return ctx.moving ~= true
+end
+
+-- melee_range: true when target is within 6 yards (melee distance).
+-- Used by leveling specs to decide wand vs direct spells.
+RE._condEval["melee_range"] = function(cond, ctx, spec, db)
+    return ctx.inMeleeRange == true
+end
+
+-- not_melee_range: inverse of melee_range.
+RE._condEval["not_melee_range"] = function(cond, ctx, spec, db)
+    return ctx.inMeleeRange ~= true
+end
+
+-- wand_equipped: true when player has a wand-type ranged weapon in slot 18.
+RE._condEval["wand_equipped"] = function(cond, ctx, spec, db)
+    return ctx.wandEquipped == true
 end
 
 -- pet_alive: true when pet exists and is not dead.
