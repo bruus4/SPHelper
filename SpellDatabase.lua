@@ -40,6 +40,8 @@ end
 -- talentUnlock   : {tab, index, minRank} â€“ gated behind this talent; nil = base class spell
 -- hasteType      : "spell" (reduces cast time) | "channel" (reduces tick interval)
 --                  | "gcd" (reduces GCD only) | "none"
+-- gcd            : "none" = this spell does NOT trigger the global cooldown
+--                  (e.g. Inner Focus, trinkets).  Omitted = triggers GCD.
 -- critMultiplier : multiplier applied on a critical hit (1.5 typical, 2.0 some)
 -- threatMultiplier: threat generated per unit of damage/healing done.
 --   TBC Classic rules: direct damage = 1x; DoT ticks = 1.3x per tick;
@@ -275,6 +277,7 @@ DB.catalog = {
         schoolMask = 2,
         castType = "instant",
         hasteType = "gcd",
+        gcd = "none", -- Inner Focus does NOT trigger the global cooldown
         buffId = 14751,
         flags = { cooldown = true, buff = true },
         talentModifiers = {},

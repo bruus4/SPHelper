@@ -301,6 +301,21 @@ local function GetProjectedSpellCooldown(spellKey, ctx)
     return math.max(((A.GetSpellCDReal and A.GetSpellCDReal(spellId) or 0) - ((ctx and ctx.castRemaining) or 0)) - simElapsed, 0)
 end
 
+-- Does this spell/action trigger the global cooldown?  The spell catalog
+-- marks exceptions with `gcd = "none"` (e.g. Inner Focus); trinkets /
+-- potions / runes are item actions that never trigger the GCD.  Everything
+-- else defaults to triggering it.
+local function SpellTriggersGCD(key)
+    if key == "TRINKET1" or key == "TRINKET2" or key == "POTION" or key == "RUNE" then
+        return false
+    end
+    local def = A.GetSpellDefinition and A.GetSpellDefinition(key)
+    if def and def.gcd == "none" then
+        return false
+    end
+    return true
+end
+
 local function GetEffectiveSpellCastTime(spellKey, ctx)
     if not spellKey then return nil end
 
@@ -1775,7 +1790,15 @@ function RE:SimulateSpellEffect(ctx, spellKey, spec, advanceOverride)
         if haste <= 0 then haste = 1 end
         castEff = ((def.duration or def.castTime) or 0) / haste
     end
-    local advance = math.max(advanceOverride or castEff, gcd)
+    -- Spells that do NOT trigger the global cooldown (Inner Focus, trinkets,
+    -- potions, runes) advance only by their cast time (0 for instants) — the
+    -- next spell can start immediately after them (user request).
+    local advance
+    if not SpellTriggersGCD(spellKey) then
+        advance = advanceOverride or castEff
+    else
+        advance = math.max(advanceOverride or castEff, gcd)
+    end
 
     -- Build projected ctx inheriting everything from parent.
     local p = setmetatable({}, { __index = ctx })
@@ -2333,8 +2356,10 @@ end
 
 RE._condEval["target_hp_pct_lt"] = function(cond, ctx, spec, db)
     if not UnitExists("target") then return false end
-    local hp = UnitHealth("target") or 0
-    local maxHP = UnitHealthMax("target") or 1
+    -- Prefer the once-per-refresh ctx snapshot (fetched a single time per
+    -- evaluation and shared by every slot) over a per-condition API call.
+    local hp = (ctx and ctx.targetHP) or (UnitHealth("target") or 0)
+    local maxHP = (ctx and ctx.targetMaxHP) or (UnitHealthMax("target") or 1)
     local pct = cond.pct
     if type(pct) == "string" then
         pct = (A.SpecVal and A.SpecVal(pct, 20)) or 20
@@ -2345,8 +2370,8 @@ end
 
 RE._condEval["target_hp_pct_gt"] = function(cond, ctx, spec, db)
     if not UnitExists("target") then return false end
-    local hp = UnitHealth("target") or 0
-    local maxHP = UnitHealthMax("target") or 1
+    local hp = (ctx and ctx.targetHP) or (UnitHealth("target") or 0)
+    local maxHP = (ctx and ctx.targetMaxHP) or (UnitHealthMax("target") or 1)
     local pct = cond.pct
     if type(pct) == "string" then
         pct = (A.SpecVal and A.SpecVal(pct, 20)) or 20
@@ -3977,6 +4002,13 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
             return math.max(chanEff, ctx.gcd or 1.5)
         end
         local castEff = GetEffectiveSpellCastTime(key, ctx) or 0
+        -- Spells that do NOT trigger the global cooldown (Inner Focus,
+        -- trinkets, potions, runes) cost only their cast time (0 for
+        -- instants) — they can be cast immediately after another ability
+        -- without a GCD (user request).
+        if not SpellTriggersGCD(key) then
+            return castEff
+        end
         return math.max(castEff, ctx.gcd or 1.5)
     end
 
