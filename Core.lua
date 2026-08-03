@@ -438,10 +438,13 @@ end
 -- Utility helpers
 ------------------------------------------------------------------------
 
--- One-way world latency in seconds
+-- One-way world latency in seconds.
+-- GetNetStats() reports ROUND-TRIP latency (ms), so divide by 2 to get the
+-- one-way delay used by cast-timing math (FQ tick alignment, DoT refresh
+-- deadlines, travel-time compensation).
 function A.GetLatency()
     local _, _, _, latencyWorld = GetNetStats()
-    return (latencyWorld or 50) / 1000
+    return (latencyWorld or 50) / 2 / 1000
 end
 
 -- Remaining cooldown IGNORING the GCD (treats GCD-only as 0)

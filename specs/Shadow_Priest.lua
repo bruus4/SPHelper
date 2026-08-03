@@ -208,7 +208,7 @@ local spec = {
           tooltip = "Extra milliseconds added after latency compensation before releasing the cast.\nNegative values pre-compensate latency (release earlier); this is risky and may cause clipping.\n0 = release exactly when cast would arrive at server tick (boundary, may clip on jitter).\n30 = release 30ms later than necessary, cast arrives 30ms after tick (recommended).\nAuto-tune will adjust this automatically when enabled." },
         { key = "fqAllowNegative",       type = "checkbox", label = "Allow negative FQ offset", default = false,
           tooltip = "Enable negative values for the FQ safety buffer. Negative offsets release earlier (pre-compensate latency) but increase the risk of clipping; use with caution." },
-        { key = "fqDiag",               type = "checkbox", label = "FQ timing diagnostics", default = true,
+        { key = "fqDiag",               type = "checkbox", label = "FQ timing diagnostics", default = false,
           tooltip = "Print per-tick timing diagnostics after each FQ activation. Shows delta from FQ exit to tick CLEU, running average, and ideal target for tuning fqFireOffsetMs." },
         { key = "fqAutoAdjust",          type = "checkbox", label = "[EXPERIMENTAL] FQ auto-adjust offset", default = false,
           tooltip = "Automatically nudge fqFireOffsetMs toward a latency-compensated target using conservative tuning (warmup 8 samples, gain ≈15%, deadband 5ms, max step 10ms). Requires FQ timing diagnostics (fqDiag) to see adjustments. Value is saved after each adjustment. Enable 'Allow negative FQ offset' to permit negative values (use with caution)." },

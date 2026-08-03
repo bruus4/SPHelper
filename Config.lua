@@ -822,6 +822,12 @@ function A:InitConfig()
         msg = strtrim(msg or ""):lower()
 
         if msg == "" or msg == "options" or msg == "config" then
+            -- Opening the settings panel is a protected action (ADDON_ACTION_BLOCKED
+            -- in combat), so defer it until combat ends.
+            if InCombatLockdown and InCombatLockdown() then
+                print("|cffff4444SPHelper|r: Cannot open settings while in combat.")
+                return
+            end
             -- Try modern Settings API first
             if Settings and Settings.OpenToCategory and A.settingsCategory then
                 Settings.OpenToCategory(A.settingsCategory:GetID())

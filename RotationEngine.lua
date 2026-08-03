@@ -3897,6 +3897,7 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
     -- stable absolute timestamp that ticks down naturally during a cast.
     local READY_EPSILON = 0.05
     local readyCands = {}
+    local readyOptCands = {}  -- ready bonus-slot actions (trinkets, potions, runes)
     local blockedCands = {}
     for _, cand in ipairs(candidates) do
         local candEta = cand.eta or 0
@@ -3905,10 +3906,22 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
         local cooldownEnd = (readyIn > 0) and (now + readyIn) or nil
 
         if cand.key then
-            local bucket = (readyIn <= READY_EPSILON) and readyCands or blockedCands
-            bucket[#bucket + 1] = {
-                cand = cand, readyIn = readyIn, clip = false, cooldownEnd = cooldownEnd,
-            }
+            if readyIn <= READY_EPSILON and cand.entry and cand.entry.optional then
+                -- BONUS-SLOT ACTIONS (trinkets, potions, runes) are NOT part
+                -- of the priority chain: the display layer routes ready
+                -- optionals to the bonus slot, so they must never occupy a
+                -- chain position nor consume a GCD (which inflated the
+                -- timers of the priority spells after them — user request).
+                -- They are re-appended by the optional re-add block below.
+                readyOptCands[#readyOptCands + 1] = {
+                    cand = cand, readyIn = readyIn, clip = false, cooldownEnd = cooldownEnd,
+                }
+            else
+                local bucket = (readyIn <= READY_EPSILON) and readyCands or blockedCands
+                bucket[#bucket + 1] = {
+                    cand = cand, readyIn = readyIn, clip = false, cooldownEnd = cooldownEnd,
+                }
+            end
         end
     end
 
@@ -3937,10 +3950,11 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
     --   arrives ~1 GCD before the actual threshold.
     --
     -- TIMER RULE:
-    --   * Synths always use `now + s.deadline` as cooldownEnd regardless of
-    --     which slot they end up in. This equals `dotExpiry - own` — a stable
-    --     absolute timestamp that ticks naturally. Chain-position time (accTime)
-    --     resets every 0.1s evaluation and must NOT be used for synth timers.
+    --   * Synths carry NO timer (cooldownEnd = nil, eta = 0): they are OFF
+    --     cooldown (except GCD), and their countdown used to look like a very
+    --     long global cooldown and suggested them 4+ s before they should be
+    --     cast.  The cast signal is their queue position plus the flip to
+    --     slot 1 when the refresh condition fires (user request).
     --   * Chain readyCands show NO timer (cooldownEnd = nil, eta = 0) unless
     --     they are the primary slot during an active cast, where the timer
     --     shows the remaining cast/channel time. This avoids the "1.5 / 3.0 /
@@ -3964,6 +3978,31 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
         end
         local castEff = GetEffectiveSpellCastTime(key, ctx) or 0
         return math.max(castEff, ctx.gcd or 1.5)
+    end
+
+    local function ChainFillerStep(key)
+        -- Fillers are interruptible casts: a channel filler only commits up
+        -- to its clip point (second-to-last tick), so it can squeeze into a
+        -- gap before a refresh deadline instead of blocking the chain with
+        -- its full duration.  This is what lets the queue show "Mind Flay,
+        -- then the refresh" instead of jumping straight to the refresh 4 s
+        -- before it should be cast (user request).  Same math as the
+        -- forward-sim GetClipAdvance helper.
+        local def = A.GetSpellDefinition and A.GetSpellDefinition(key)
+        if def and def.castType == "channel" then
+            local haste = ctx.hasteMul or 1
+            if haste <= 0 then haste = 1 end
+            local fullChannel = ((def.duration or def.castTime) or 3) / haste
+            local tickInterval = def.tickInterval or 1
+            local totalTicks = def.ticks or math.ceil(fullChannel * haste)
+            if totalTicks > 1 then
+                local clipPoint = ((totalTicks - 1) * tickInterval) / haste
+                if clipPoint > READY_EPSILON and fullChannel > clipPoint then
+                    return clipPoint
+                end
+            end
+        end
+        return ChainStepTime(key)
     end
 
     local function GetDotRemaining(spellKey)
@@ -4042,15 +4081,17 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
     end
 
     -- Flush all synths whose deadline < threshold into the queue at the
-    -- current position. Synths always use their deadline as the cooldownEnd
-    -- anchor (= dotExpiry - own = constant absolute), not the chain position.
+    -- current position. Synths carry no cooldownEnd (see TIMER RULE).
     local function FlushSynthsBefore(threshold)
         while si <= #synths and synths[si].deadline < threshold do
             local s = synths[si]; si = si + 1
-            -- `now + s.deadline` = absolute "must-start-by" timestamp.
-            -- Stable across re-evaluations because dotExpiry is fixed by the API.
-            local cd = (s.deadline > READY_EPSILON) and (now + s.deadline) or nil
-            Add(s.entry, s.key, s.deadline, false, ResolveEntryPriorityBucket(s.entry), cd)
+            -- No countdown on refresh synths: they are OFF cooldown (except
+            -- GCD), and the cast signal is their queue position plus the
+            -- flip to slot 1 when the refresh condition actually fires.
+            -- Showing the deadline as a timer made them look like a very
+            -- long global cooldown and suggested them 4+ s before they
+            -- should be cast (user request).
+            Add(s.entry, s.key, 0, false, ResolveEntryPriorityBucket(s.entry), nil)
             accTime = accTime + ChainStepTime(s.key)
         end
     end
@@ -4180,9 +4221,12 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
     -- left on the applied DoT) instead of the expected run of filler casts.
     --
     -- A candidate only qualifies as a chain filler if it is genuinely
-    -- spammable: no cooldown, not a channel, and its conditions contain no
-    -- one-shot/target-state/cooldown gates (otherwise we'd fill the queue with
-    -- e.g. Curse of Doom or a cooldown spell).
+    -- spammable: no cooldown, and its conditions contain no one-shot/
+    -- target-state/cooldown gates (otherwise we'd fill the queue with e.g.
+    -- Curse of Doom or a cooldown spell). Channels are allowed ONLY when the
+    -- entry is explicitly marked isFiller (e.g. Mind Flay with repeatLimit =
+    -- 3), so the queue can show consecutive channel casts; any other channel
+    -- is still excluded (never fill with a non-filler channel).
     local FILLER_BLOCKED_CONDS = {
         ["cooldown_ready"] = true, ["cooldown_lt"] = true,
         ["dot_missing"] = true, ["projected_dot_time_left_lt"] = true,
@@ -4214,8 +4258,9 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
                 local hasRealCD = meta and meta.cooldown and tonumber(meta.cooldown) > 0
                 local projectedCD = GetProjectedSpellCooldown(key, ctx) or 0
                 if not hasRealCD and projectedCD <= READY_EPSILON
-                   and not (meta and meta.castType == "channel") then
-                    local step = ChainStepTime(key)
+                   and (not (meta and meta.castType == "channel")
+                        or (entry and entry.isFiller == true)) then
+                    local step = ChainFillerStep(key)
                     if step > READY_EPSILON then
                         fillerCand = cand
                         fillerStep = step
@@ -4255,8 +4300,13 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
                     fillsUsed = fillsUsed + 1
                 end
             end
-            local cd = (s.deadline > READY_EPSILON) and (now + s.deadline) or nil
-            Add(s.entry, s.key, s.deadline, false, ResolveEntryPriorityBucket(s.entry), cd)
+            -- No countdown on refresh synths: they are OFF cooldown (except
+            -- GCD), and the cast signal is their queue position plus the
+            -- flip to slot 1 when the refresh condition actually fires.
+            -- Showing the deadline as a timer made them look like a very
+            -- long global cooldown and suggested them 4+ s before they
+            -- should be cast (user request).
+            Add(s.entry, s.key, 0, false, ResolveEntryPriorityBucket(s.entry), nil)
             accTime = accTime + ChainStepTime(s.key)
         end
     end
@@ -4666,7 +4716,7 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
     --
     -- Ready optionals (eta=0): append to end — Refresh() separates them into
     -- the bonus slot via its normal optional/ready routing.
-    if (#blockedCands > 0) or (#readyCands > 0) then
+    if (#blockedCands > 0) or (#readyCands > 0) or (#readyOptCands > 0) then
         local optKeys = {}
         for _, entry in ipairs(rotation) do
             if entry.optional and entry.key then optKeys[entry.key] = true end
@@ -4699,7 +4749,7 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
                 end
             end
             -- Append ready optionals (eta=0) — Refresh routes them to bonus slot
-            for _, c in ipairs(readyCands) do
+            for _, c in ipairs(readyOptCands) do
                 if optKeys[c.cand.key] and not resultKeys[c.cand.key] then
                     result[#result + 1] = {
                         key = c.cand.key, eta = 0, entry = c.cand.entry,

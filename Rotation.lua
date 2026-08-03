@@ -1207,23 +1207,21 @@ function A:InitRotation()
             primarySignature = primarySignature .. "|" .. tostring(p2.key)
         end
 
-        -- GCD / cooldown display on the primary icon.
+        -- Cooldown display on the primary icon.
         --
-        -- GCD is detected with the same probe the engine uses (id 29515,
-        -- duration <= 2.5 s — see RotationEngine.GetGCDRemaining), so it only
-        -- reflects a REAL global cooldown: channel ticks (e.g. Mind Flay) never
-        -- light it up, and the active channel is never drawn with a fake
-        -- cooldown sweep (CastBar shows channel state).
+        -- Only REAL multi-second spell cooldowns are drawn (sweep + countdown).
+        -- The global cooldown is intentionally NOT displayed: the GCD sweep
+        -- and its countdown confused the rotation readout (e.g. the next
+        -- ability after a channel showed the GCD first, then its real
+        -- cooldown), so GCD timing is left to the castbar and the engine's
+        -- chain timing. Channel ticks (e.g. Mind Flay) never light this up,
+        -- and the active channel is never drawn with a fake cooldown sweep
+        -- (CastBar shows channel state).
         --
-        -- On TBC Anniversary, CooldownFrameTemplate draws the swipe but no
+        -- On TBC Anniversary, CooldownFrameTemplate draws the sweep but no
         -- countdown number (SetHideCountdownNumbers doesn't exist), so the
-        -- countdown is rendered by our own cdText — number + swipe together,
-        -- like retail.
-        local gStart, gDur = GetSpellCooldown(29515)
-        local gcdRem = 0
-        if gStart and gStart > 0 and gDur and gDur > 0 and gDur <= 2.5 then
-            gcdRem = math.max(gStart + gDur - now, 0)
-        end
+        -- countdown is rendered by our own cdText (number + sweep together,
+        -- like retail).
         local primarySpell = p and SPELLS[p.key]
         local sStart, sDur = 0, 0
         if primarySpell and primarySpell.id then
@@ -1242,16 +1240,10 @@ function A:InitRotation()
                 -- ARTWORK fade textures) and keep the live countdown text.
                 pcall(CooldownFrame_Set, primary.cdOverlay, 0, 0, 0)
             elseif realCDRem > 0 then
-                -- Real multi-second spell cooldown: swipe + countdown number.
+                -- Real multi-second spell cooldown: sweep + countdown number.
                 pcall(CooldownFrame_Set, primary.cdOverlay, sStart, sDur, 1)
                 primaryOverlayActive = true
                 primary.cdText:SetText(A.FormatTime(realCDRem))
-            elseif gcdRem > 0 then
-                -- Genuine global cooldown (probe-based; channel ticks never
-                -- report one after the initial GCD): swipe + countdown number.
-                pcall(CooldownFrame_Set, primary.cdOverlay, gStart, gDur, 1)
-                primaryOverlayActive = true
-                primary.cdText:SetText(A.FormatTime(gcdRem))
             else
                 pcall(CooldownFrame_Set, primary.cdOverlay, 0, 0, 0)
             end

@@ -892,9 +892,12 @@ function CH:FakeQueue(spellArg)
 
     local needed = targetTime - now
 
-    -- Skip if the target is more than maxWait away (would freeze too long)
-    -- or already past (nothing to wait for).
-    if needed > maxWait then return end
+    -- If the target is further out than the script-time budget allows,
+    -- wait the FULL budget instead of firing immediately: the cast then
+    -- lands as close to the tick as the budget permits (vs. firing now,
+    -- which would land ~budget + latency too early and lose the tick).
+    -- Skip only if the target is already past (nothing to wait for).
+    if needed > maxWait then needed = maxWait end
     if needed <= 0 then return end
 
     -- ---------------------------------------------------------------
