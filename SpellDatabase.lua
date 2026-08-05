@@ -799,6 +799,23 @@ DB.catalog = {
         talentModifiers = {},
         threatMultiplier = 1.0,  -- Direct damage / default
     },
+    ["Enrage"] = {
+        class = "DRUID",
+        spec = "FERAL",
+        name = "Enrage",
+        baseId = 5229,
+        minLevel = 12,
+        school = "physical",
+        schoolMask = 1,
+        castType = "instant",
+        hasteType = "gcd",
+        duration = 10,
+        cooldown = 60,
+        buffId = 5229,
+        flags = { buff = true, cooldown = true, requiresBearForm = true },
+        talentModifiers = {},
+        threatMultiplier = 1.0,  -- Direct damage / default
+    },
     ["Frenzied Regeneration"] = {
         class = "DRUID",
         spec = "FERAL",
@@ -1649,6 +1666,22 @@ DB.catalog = {
         duration = 20,
         range = 30,
         flags = { control = true, magical = true },
+        talentModifiers = {},
+        threatMultiplier = 1.0,  -- Direct damage / default
+    },
+    ["Hellfire"] = {
+        class = "WARLOCK",
+        spec = nil,
+        name = "Hellfire",
+        baseId = 1949,
+        minLevel = 30,
+        school = "fire",
+        schoolMask = 4,
+        castType = "channel",
+        duration = 15,
+        ticks = 15,
+        tickInterval = 1,
+        flags = { offensive = true, channel = true, magical = true },
         talentModifiers = {},
         threatMultiplier = 1.0,  -- Direct damage / default
     },
@@ -3320,6 +3353,24 @@ DB.catalog = {
         talentModifiers = {},
         threatMultiplier = 1.0,  -- Direct damage / default
     },
+    ["Misdirection"] = {
+        class = "HUNTER",
+        name = "Misdirection",
+        baseId = 34477,
+        minLevel = 70,
+        school = "physical",
+        schoolMask = 1,
+        castType = "instant",
+        hasteType = "gcd",
+        duration = 30,
+        cooldown = 120,
+        range = 100,
+        buffId = 34477,
+        manaCostPct = 0.09, -- 9% of base mana (TBC Classic)
+        flags = { buff = true, cooldown = true, utility = true },
+        talentModifiers = {},
+        threatMultiplier = 1.0,  -- Direct damage / default
+    },
     ["Serpent Sting"] = {
         class = "HUNTER",
         name = "Serpent Sting",
@@ -3957,6 +4008,21 @@ DB.catalog = {
         talentModifiers = {},
         threatMultiplier = 1.0,  -- Direct damage / default
     },
+    ["Seal of Vengeance"] = {
+        class = "PALADIN",
+        name = "Seal of Vengeance",
+        baseId = 31801,
+        minLevel = 64,
+        school = "holy",
+        schoolMask = 2,
+        castType = "instant",
+        hasteType = "gcd",
+        duration = 30,
+        buffId = 31801,
+        flags = { buff = true, seal = true },
+        talentModifiers = {},
+        threatMultiplier = 1.0,  -- Direct damage / default
+    },
     ["Seal of Wisdom"] = {
         class = "PALADIN",
         name = "Seal of Wisdom",
@@ -4007,6 +4073,39 @@ DB.catalog = {
         range = 10,
         cooldown = 10,
         flags = { offensive = true, direct = true, magical = true, cooldown = true },
+        talentModifiers = {},
+        threatMultiplier = 1.0,  -- Direct damage / default
+    },
+    ["Judgement of the Crusader"] = {
+        class = "PALADIN",
+        name = "Judgement of the Crusader",
+        baseId = 20300,
+        minLevel = 4,
+        school = "holy",
+        schoolMask = 2,
+        castType = "instant",
+        hasteType = "gcd",
+        duration = 20,
+        range = 10,
+        debuffId = 20300,
+        flags = { debuff = true, utility = true },
+        debuffStackingMode = "single_any_source", -- Only one Judgement of the Crusader matters; check any source regardless of who cast it
+        talentModifiers = {},
+        threatMultiplier = 1.0,  -- Direct damage / default
+    },
+    ["Righteous Fury"] = {
+        class = "PALADIN",
+        name = "Righteous Fury",
+        baseId = 25780,
+        minLevel = 16,
+        school = "holy",
+        schoolMask = 2,
+        castType = "instant",
+        hasteType = "gcd",
+        duration = 1800,
+        buffId = 25780,
+        manaCostPct = 0.24, -- 24% of base mana (TBC Classic)
+        flags = { buff = true, utility = true },
         talentModifiers = {},
         threatMultiplier = 1.0,  -- Direct damage / default
     },
@@ -4404,6 +4503,22 @@ DB.catalog = {
     ------------------------------------------------------------------------
     -- SHAMAN â€“ Base class
     ------------------------------------------------------------------------
+    ["Bloodlust"] = {
+        class = "SHAMAN",
+        name = "Bloodlust",
+        baseId = 2825,
+        minLevel = 70,
+        school = "nature",
+        schoolMask = 8,
+        castType = "instant",
+        hasteType = "gcd",
+        duration = 40,
+        cooldown = 600,
+        buffId = 2825,
+        flags = { buff = true, cooldown = true },
+        talentModifiers = {},
+        threatMultiplier = 1.0,  -- Direct damage / default
+    },
     ["Lightning Bolt"] = {
         class = "SHAMAN",
         name = "Lightning Bolt",
@@ -5094,6 +5209,25 @@ for legacyKey, canonicalKey in pairs(DB.legacyKeys) do
     DB.legacyAliasesByCanonical[canonicalKey] = legacyKey
 end
 
+-- Pseudo-keys: rotation-entry keys that do not map 1:1 to a catalog spell.
+-- SWD_EXEC is a variant of a real spell (execution-gated SW:D); the rest are
+-- item actions (trinkets, potions, runes, wand).  These are NOT catalog
+-- entries (so they never pollute byBaseId/byName), but RebuildSpellCatalog
+-- gives each one an A.SPELLS record so the rotation editor, icons, and
+-- cooldown projection all resolve them like a normal spell.
+--   label    : display name shown in the rotation editor and pickers
+--   spellKey : canonical spell this pseudo-key aliases (nil for item actions)
+DB.pseudoKeys = DB.pseudoKeys or {
+    SWD_EXEC = { label = "Shadow Word: Death (execute)", spellKey = "Shadow Word: Death" },
+    TRINKET1 = { label = "Trinket 1 (on-use)", spellKey = nil },
+    TRINKET2 = { label = "Trinket 2 (on-use)", spellKey = nil },
+    POTION   = { label = "Mana Potion",        spellKey = nil },
+    RUNE     = { label = "Dark Rune",          spellKey = nil },
+    WAND     = { label = "Wand",               spellKey = nil },
+    ["Seal of Command (twist)"] = { label = "Seal of Command (twist)", spellKey = "Seal of Command" },
+    ["Seal of Blood (return)"]  = { label = "Seal of Blood (return)",  spellKey = "Seal of Blood" },
+}
+
 DB.byBaseId = {}
 DB.byName = {}
 DB.sortedKeys = {}
@@ -5391,6 +5525,27 @@ function A.RebuildSpellCatalog()
         if legacyKey then
             spellAliases[legacyKey] = spell
         end
+    end
+
+    -- Pseudo-key spell records (SWD_EXEC, trinkets, potions, runes, wand).
+    -- Each mirrors its base spell where one exists so icons, cooldowns, mana,
+    -- and safety checks resolve correctly; item actions stay spell-less.
+    for pseudoKey, pdef in pairs(DB.pseudoKeys) do
+        local base = pdef.spellKey and A.SPELLS[pdef.spellKey] or nil
+        local spell = A.SPELLS[pseudoKey] or {}
+        spell.key    = pseudoKey
+        spell.baseId = base and base.baseId or nil
+        spell.id     = base and base.id or nil
+        spell.name   = (base and base.name) or pdef.label
+        spell.label  = pdef.label
+        spell.rank   = base and base.rank or ""
+        spell.icon   = base and base.icon or nil
+        spell.known  = base and base.known or false
+        spell.class  = base and base.class or nil
+        spell.spec   = base and base.spec or nil
+        spell.meta   = base and base.meta or nil
+        spell.pseudo = true
+        A.SPELLS[pseudoKey] = spell
     end
 
     A.SPELLS_BY_NAME = spellAliases

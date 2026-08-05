@@ -24,6 +24,30 @@ local function MakeClassTaggedName(def)
     return classLabel .. (def and def.name or "Unknown")
 end
 
+-- Append a pseudo-key entry (SWD_EXEC, trinkets, potions, runes, wand) to a
+-- GetPlayerSpells result.  `value` is the rotation-editor picker value: the
+-- pseudo KEY itself (picking "Shadow Word: Death (execute)" must store
+-- "SWD_EXEC", not the base spell name); `label` is the display name.
+local function AddPseudoEntry(spells, pseudoKey, pdef, pseudoSpell)
+    local spell = pseudoSpell
+    spells[#spells + 1] = {
+        key          = pseudoKey,
+        value        = pseudoKey,
+        label        = pdef.label,
+        id           = spell and spell.id or nil,
+        baseId       = spell and (spell.baseId or spell.id) or nil,
+        name         = (spell and spell.class) and ("[" .. spell.class .. "] " .. pdef.label) or pdef.label,
+        resolvedName = (spell and spell.name) or pdef.label,
+        rank         = spell and spell.rank or "",
+        icon         = spell and spell.icon or nil,
+        known        = spell and spell.known or false,
+        castTime     = 0,
+        class        = spell and spell.class or nil,
+        spec         = spell and spell.spec or nil,
+        pseudo       = true,
+    }
+end
+
 ------------------------------------------------------------------------
 -- Shadow Priest spell coefficients are now stored in SpellDatabase.lua
 -- per entry under entry.coefficients and entry.damage.
@@ -363,25 +387,62 @@ function SD:GetPlayerSpells(classFilter)
                 end
             end
         end
+
+        -- Pseudo-keys (SWD_EXEC, trinkets, potions, runes, wand) used by the
+        -- rotation editor.  Class-bound variants (e.g. SWD_EXEC) follow their
+        -- base spell's class; item actions are class-agnostic and always shown.
+        if A.SpellDatabase.pseudoKeys then
+            for pseudoKey, pdef in pairs(A.SpellDatabase.pseudoKeys) do
+                local pseudoSpell = A.SPELLS and A.SPELLS[pseudoKey] or nil
+                if pdef.spellKey then
+                    -- Variant of a real spell: only list for the matching class
+                    if not resolvedClass or (pseudoSpell and pseudoSpell.class == resolvedClass) then
+                        AddPseudoEntry(spells, pseudoKey, pdef, pseudoSpell)
+                    end
+                else
+                    -- Item actions: list for every class
+                    AddPseudoEntry(spells, pseudoKey, pdef, pseudoSpell)
+                end
+            end
+        end
         return spells
     end
 
     if A.SPELLS then
         for key, spell in pairs(A.SPELLS) do
             if key ~= "CLEARCASTING" and (not resolvedClass or spell.class == resolvedClass) then
-                spells[#spells + 1] = {
-                    key          = key,
-                    id           = spell.id,
-                    baseId       = spell.baseId or spell.id,
-                    name         = MakeClassTaggedName(spell),
-                    resolvedName = spell.name,
-                    rank         = spell.rank or "",
-                    icon         = spell.icon or (A.GetSpellIconCached and A.GetSpellIconCached(spell.id or spell.baseId)),
-                    known        = spell.known or false,
-                    castTime     = 0,
-                    class        = spell.class,
-                    spec         = spell.spec,
-                }
+                if spell.pseudo then
+                    spells[#spells + 1] = {
+                        key          = key,
+                        value        = key,
+                        label        = spell.label or key,
+                        id           = spell.id,
+                        baseId       = spell.baseId or spell.id,
+                        name         = spell.label or key,
+                        resolvedName = spell.name or spell.label or key,
+                        rank         = spell.rank or "",
+                        icon         = spell.icon,
+                        known        = spell.known or false,
+                        castTime     = 0,
+                        class        = spell.class,
+                        spec         = spell.spec,
+                        pseudo       = true,
+                    }
+                else
+                    spells[#spells + 1] = {
+                        key          = key,
+                        id           = spell.id,
+                        baseId       = spell.baseId or spell.id,
+                        name         = MakeClassTaggedName(spell),
+                        resolvedName = spell.name,
+                        rank         = spell.rank or "",
+                        icon         = spell.icon or (A.GetSpellIconCached and A.GetSpellIconCached(spell.id or spell.baseId)),
+                        known        = spell.known or false,
+                        castTime     = 0,
+                        class        = spell.class,
+                        spec         = spell.spec,
+                    }
+                end
             end
         end
     end

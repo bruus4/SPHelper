@@ -56,9 +56,7 @@ local spec = {
             globalWaitThresholdMs   = 400,
             defaultDelayToleranceMs = 600,
             dotSafeWindowSec        = 1.5,
-          fakeQueueMaxMs          = 150,
             clipMarginMs            = 50,
-            fqFireOffsetMs          = 30,  -- safety buffer on top of baked-in lat compensation
         },
     },
 
@@ -207,19 +205,9 @@ local spec = {
     -------------------------------------------------------------------
     castBarOptions = {
         { key = "channelFakeQueue",     type = "checkbox", label = "Enable Fake Queue (clip assist)", default = true,
-          tooltip = "Hold spell input until the last channeled tick completes. Requires FQ macros." },
-        { key = "fakeQueueMaxMs",       type = "slider",   label = "FQ max hold (ms)",     default = 150, min = 50, max = 150, step = 1,
-          tooltip = "Maximum milliseconds FQ will busy-wait inside a macro. SPHelper caps this at 150ms because longer /run holds can hit the Anniversary client script limit and break action buttons until /reload." },
-        { key = "fqFireOffsetMs",       type = "slider",   label = "FQ safety buffer (ms)", default = 30, min = -150, max = 150, step = 5,
-          tooltip = "Extra milliseconds added after latency compensation before releasing the cast.\nNegative values pre-compensate latency (release earlier); this is risky and may cause clipping.\n0 = release exactly when cast would arrive at server tick (boundary, may clip on jitter).\n30 = release 30ms later than necessary, cast arrives 30ms after tick (recommended).\nAuto-tune will adjust this automatically when enabled." },
-        { key = "fqAllowNegative",       type = "checkbox", label = "Allow negative FQ offset", default = false,
-          tooltip = "Enable negative values for the FQ safety buffer. Negative offsets release earlier (pre-compensate latency) but increase the risk of clipping; use with caution." },
-        { key = "fqDiag",               type = "checkbox", label = "FQ timing diagnostics", default = false,
-          tooltip = "Print per-tick timing diagnostics after each FQ activation. Shows delta from FQ exit to tick CLEU, running average, and ideal target for tuning fqFireOffsetMs." },
-        { key = "fqAutoAdjust",          type = "checkbox", label = "[EXPERIMENTAL] FQ auto-adjust offset", default = false,
-          tooltip = "Automatically nudge fqFireOffsetMs toward a latency-compensated target using conservative tuning (warmup 8 samples, gain ≈15%, deadband 5ms, max step 10ms). Requires FQ timing diagnostics (fqDiag) to see adjustments. Value is saved after each adjustment. Enable 'Allow negative FQ offset' to permit negative values (use with caution)." },
+          tooltip = "Hold spell input until the last channeled tick completes. Requires FQ macros. The hold is fixed at 189ms and the release is latency-compensated to land right after the tick." },
         { key = "channelClipCues",      type = "checkbox", label = "Show clip zone on cast bar", default = true,
-          tooltip = "Draw a green overlay on the cast bar indicating when it is safe to clip the channel." },
+          tooltip = "Draw a green overlay on the cast bar for each tick. With Fake Queue enabled the zone starts 189ms before the tick (where FQ can hold) and ends 100ms after the tick (safe clip moment); without FQ only the 100ms after-tick window is shown." },
         { key = "tickSound",            type = "dropdown", label = "Tick sound",           default = "click",
           values = {"none","click","tap","pop","snap","blip","coin","beep","ping","chime","ding","bell","alert"},
           tooltip = "Sound played on each channel tick. Helps confirm ticks registered." },
@@ -384,7 +372,13 @@ local spec = {
             local spell = A.SPELLS and A.SPELLS[spellKey]
             if not spell or not spell.id then return 999 end
             if not (A.KnowsSpell and A.KnowsSpell(spell.id)) then return 999 end
-            return math.max((A.GetSpellCDReal and A.GetSpellCDReal(spell.id) or 0) - castRem, 0)
+            -- During an active channel show the REAL cooldown (channels are
+            -- interruptible; see the channel-exception rule in RotationEngine).
+            local cdLeft = (A.GetSpellCDReal and A.GetSpellCDReal(spell.id) or 0)
+            if not ctx.activeChannelSpellKey then
+                cdLeft = cdLeft - castRem
+            end
+            return math.max(cdLeft, 0)
         end
         ctx.mbCD  = CooldownProj("Mind Blast")
         ctx.swdCD = CooldownProj("Shadow Word: Death")

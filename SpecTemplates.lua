@@ -1402,21 +1402,6 @@ end
 
 function T.BuildFrostMageRotation(spec)
     return {
-        -- ── PRE-COMBAT: Arcane Blast opener for Arcane Charge stacks ───
-        -- Top parsing players open with 3x Arcane Blast to build Arcane Charges
-        -- BEFORE switching to Frostbolt rotation (confirmed by logs).
-        T.SpellEntry({
-            key = "Arcane Blast",
-            spellKey = "Arcane Blast",
-            notInCombat = true,
-            targetValid = true,
-            explicitPriority = 100,
-            extraConditions = {
-                -- Build Arcane Charge stacks before engaging
-                T.BuffStacks("Arcane Charge", "<", 3),
-            },
-        }),
-
         -- ── WATER ELEMENTAL: Summon during fight (not pre-combat) ───
         -- Logs show Water Elemental summoned mid-fight, not pre-pull.
         T.SpellEntry({

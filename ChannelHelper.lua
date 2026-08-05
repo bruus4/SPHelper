@@ -16,18 +16,19 @@ local CH = A.ChannelHelper
 -- that limit so FQ never leaves an action button in a broken state.
 CH.FAKE_QUEUE_SCRIPT_SAFE_MS = 189
 
-local function ClampFakeQueueMaxMs(ms)
-    ms = tonumber(ms) or 0
-    if ms < 0 then ms = 0 end
-    if ms > CH.FAKE_QUEUE_SCRIPT_SAFE_MS then
-        ms = CH.FAKE_QUEUE_SCRIPT_SAFE_MS
-    end
-    return ms
-end
+-- FQ always holds the FULL script-time budget; deliberately NOT a user
+-- setting. When a tick is further away than the budget, the macro consumes
+-- the whole hold so the cast lands as close to the tick as the client
+-- allows (firing immediately would land ~budget + latency too early and
+-- lose the tick).
+CH.FAKE_QUEUE_HOLD_MS = CH.FAKE_QUEUE_SCRIPT_SAFE_MS
 
-function CH:GetEffectiveFakeQueueMaxMs()
-    return ClampFakeQueueMaxMs(self._config and self._config.fakeQueueMaxMs or 0)
-end
+-- Fixed safety buffer applied on top of latency compensation: FQ releases so
+-- the cast ARRIVES at the server this many ms AFTER the predicted tick lands.
+-- This guarantees the last tick is never clipped even when the server ticks
+-- a few ms off schedule; the only cost is this many ms of delay (worst case
+-- the next cast starts slightly late instead of clipping the tick).
+CH.FAKE_QUEUE_FIRE_AFTER_MS = 20
 
 local function NormalizeChannelToken(value)
     if type(value) ~= "string" then return nil end
@@ -482,13 +483,9 @@ CH._state = {
 -- Configuration (populated from spec constants / SpecUI toggles)
 ------------------------------------------------------------------------
 CH._config = {
-    enabled          = true,
     clipCues         = true,
-    fakeQueueEnabled = true,
-    fakeQueueMaxMs   = CH.FAKE_QUEUE_SCRIPT_SAFE_MS,
-    clipMarginMs     = 50,
-    fqFireOffsetMs   = 15,  -- ms after perfect timing to release (0 = exactly at tick, +15 = 15ms after)
-    inputLagMs       = 0,   -- populated from GetNetStats
+    fakeQueueEnabled = true,  -- single FQ on/off switch (castBarOptions.channelFakeQueue)
+    clipMarginMs     = 50,    -- spec tuning constant: safe-clip-zone margin
 }
 
 ------------------------------------------------------------------------
@@ -535,33 +532,16 @@ end
 ------------------------------------------------------------------------
 function CH:UpdateConfig(spec)
     if not spec then return end
-    local timing = spec.constants and spec.constants.timing
-    local rawMaxMs
-    if timing then
-        -- Use spec-level settings first (from uiOptions/DB), fallback to spec constants
-        rawMaxMs = A.SpecVal("fakeQueueMaxMs", timing.fakeQueueMaxMs or CH.FAKE_QUEUE_SCRIPT_SAFE_MS)
-        self._config.clipMarginMs    = A.SpecVal("clipMarginMs",    timing.clipMarginMs    or 50)
-        self._config.fqFireOffsetMs  = A.SpecVal("fqFireOffsetMs",  timing.fqFireOffsetMs  or 0)
-    else
-        rawMaxMs = A.SpecVal("fakeQueueMaxMs", CH.FAKE_QUEUE_SCRIPT_SAFE_MS)
-        self._config.clipMarginMs    = A.SpecVal("clipMarginMs",    50)
-        self._config.fqFireOffsetMs  = A.SpecVal("fqFireOffsetMs",  0)
-    end
-    self._config.fakeQueueMaxMs = ClampFakeQueueMaxMs(rawMaxMs)
-    -- Read from per-spec DB
+    -- Single on/off switch + visual cues; FQ hold time is a fixed constant
+    -- (CH.FAKE_QUEUE_HOLD_MS) and is deliberately not configurable.
     self._config.fakeQueueEnabled = A.SpecVal("channelFakeQueue", true)
     self._config.clipCues         = A.SpecVal("channelClipCues",  true)
 
-    if tonumber(rawMaxMs) and tonumber(rawMaxMs) > self._config.fakeQueueMaxMs then
-        if A.SetSpecVal then
-            pcall(A.SetSpecVal, "fakeQueueMaxMs", self._config.fakeQueueMaxMs)
-        end
-        if not self._warnedFakeQueueCap then
-            self._warnedFakeQueueCap = true
-            print(string.format(
-                "|cff8882d5SPHelper|r: FQ max hold capped at |cffffcc00%dms|r to avoid macro script timeouts.",
-                self._config.fakeQueueMaxMs))
-        end
+    local timing = spec.constants and spec.constants.timing
+    if timing then
+        self._config.clipMarginMs = A.SpecVal("clipMarginMs", timing.clipMarginMs or 50)
+    else
+        self._config.clipMarginMs = A.SpecVal("clipMarginMs", 50)
     end
 end
 
@@ -609,6 +589,9 @@ function CH:OnChannelUpdate(endTime)
     self._state.endTime = endTime
     self._state.totalDuration = endTime - self._state.startTime
     self._state.tickInterval  = self._state.totalDuration / self._state.tickCount
+    -- Refresh one-way latency: it can shift mid-channel and the FQ release
+    -- target depends on it (release = tickTime - latency + buffer).
+    self._state.latency = A.GetLatency()
     self:_RecalcClipWindow()
 end
 
@@ -645,7 +628,7 @@ function CH:_RecalcClipWindow()
     -- Extend clip window earlier by FQ hold time when FQ is enabled
     -- (this makes the overlay show the extended zone; FQ waits until clipWindowBase)
     if self._config.fakeQueueEnabled then
-        local fqExtend = self:GetEffectiveFakeQueueMaxMs() / 1000
+        local fqExtend = CH.FAKE_QUEUE_HOLD_MS / 1000
         s.clipWindowStart = s.clipWindowStart - fqExtend
     end
 
@@ -757,9 +740,16 @@ function CH:UpdateCastbarOverlay()
 
     local barWidth = parent:GetWidth()
 
-    -- Render one persistent zone per shown tick marker.
+    -- Render one persistent zone per shown tick marker. The zone visualizes
+    -- both windows for each tick:
+    --   * BEFORE the tick (only when FQ is enabled): from the earliest point
+    --     FQ can hold from (tickTime - FAKE_QUEUE_HOLD_MS, clamped to channel
+    --     start) up to the tick — pressing there makes FQ hold and release
+    --     right after the tick.
+    --   * AFTER the tick (always): tickTime + 100ms — clipping within this
+    --     window is also safe because the tick has already landed.
     local overlayAfter = 0.1 -- seconds shown after the tick (100ms)
-    local fqExtend = (self._config.fakeQueueEnabled and self:GetEffectiveFakeQueueMaxMs() / 1000) or 0
+    local fqExtend = (self._config.fakeQueueEnabled and CH.FAKE_QUEUE_HOLD_MS / 1000) or 0
     local activeCount = 0
     for i = 1, s.tickCount do
         local showTick = true
@@ -821,14 +811,13 @@ end
 --   /run SPH_FQ()
 --   /cast Mind Blast
 --
--- It will busy-wait up to fakeQueueMaxMs if MF is being channeled
--- and the clip window hasn't opened yet, so the next /cast fires
--- at the optimal moment.
+-- It will busy-wait up to the fixed hold (CH.FAKE_QUEUE_HOLD_MS = 189ms)
+-- if a channel is active and the clip moment hasn't arrived yet, so the
+-- next /cast fires at the optimal moment: right after the last tick.
 ------------------------------------------------------------------------
 
 function CH:FakeQueue(spellArg)
-    local maxWaitMs = self:GetEffectiveFakeQueueMaxMs()
-    local maxWait = maxWaitMs / 1000
+    local maxWait = CH.FAKE_QUEUE_HOLD_MS / 1000
     if maxWait <= 0 then return end
 
     -- ------------------------------------------------------------------
@@ -886,12 +875,14 @@ function CH:FakeQueue(spellArg)
     -- Compute the next upcoming tick time we should wait for.
     --
     -- lat_s = one-way latency to server (seconds).
-    --   release at: T_tick - lat_s + fineOffset
-    -- With offset = 0, the cast arrives at the server exactly at T_tick.
-    -- With offset = +15ms (default), the cast arrives 15ms after T_tick (safe).
+    --   release at: T_tick - lat_s + FAKE_QUEUE_FIRE_AFTER_MS
+    -- The cast command reaches the server one-way latency later, i.e.
+    -- at T_tick + FAKE_QUEUE_FIRE_AFTER_MS — right AFTER the tick lands.
+    -- Jitter in the server tick schedule can then only make the cast
+    -- slightly late, never clip the tick.
     -- ---------------------------------------------------------------
-    local lat_s      = s.latency            -- one-way latency in seconds
-    local fineOffset = self._config.fqFireOffsetMs / 1000
+    local lat_s      = s.latency                              -- one-way latency in seconds
+    local fineOffset = CH.FAKE_QUEUE_FIRE_AFTER_MS / 1000
     local now        = GetTime()
 
     local targetTime = nil
@@ -907,13 +898,12 @@ function CH:FakeQueue(spellArg)
 
     local needed = targetTime - now
 
-    -- If the target is further out than the script-time budget allows,
-    -- wait the FULL budget instead of firing immediately: the cast then
-    -- lands as close to the tick as the budget permits (vs. firing now,
-    -- which would land ~budget + latency too early and lose the tick).
-    -- Skip only if the target is already past (nothing to wait for).
-    if needed > maxWait then needed = maxWait end
-    if needed <= 0 then return end
+    -- Only engage the busy-wait when the release point is within the
+    -- script-time budget. Presses further out are handled by WoW's native
+    -- spell queue; holding would only delay the cast without landing it on
+    -- the tick, and it freezes the UI for no benefit. (Matches the
+    -- DoT-refresh branch above.)
+    if needed <= 0 or needed > maxWait then return end
 
     -- ---------------------------------------------------------------
     -- Sub-millisecond busy-wait using debugprofilestop().

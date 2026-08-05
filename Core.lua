@@ -1299,6 +1299,22 @@ end
 function A.ResetAll()
     SPHelperDB = nil
     A.InitDB()
+
+    -- A wiped DB must behave like a fresh install: stamp every registered
+    -- spec's current settingVersion.  Without this, the next login's
+    -- ProcessSettingChanges would re-run all migrations against the freshly
+    -- defaulted values (Phase 0 migration re-populates spec keys with the
+    -- flat defaults, and the hasSavedData heuristic then treats the wiped
+    -- DB as an upgrade) — prompting for settings whose saved value is
+    -- identical to the new default.
+    if A.db and A.SpecManager and A.SpecManager.GetRegisteredSpecs then
+        A.db._settingVersions = A.db._settingVersions or {}
+        for specID, spec in pairs(A.SpecManager:GetRegisteredSpecs()) do
+            if spec.settingVersion then
+                A.db._settingVersions[specID] = spec.settingVersion
+            end
+        end
+    end
 end
 
 --- Reset only visual/layout settings: scale, castBar, dotTracker, rotation visuals, framePositions.
@@ -1379,9 +1395,25 @@ function A.ResetSpecRotation(specID)
     end
 end
 
+-- Resolve the configured tick sound / flash keys.
+-- Preference order: active-spec override (written by the castBarOptions
+-- dropdowns via A.SetSpecVal) -> legacy A.db.castBar values (old boolean
+-- migration) -> default.
+function A.GetConfiguredTickSoundKey()
+    local k = A.SpecVal and A.SpecVal("tickSound", nil)
+    if k == nil and A.db and A.db.castBar then k = A.db.castBar.tickSound end
+    return k or "click"
+end
+
+function A.GetConfiguredTickFlashKey()
+    local k = A.SpecVal and A.SpecVal("tickFlash", nil)
+    if k == nil and A.db and A.db.castBar then k = A.db.castBar.tickFlash end
+    return k or "green"
+end
+
 -- Play a tick sound (shared helper used by both the cast bar and tick manager)
 function A.PlayTickSound(key)
-    local k = key or (A.db and A.db.castBar and A.db.castBar.tickSound) or "click"
+    local k = key or A.GetConfiguredTickSoundKey()
     if k == "none" or k == true or not k then return end
     local id = A.GetTickSoundId(k)
     if id then pcall(PlaySound, id, "SFX") end
@@ -1492,10 +1524,24 @@ function A._InitSettingVersions()
     -- prompts only for default changes where user has a saved override).
 end
 
+--- Type-tolerant comparison for default-change detection.
+-- Saved values may arrive as strings from old config writes while new
+-- defaults are numbers (and vice versa); "20" and 20 are the same value.
+local function ValuesDiffer(a, b)
+    if a == b then return false end
+    if type(a) == "number" and type(b) == "string" then return a ~= tonumber(b) end
+    if type(a) == "string" and type(b) == "number" then return tonumber(a) ~= b end
+    return true
+end
+
 --- Process setting version changes for all registered specs.
 -- Handles silent migrations, removals, and queues prompts for default-value
 -- changes where the user has a saved override.  Should be called after
 -- InitDB and after specs are fully registered (safe at ADDON_LOADED time).
+-- A prompt is queued ONLY when the saved value genuinely differs from the
+-- new default — a mere presence check would list settings whose saved and
+-- default values are identical (e.g. after a Full Reset, Phase 0 migration
+-- re-populates spec keys with the flat defaults).
 function A.ProcessSettingChanges()
     if not A.SpecManager or not A.SpecManager.GetRegisteredSpecs then return end
     if not A.db or not A.db._settingVersions then return end
@@ -1529,10 +1575,34 @@ function A.ProcessSettingChanges()
                             end
                         end
 
-                        -- Default-value changes: prompt only if user has a saved override
+                        -- Default-value changes: prompt only if the user's
+                        -- saved value genuinely differs from the new default.
                         if changes.defaults then
                             for _, key in ipairs(changes.defaults) do
-                                if sdb and sdb[key] ~= nil then
+                                local saved = sdb and sdb[key]
+
+                                -- Resolve the new default through the same
+                                -- fallback chain readers use.  Note: A.db[key]
+                                -- is saved data, never a default — use the
+                                -- file-level defaults for comparison.
+                                local newDefault
+                                if spec.settingDefs and spec.settingDefs[key] then
+                                    newDefault = spec.settingDefs[key].default
+                                elseif spec.castBarOptions then
+                                    for _, opt in ipairs(spec.castBarOptions) do
+                                        if opt.key == key then newDefault = opt.default; break end
+                                    end
+                                end
+                                if newDefault == nil then
+                                    local sd = A.SPEC_DEFAULTS and A.SPEC_DEFAULTS[specID]
+                                    if sd and sd[key] ~= nil then
+                                        newDefault = sd[key]
+                                    elseif A.defaults and A.defaults[key] ~= nil then
+                                        newDefault = A.defaults[key]
+                                    end
+                                end
+
+                                if saved ~= nil and newDefault ~= nil and ValuesDiffer(saved, newDefault) then
                                     -- Resolve a human-readable label
                                     local label = key
                                     if spec.settingDefs and spec.settingDefs[key] then
@@ -1543,17 +1613,18 @@ function A.ProcessSettingChanges()
                                         end
                                     end
                                     local specName = (spec.meta and spec.meta.specName) or specID
-                                    local newDefault = spec.settingDefs and spec.settingDefs[key] and spec.settingDefs[key].default
                                     queue[#queue + 1] = {
                                         specID = specID,
                                         key = key,
                                         label = label,
                                         specName = specName,
-                                        savedValue = sdb[key],
+                                        savedValue = saved,
                                         newDefault = newDefault,
                                     }
                                 end
-                                -- If user never touched it: silently takes new default (sdb[key] stays nil)
+                                -- If the user never touched it (saved == nil) or
+                                -- their value already equals the new default:
+                                -- silently adopt/keep it — no prompt.
                             end
                         end
                     end
@@ -1609,7 +1680,7 @@ end
 
 -- Perform a tick screen-flash with proper gradient edges and smooth fade-out.
 function A.DoTickFlash(key)
-    local k = key or (A.db and A.db.castBar and A.db.castBar.tickFlash)
+    local k = key or A.GetConfiguredTickFlashKey()
     if k == "none" or k == true or not k then return end
     local col = A.GetTickFlashColor(k)
     if not col then return end

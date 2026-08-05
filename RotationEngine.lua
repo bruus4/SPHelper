@@ -381,7 +381,18 @@ local function GetProjectedSpellCooldown(spellKey, ctx)
 
     local spellId = ResolveSpellId(spellKey)
     if not spellId then return nil end
-    return math.max(((A.GetSpellCDReal and A.GetSpellCDReal(spellId) or 0) - ((ctx and ctx.castRemaining) or 0)) - simElapsed, 0)
+    -- Project the cooldown past the current cast/channel.  During an active
+    -- channel do NOT subtract the remaining channel time: channels are
+    -- interruptible, and the channel-exception rule (see the queue chain)
+    -- says the advisor shows REAL spell cooldowns while channeling.
+    -- Subtracting the full channel (up to 3 s for Mind Flay) projected short
+    -- cooldowns to 0, which flipped e.g. Mind Blast to "ready" and removed
+    -- its timer the moment a Mind Flay channel started (user request).
+    local cdLeft = (A.GetSpellCDReal and A.GetSpellCDReal(spellId) or 0)
+    if not (ctx and ctx.activeChannelSpellKey) then
+        cdLeft = cdLeft - ((ctx and ctx.castRemaining) or 0)
+    end
+    return math.max(cdLeft - simElapsed, 0)
 end
 
 -- Does this spell/action trigger the global cooldown?  The spell catalog
@@ -894,7 +905,7 @@ local function GetTrackedDebuffState(spec, ctx, spellKey)
         if sim ~= nil then
             -- sim = { expiry = N } or false (explicitly absent)
             local remaining = sim and math.max((sim.expiry or 0) - now, 0) or 0
-            local castRem = (ctx.castRemaining or 0)
+            local castRem = (ctx.dotBlockRemaining ~= nil) and ctx.dotBlockRemaining or (ctx.castRemaining or 0)
             local duration = GetTrackedDebuffDuration(spec, spellKey)
             return {
                 key = def.key or spellKey,
@@ -946,11 +957,15 @@ local function GetTrackedDebuffState(spec, ctx, spellKey)
         end
     end
 
-    -- Use cast remaining for DoT "after" projection. ctx.clipCastRemaining now
-    -- always equals full remaining channel time (clip-aware logic disabled).
-    -- Note: clipCastRemaining can legitimately be 0, so we test ~= nil explicitly.
+    -- Use cast remaining for DoT "after" projection. ctx.dotBlockRemaining is
+    -- the clip-aware blocking time (only the unclippable minimum of an active
+    -- channel); ctx.clipCastRemaining always equals full remaining channel
+    -- time (clip-aware logic disabled for the queue chain).
+    -- Note: these can legitimately be 0, so we test ~= nil explicitly.
     local castRemaining
-    if ctx and ctx.clipCastRemaining ~= nil then
+    if ctx and ctx.dotBlockRemaining ~= nil then
+        castRemaining = ctx.dotBlockRemaining
+    elseif ctx and ctx.clipCastRemaining ~= nil then
         castRemaining = ctx.clipCastRemaining
     else
         castRemaining = (ctx and ctx.castRemaining) or 0
@@ -1940,6 +1955,29 @@ function RE:BuildContext(spec)
         ctx.clipCastRemaining = castRemaining
     end
 
+    -- DoT-projection blocking time.
+    -- The DoT "after" projection (projected_dot_time_left_lt) answers "how much
+    -- remaining time will the DoT have when the current blocking action ends".
+    -- For a hard cast the blocking time is the full remaining cast.  For an
+    -- active channel that supports clipping (minDuration > 0) the channel is
+    -- interruptible, so only the unclippable minimum (minDuration - elapsed)
+    -- blocks the refresh.  Subtracting the FULL remaining channel time made
+    -- DoT refreshes (e.g. Vampiric Touch) fire ~3 s early while channeling —
+    -- most visibly right after clipping Mind Flay into a new Mind Flay, where
+    -- castRemaining jumps back to the full channel duration (user request).
+    -- Mirrors the channelClip breakAt formula (minDuration - elapsed).
+    local dotBlockRemaining = castRemaining
+    if ctx.activeChannelSpellKey then
+        local cfg = GetChannelSpellConfig(spec, ctx.activeChannelSpellKey)
+        local minDur = cfg and tonumber(cfg.minDuration)
+        if minDur and minDur > 0 then
+            local chanEff = GetEffectiveSpellChannelTime(ctx.activeChannelSpellKey, ctx) or 0
+            local elapsed = math.max(chanEff - castRemaining, 0)
+            dotBlockRemaining = math.max(minDur - elapsed, 0)
+        end
+    end
+    ctx.dotBlockRemaining = dotBlockRemaining
+
     -- Generic tracked debuffs: build lookup tables and ctx shorthand aliases.
     -- e.g. trackedDebuffs = { {key="vt", spellKey="Vampiric Touch", ...} }
     -- produces ctx["vtRem"], ctx["vtAfter"], ctx["vtCastEff"] etc.
@@ -1957,7 +1995,7 @@ function RE:BuildContext(spec)
                 trackedDebuffsByAlias[alias]       = state
                 trackedDebuffsBySpellKey[spellKey] = state
                 ctx[alias .. "Rem"]     = state.remaining or 0
-                ctx[alias .. "After"]   = math.max((state.remaining or 0) - ctx.clipCastRemaining, 0)
+                ctx[alias .. "After"]   = math.max((state.remaining or 0) - ((ctx.dotBlockRemaining ~= nil) and ctx.dotBlockRemaining or (ctx.clipCastRemaining or 0)), 0)
                 ctx[alias .. "CastEff"] = state.castEff
             end
         end
@@ -2083,6 +2121,7 @@ function RE:SimulateSpellEffect(ctx, spellKey, spec, advanceOverride)
     p.castingSpell          = false   -- false is falsy like nil but blocks __index
     p.isChanneling          = false   -- channeling evaluator checks this in sim ctx
     p.clipCastRemaining     = 0       -- must be numeric (used in arithmetic)
+    p.dotBlockRemaining     = 0       -- no channel blocking after simulated cast
     p.activeChannelSpellKey = false   -- no longer mid-channel after simulated cast
 
     -- Resource (energy/rage/mana)
@@ -2369,7 +2408,9 @@ RE._condEval["projected_dot_time_left_lt"] = function(cond, ctx, spec, db)
         end
     end
     if after <= 0 and (not key or not GetTrackedDebuffState(spec, ctx, key)) then
-        local clipCast = (ctx and ctx.clipCastRemaining ~= nil) and ctx.clipCastRemaining or (ctx and ctx.castRemaining or 0)
+        local clipCast = (ctx and ctx.dotBlockRemaining ~= nil) and ctx.dotBlockRemaining
+            or ((ctx and ctx.clipCastRemaining ~= nil) and ctx.clipCastRemaining)
+            or (ctx and ctx.castRemaining or 0)
         after = math.max(ResolveDebuffRemaining(spec, ctx, cond) - clipCast, 0)
     end
 
@@ -4869,14 +4910,22 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
         end
         for _, ins in ipairs(insertions) do
             local idx = nil
+            local targetReady = false
             for ri = 1, #result do
-                if result[ri].key == ins.before then idx = ri; break end
+                if result[ri].key == ins.before then
+                    idx = ri
+                    targetReady = (result[ri].eta or 0) <= READY_EPSILON
+                    break
+                end
             end
-            if idx then
+            if idx and targetReady then
                 table.insert(result, idx, ins.entry)
-            else
-                result[#result + 1] = ins.entry
             end
+            -- else: the before-target is not ready (still on cooldown /
+            -- resource-blocked, or not in the queue at all). Drop the entry
+            -- instead of inserting it anyway: an insertBefore ability (e.g.
+            -- Inner Focus before Mind Blast) must not be suggested while the
+            -- spell it is meant to precede cannot be cast yet.
         end
     end
 

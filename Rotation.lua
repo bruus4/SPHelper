@@ -954,8 +954,14 @@ function A:InitRotation()
                         normal[#normal + 1] = ent
                     end
                 end
-                -- Rebuild prio: normal → on-cooldown optional (ready optional are bonus-only)
+                -- Rebuild prio. Ready optionals stay visible at the TOP of the
+                -- main list (they used to be bonus-slot only, which hid e.g. a
+                -- ready trinket from the ability list entirely); the bonus slot
+                -- still shows them for the inflate-timers behavior the user
+                -- requested. Chain/timer semantics are untouched - Rotation.lua
+                -- is display-only; auto-cast lives in RotationEngine.
                 local ordered = {}
+                for _, ent in ipairs(bonus) do ordered[#ordered + 1] = ent end
                 for _, ent in ipairs(normal) do ordered[#ordered + 1] = ent end
                 for _, ent in ipairs(cooldownOpt) do ordered[#ordered + 1] = ent end
 
@@ -965,10 +971,6 @@ function A:InitRotation()
                     for i = 1, slotCount do
                         optionalPrio[i] = bonus[i]
                     end
-                    -- Extras beyond capacity: stay bonus-only (not duplicated in queue)
-                else
-                    -- Bonus slot disabled: ready optionals fall back to normal queue
-                    for _, ent in ipairs(bonus) do ordered[#ordered + 1] = ent end
                 end
                 prio = ordered
             end
