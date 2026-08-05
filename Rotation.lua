@@ -617,6 +617,7 @@ function A:InitRotation()
     -- Refresh display
     ----------------------------------------------------------------
     local lastPriSignature = nil
+    local lastCddLogAt = nil   -- throttle for the displayed-countdown debug log
     local inCombat      = UnitAffectingCombat("player")
     local noTargetSince = nil   -- GetTime() when we first saw nil prio in combat
     local HYSTERESIS_WINDOW = 0.20
@@ -1003,6 +1004,12 @@ function A:InitRotation()
             local castName = select(1, GetPlayerCastInfo())
             if castName then
                 local castKey = nameToKey[castName]
+                if not castKey then
+                    -- Non-English clients: cast names are localized; the spell
+                    -- DB registers localized names, so resolve and retry by key.
+                    local castDef = A.GetSpellDefinition and A.GetSpellDefinition(castName)
+                    castKey = castDef and castDef.key or nil
+                end
                 if castKey and prio[1] and prio[1].key == castKey then
                     -- Channel behavior is policy-driven now: default keeps the
                     -- current channel in slot 1 and can still promote instant
@@ -1231,6 +1238,11 @@ function A:InitRotation()
         local castNameNow = select(1, GetPlayerCastInfo())
         local primaryIsActiveChannel = primarySpell and primarySpell.name and castNameNow
                                        and primarySpell.name == castNameNow
+        if not primaryIsActiveChannel and primarySpell and castNameNow then
+            -- Non-English clients: cast names are localized; compare by key.
+            local castDef = A.GetSpellDefinition and A.GetSpellDefinition(castNameNow)
+            primaryIsActiveChannel = castDef ~= nil and castDef.key == p.key
+        end
         local realCDRem = (sDur > 2.5 and not primaryIsActiveChannel) and math.max(sStart + sDur - now, 0) or 0
 
         local primaryOverlayActive = false
@@ -1303,7 +1315,13 @@ function A:InitRotation()
                 local qHasRealCD = false
                 if q.cdOverlay then
                     local qspell = SPELLS[ent.key]
-                    if qspell and qspell.id and not (castNameNow and qspell.name == castNameNow) then
+                    local qIsActiveChannel = qspell and qspell.id and castNameNow and qspell.name == castNameNow
+                    if not qIsActiveChannel and qspell and castNameNow then
+                        -- Non-English clients: cast names are localized; compare by key.
+                        local castDef = A.GetSpellDefinition and A.GetSpellDefinition(castNameNow)
+                        qIsActiveChannel = castDef ~= nil and castDef.key == ent.key
+                    end
+                    if qspell and qspell.id and not qIsActiveChannel then
                         local qstart, qdur = GetSpellCooldown(qspell.id)
                         if qstart and qdur and qdur > 1.5 then
                             pcall(CooldownFrame_Set, q.cdOverlay, qstart, qdur, 1)
@@ -1354,6 +1372,42 @@ function A:InitRotation()
                 q:Show()
             else
                 q:Hide()
+            end
+        end
+
+        -- Debug: log the countdown actually displayed on the icons (ROT module).
+        -- Fires at ~2 Hz while any countdown is visible, so a fight captures
+        -- the exact "cooldown shown" the user sees plus the engine values
+        -- behind it (eta / cooldownEnd / real spell CD).  Key swaps are logged
+        -- by the signature-change line above.
+        if A.IsDebugModuleEnabled and A.IsDebugModuleEnabled("ROT") then
+            local dbgQueue = {}
+            local dbgAnyLive = primaryLive and primaryLive > 0
+            for i = 1, 3 do
+                local qent = prio[i + queueStart - 1]
+                if qent then
+                    local qlive = VisibleRemaining(qent)
+                    if qlive and qlive > 0 then dbgAnyLive = true end
+                    dbgQueue[#dbgQueue + 1] = string.format("%s(live=%.2f,eta=%s,cdEnd=%s,clip=%s)",
+                        qent.key, qlive or 0,
+                        qent.eta and string.format("%.2f", qent.eta) or "nil",
+                        qent.cooldownEnd and string.format("%.2f", qent.cooldownEnd) or "nil",
+                        tostring(qent.clip))
+                end
+            end
+            -- Throttled while any countdown is visible: the signature-change log
+            -- above (line ~1274) already covers key swaps.
+            if dbgAnyLive and ((not lastCddLogAt) or (now - lastCddLogAt) >= 0.5) then
+                lastCddLogAt = now
+                A.DebugLog("ROT", string.format(
+                    "display primary=%s live=%.2f shown=%q cdEnd=%s eta=%s realCD=%.2f overlay=%s clip=%s range=%s fade=%s | queue: %s",
+                    p and p.key or "nil", primaryLive or 0,
+                    primary.cdText:GetText() or "",
+                    p and p.cooldownEnd and string.format("%.2f", p.cooldownEnd) or "nil",
+                    p and p.eta and string.format("%.2f", p.eta) or "nil",
+                    realCDRem or 0, tostring(primaryOverlayActive),
+                    tostring(p and p.clip), tostring(inRangePrimary), tostring(primaryShown),
+                    #dbgQueue > 0 and table.concat(dbgQueue, ", ") or "none"))
             end
         end
 

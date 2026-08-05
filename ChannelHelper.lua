@@ -354,6 +354,21 @@ function CH:GetChannelInfoForSpell(spellName, spellID)
     if A.GetSpellDefinition then
         def = A.GetSpellDefinition(spellID or spellName)
     end
+
+    -- Non-English clients: the name from UnitChannelInfo is localized
+    -- (e.g. German "Gedankenschlag"), so the English-keyed KNOWN_CHANNELS
+    -- lookup above misses. Match the resolved definition against the known
+    -- channels instead, so the configured tick / clip / FQ features still
+    -- apply instead of the default-off fallback info.
+    if def and def.name and self.KNOWN_CHANNELS then
+        for knownName, info in pairs(self.KNOWN_CHANNELS) do
+            if type(info) == "table"
+               and (info.spellKey == def.key or info.spellName == def.name or knownName == def.name) then
+                return info
+            end
+        end
+    end
+
     if not resolvedName and spellID and A.GetSpellInfoCached then
         resolvedName = A.GetSpellInfoCached(spellID)
     end

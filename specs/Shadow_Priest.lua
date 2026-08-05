@@ -157,6 +157,11 @@ local spec = {
                                tooltip = "Show dark/demonic rune in rotation suggestions when low on mana." },
         runeManaThreshold = { type = "slider",   label = "Rune mana %",           default = 15, min = 5, max = 100, step = 5, group = "Bonus Abilities",
                                tooltip = "Suggest rune when mana drops below this percentage." },
+
+        -- Threat group
+        threatAvoidance = { type = "dropdown", label = "Threat avoidance", default = "safe", group = "Threat",
+                               values = {"never", "safe", "aggressive"},
+                               tooltip = "In party/raid content, stop suggesting spells whose cast would push your threat to/past the tank's (about to pull aggro). 'safe' blocks with a small margin, 'aggressive' blocks only at the exact pull point, 'never' disables the filter." },
     },
 
     -- Preferred rendering order for settings that aren't rotation-referenced.
@@ -171,6 +176,7 @@ local spec = {
         "use_SF", "sfManaThreshold",
         "suggestPot", "potManaThreshold",
         "suggestRune", "runeManaThreshold",
+        "threatAvoidance",
     },
 
     -------------------------------------------------------------------

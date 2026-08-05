@@ -1388,11 +1388,21 @@ function A:InitDotTracker()
                     -- Debuff tracking (only for hostile targets we're tracking)
                     if targets[destGUID] and spellName then
                         local debuffKey = nameToKey[spellName]
+                        local debuffDef
+                        if not debuffKey then
+                            -- Non-English clients: CLEU spell names are localized
+                            -- (e.g. German "Gedankenschlag"); the spell DB registers
+                            -- localized names, so resolve and retry by catalog key.
+                            debuffDef = A.GetSpellDefinition and A.GetSpellDefinition(spellName)
+                            if debuffDef then
+                                debuffKey = nameToKey[debuffDef.name] or nameToKey[debuffDef.key]
+                            end
+                        end
                         if debuffKey then
                             if subEvent == "SPELL_AURA_APPLIED"
                             or subEvent == "SPELL_AURA_REFRESH" then
                                 local t = targets[destGUID]
-                                local dur = nameToDur[spellName] or 15
+                                local dur = nameToDur[spellName] or (debuffDef and nameToDur[debuffDef.name]) or 15
                                 t[debuffKey .. "_dur"] = dur
                                 t[debuffKey .. "_exp"] = GetTime() + dur
 

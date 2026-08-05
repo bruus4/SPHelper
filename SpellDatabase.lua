@@ -91,6 +91,7 @@ DB.catalog = {
         coefficients = { spellPower = 1.0 },
         damage = { estimateBase = 650, perTickBase = 130 },
         threatMultiplier = 1.3, -- DoT ticks: 1.3x per tick (TBC Classic)
+        manaCost = 425, -- TBC max rank (34917)
         debuffStackingMode = "per_player", -- Each priest applies own VT; damage stacks across priests
         talentModifiers = {},
     },
@@ -114,6 +115,7 @@ DB.catalog = {
         coefficients = { spellPower = 1.10 },
         damage = { estimateBase = 1236, perTickBase = 206 },
         threatMultiplier = 1.3, -- DoT ticks: 1.3x per tick (TBC Classic)
+        manaCost = 510, -- TBC max rank (25367)
         debuffStackingMode = "per_player", -- Each priest applies own SWP; damage stacks across priests
         talentModifiers = {
             { name = "Improved Shadow Word: Pain",  tab = 3, index = 4,  maxRank = 2, perRank = 3,    affects = "duration" },
@@ -136,6 +138,7 @@ DB.catalog = {
         coefficients = { spellPower = 0.429 },
         damage = { estimateBase = 731 },
         threatMultiplier = 1.0, -- Direct damage: 1x (TBC Classic)
+        manaCost = 350, -- TBC max rank (10947)
         talentModifiers = {
             { name = "Improved Mind Blast",   tab = 3, index = 12, maxRank = 5, perRank = -0.5,  affects = "cooldown" },
             { name = "Shadow Power",  tab = 3, index = 20, maxRank = 5, perRank = 0.03,  affects = "crit_bonus" },
@@ -165,6 +168,7 @@ DB.catalog = {
         damage = { estimateBase = 528, perTickBase = 176 },
         debuffStackingMode = "per_player", -- Each priest channels own Mind Flay; damage stacks across priests
         threatMultiplier = 1.0, -- Channeled: 1x per tick (TBC Classic)
+        manaCost = 230, -- TBC max rank (25387)
         talentModifiers = {
             { name = "Shadow Power",  tab = 3, index = 20, maxRank = 5, perRank = 0.03,  affects = "crit_bonus" },
         },
@@ -186,6 +190,7 @@ DB.catalog = {
         coefficients = { spellPower = 0.429 },
         damage = { estimateBase = 572 },
         threatMultiplier = 1.0, -- Direct instant: 1x (TBC Classic)
+        manaCost = 309, -- TBC max rank (32996)
         talentModifiers = {
             { name = "Shadow Power",  tab = 3, index = 20, maxRank = 5, perRank = 0.03,  affects = "crit_bonus" },
         },
@@ -210,6 +215,7 @@ DB.catalog = {
         coefficients = { spellPower = 0.80 },
         damage = { estimateBase = 1216, perTickBase = 152 },
         threatMultiplier = 1.3, -- DoT ticks: 1.3x per tick (TBC Classic)
+        manaCost = 1145, -- TBC max rank (25467)
         debuffStackingMode = "per_player", -- Each priest applies own Devouring Plague; damage stacks across priests
         talentModifiers = {},
     },
@@ -228,6 +234,7 @@ DB.catalog = {
         flags = { cooldown = true, summon = true, offensive = true },
         talentModifiers = {},
         threatMultiplier = 1.0,  -- Direct damage / default
+        manaCostPct = 0.06, -- 6% of base mana (TBC Classic)
     },
     ["Vampiric Embrace"] = {
         class = "PRIEST",
@@ -245,6 +252,7 @@ DB.catalog = {
         flags = { buff = true, magical = true },
         talentModifiers = {},
         threatMultiplier = 1.0,  -- Direct damage / default
+        manaCostPct = 0.02, -- 2% of base mana (TBC Classic)
     },
     ["Shadowform"] = {
         class = "PRIEST",
@@ -263,8 +271,9 @@ DB.catalog = {
         talentModifiers = {
             { name = "Shadow Weaving", tab = 3, index = 15, maxRank = 5, perRank = 0.02, affects = "damage" },
             { name = "Darkness",       tab = 3, index = 16, maxRank = 5, perRank = 0.02, affects = "damage" },
-        threatMultiplier = 1.0,  -- Direct damage / default
         },
+        threatMultiplier = 1.0,  -- Direct damage / default
+        manaCostPct = 0.32, -- 32% of base mana (TBC Classic)
     },
     ["Inner Focus"] = {
         class = "PRIEST",
@@ -282,6 +291,7 @@ DB.catalog = {
         flags = { cooldown = true, buff = true },
         talentModifiers = {},
         threatMultiplier = 1.0,  -- Direct damage / default
+        manaCost = 0, -- no mana cost (free buff)
     },
     ["Mind Soothe"] = {
         class = "PRIEST",
@@ -350,6 +360,7 @@ DB.catalog = {
         flags = { defensive = true, utility = true, cooldown = true },
         talentModifiers = {},
         threatMultiplier = 1.0,  -- Direct damage / default
+        manaCost = 330, -- TBC max rank (25429)
     },
 
     ------------------------------------------------------------------------
@@ -372,6 +383,7 @@ DB.catalog = {
         coefficients = { spellPower = 0.67 },
         damage = { estimateBase = 280 },
         threatMultiplier = 1.0,
+        manaCost = 385, -- TBC max rank (25364)
         talentModifiers = {},
     },
     ["Power Word: Shield"] = {
@@ -390,6 +402,7 @@ DB.catalog = {
         flags = { defensive = true, magical = true },
         coefficients = { spellPower = 0.38 },
         threatMultiplier = 1.0,
+        manaCost = 600, -- TBC max rank (25218)
         talentModifiers = {},
     },
     ["Psychic Scream"] = {
@@ -407,6 +420,7 @@ DB.catalog = {
         debuffId = 8122,
         flags = { control = true, magical = true },
         threatMultiplier = 1.0,
+        manaCost = 180, -- TBC max rank (10888)
         talentModifiers = {},
     },
     ["Inner Fire"] = {
@@ -423,6 +437,7 @@ DB.catalog = {
         buffId = 588,
         flags = { buff = true, magical = true },
         threatMultiplier = 1.0,
+        manaCost = 375, -- TBC max rank (25431)
         talentModifiers = {},
     },
     ["Power Word: Fortitude"] = {
@@ -440,6 +455,7 @@ DB.catalog = {
         buffId = 1243,
         flags = { buff = true, magical = true },
         threatMultiplier = 1.0,
+        manaCost = 700, -- TBC max rank (25389, Rank 7): 700 mana post-2.3 (was 2080 pre-2.3)
         talentModifiers = {},
     },
 

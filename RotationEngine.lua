@@ -38,14 +38,52 @@ local ENERGY_TICK_INTERVAL = 2.0
 local ENERGY_PER_TICK      = 20
 
 local _powerState = {
-    lastPower   = nil,
-    lastTime    = nil,
-    rate        = 0,
+    -- Per-power-type trackers: [powerType] = { lastPower, lastTime, rate, lastTickTime }.
+    -- Each resource (mana=0, rage=1, focus=2, energy=3) is tracked separately so a
+    -- form shift (cat -> bear -> cat) never corrupts the other resource's EMA rate
+    -- or the energy tick phase.  Energy is sampled explicitly (UnitPower("player", 3))
+    -- in EVERY form because druids regenerate energy regardless of the form they are
+    -- in — the tick phase must survive form shifts or energy-gated countdowns
+    -- (Mangle/Shred) drift the moment the player re-shifts into cat form.
+    byType      = {},
     alpha       = 0.25,
-    lastTickTime= nil,
     tickInterval= ENERGY_TICK_INTERVAL,  -- fixed energy tick interval (seconds)
-
 }
+
+-- Update the EMA rate and tick phase for one power type.  `curr` is the current
+-- value of that specific power bar (e.g. UnitPower("player", 3) for energy).
+local function _UpdatePowerTracker(powerType, curr, nowP)
+    if powerType == nil then powerType = 0 end
+    local st = _powerState.byType[powerType]
+    if not st then
+        st = { rate = 0 }
+        _powerState.byType[powerType] = st
+    end
+    if st.lastPower ~= nil and st.lastTime then
+        local dt = nowP - st.lastTime
+        if dt > 0.05 then
+            local instant = (curr - st.lastPower) / dt
+            st.rate = _powerState.alpha * instant + (1 - _powerState.alpha) * st.rate
+        end
+        -- Track only the tick PHASE (when the last tick landed) so
+        -- nextPowerTick stays aligned with the game's 2.0s cadence.
+        -- The interval itself is a fixed constant (see ENERGY_TICK_INTERVAL)
+        -- because an EMA estimate drifts whenever a tick is missed or
+        -- energy is capped, producing erratic energy-gated countdowns.
+        if curr > st.lastPower + 0.5 then
+            st.lastTickTime = nowP
+        end
+    else
+        st.rate = st.rate or 0
+        st.lastTickTime = st.lastTickTime or nil
+    end
+    st.lastPower = curr
+    st.lastTime  = nowP
+    return st
+end
+
+-- Throttle for the POWER debug snapshot (BuildContext runs on every refresh).
+local _powerLastDebugAt = nil
 
 --------------------------------------------------------------------
 -- Swing timer tracker — built-in (no external library needed).
@@ -125,28 +163,73 @@ local function PlayerHasBuff(buffName)
 end
 
 local function GetPlayerBaseMana()
-    local _, class = UnitClass("player")
-    local level = UnitLevel("player") or 0
-    if not class or level < 1 then return 0 end
-
-    if class == "DRUID" or class == "SHAMAN" or class == "PALADIN" then
-        return ((level - 1) * 15) + 20
-    end
-    if class == "PRIEST" then
-        return ((level - 1) * 11) + 20
-    end
-    if class == "MAGE" or class == "WARLOCK" then
-        return ((level - 1) * 10) + 20
-    end
-    return 0
+    -- TBC base mana = max mana minus the mana granted by intellect.
+    -- Intellect grants 1 mana per point for the first 20 points, then 15 mana
+    -- per point beyond that (TBC formula).  This matches the known level-70
+    -- values (Priest 2620, Mage 2241, Warlock 2871, ...) and is what
+    -- %-of-base-mana spell costs (Shadowfiend 6%, Shadowform 32%) use.
+    -- The old per-class (level-1)*N+20 guesses were wrong (e.g. 1055 for a
+    -- level-70 priest instead of 2620), which understated %-of-base costs.
+    local maxMana = UnitPowerMax("player", 0) or 0
+    if maxMana <= 0 then return 0 end
+    local int = UnitStat("player", 4) or 0
+    local manaFromInt = math.min(20, int) + 15 * (int - math.min(20, int))
+    return math.max(maxMana - manaFromInt, 0)
 end
 
-local function GetGCDRemaining(now)
-    local probeSpellId = 29515
-    local start, dur = GetSpellCooldown(probeSpellId)
-    if not start or start == 0 or not dur or dur <= 0 then return 0 end
-    if dur > 2.5 then return 0 end
-    local remaining = start + dur - (now or GetTime())
+-- GCD tracking.  The GCD is not directly queryable in TBC Classic, and the
+-- old hardcoded probe spell (29515 "TEST Scorch") is a test spell that not
+-- every player knows — GetSpellCooldown returned 0 for it, so the GCD always
+-- appeared ready.  Instead we record when the last GCD-triggering cast
+-- STARTED (UNIT_SPELLCAST_START) and compute remaining = start + gcd - now.
+-- Item casts (trinkets, potions, runes) and catalog spells marked
+-- `gcd = "none"` (e.g. Inner Focus) never trigger the GCD and are excluded.
+local _gcdState = { start = nil, frame = nil }
+
+local function _IsNoGCDSpellId(spellId)
+    if not spellId then return false end
+    -- Catalog spells: if the cast resolves to a known spell, only spells
+    -- explicitly marked gcd = "none" skip the GCD.
+    for key, spell in pairs(A.SPELLS or {}) do
+        if spell and (spell.id == spellId or spell.baseId == spellId) then
+            local def = A.GetSpellDefinition and A.GetSpellDefinition(key)
+            return (def and def.gcd == "none") or false
+        end
+    end
+    -- Item casts (trinkets, potions, runes) never trigger the GCD.
+    for _, slot in ipairs({ 13, 14 }) do
+        local ok, itemId = pcall(GetInventoryItemID, "player", slot)
+        if ok and itemId then
+            local ok2, _, itemSpellId = pcall(GetItemSpell, itemId)
+            if ok2 and itemSpellId == spellId then return true end
+        end
+    end
+    local db = A.db or {}
+    for _, itemId in ipairs({ tonumber(db.selectedPotionItem), tonumber(db.selectedRuneItem) }) do
+        if itemId then
+            local ok2, _, itemSpellId = pcall(GetItemSpell, itemId)
+            if ok2 and itemSpellId == spellId then return true end
+        end
+    end
+    return false
+end
+
+local function _InitGCDTracker()
+    if _gcdState.frame then return end
+    local f = CreateFrame("Frame")
+    f:RegisterEvent("UNIT_SPELLCAST_START")
+    f:SetScript("OnEvent", function(self, event, unit, _, spellId)
+        if unit ~= "player" then return end
+        if _IsNoGCDSpellId(spellId) then return end
+        _gcdState.start = GetTime()
+    end)
+    _gcdState.frame = f
+end
+
+local function GetGCDRemaining(now, gcdDuration)
+    _InitGCDTracker()
+    if not _gcdState.start then return 0 end
+    local remaining = _gcdState.start + (gcdDuration or 1.5) - (now or GetTime())
     return (remaining > 0) and remaining or 0
 end
 
@@ -934,7 +1017,13 @@ local function GetEffectiveSpellChannelTime(spellKey, ctx)
     if A.GetSpellDefinition then
         local def = A.GetSpellDefinition(spellKey)
         if def then
-            if def.castTime ~= nil then
+            -- Prefer the channel's full duration (authoritative channel length);
+            -- fall back to castTime for channels that only declare castTime
+            -- (e.g. Evocation).  This is the single source of truth for channel
+            -- length so ChainStepTime and SimulateSpellEffect always agree.
+            if def.duration ~= nil then
+                castTime = tonumber(def.duration) or 0
+            elseif def.castTime ~= nil then
                 castTime = tonumber(def.castTime) or 0
             end
         end
@@ -1026,13 +1115,13 @@ local function ResolveStateCompareValue(cond, ctx, spec, db)
         local resource = cond.resource or "mana"
         if resource == "mana" then return (ctx.manaPct or 0) * 100 end
         if resource == "hp" then return (ctx.hpPct or 0) * 100 end
-        local maxResource = UnitPowerMax("player") or 1
+        local maxResource = ctx.maxResource or (UnitPowerMax("player") or 1)
         if maxResource <= 0 then maxResource = 1 end
         return ((ctx.resourcePower or 0) / maxResource) * 100
     elseif subject == "player_hp_pct" then
         return (ctx.hpPct or 0) * 100
     elseif subject == "player_hp" then
-        return UnitHealth("player") or 0
+        return ctx.playerHP or (UnitHealth("player") or 0)
     elseif subject == "target_hp_pct" then
         if not ctx.targetMaxHP or ctx.targetMaxHP <= 0 then return 0 end
         return (ctx.targetHP / ctx.targetMaxHP) * 100
@@ -1054,7 +1143,9 @@ local function ResolveStateCompareValue(cond, ctx, spec, db)
     elseif subject == "next_power_tick_with_gcd" then
         return ctx.nextPowerTickWithGCD
     elseif subject == "threat_pct" then
-        return GetUnitThreatPercent(cond.unit or "target")
+        local unit = cond.unit or "target"
+        if unit == "target" and ctx.threatPct ~= nil then return ctx.threatPct end
+        return GetUnitThreatPercent(unit)
     elseif subject == "tracked_target_count" then
         return CountTrackedTargets(ctx)
     elseif subject == "tracked_targets_with_ttd" then
@@ -1083,6 +1174,12 @@ local function ResolveStateCompareValue(cond, ctx, spec, db)
         local sw = ctx.swingR
         if not sw or not sw.readyTime or sw.readyTime <= 0 then return 0 end
         return math.max(sw.readyTime - ctx.now, 0)
+    elseif subject == "feral_mode" then
+        -- Druid feral mode dropdown (cat_dps / bear_tank).  Resolved from the
+        -- spec setting so the mode-based form entries (Cat Form / Dire Bear
+        -- Form) can actually fire; previously this subject resolved to nil and
+        -- the form-switch suggestions never appeared.
+        return A.SpecVal and A.SpecVal("feral_mode", "cat_dps") or "cat_dps"
     end
 
     return nil
@@ -1371,6 +1468,92 @@ function RE.IsLowerThreat(spellA, spellB)
     return threatA < threatB and true or false
 end
 
+--- Estimate the mana cost of casting a spell once.
+-- Reads manaCost (flat) or manaCostPct (% of base mana) from the catalog.
+-- Returns 0 for free spells (Inner Focus) and when the Inner Focus buff is
+-- active (the next spell is free).  Returns nil when the spell has no mana
+-- cost data (non-mana classes / uncatalogued spells) so callers can skip.
+function RE.GetSpellManaCost(spellKey, ctx)
+    local def = A.GetSpellDefinition and A.GetSpellDefinition(spellKey)
+    if not def then return nil end
+    local cost = def.manaCost
+    if cost == nil and def.manaCostPct then
+        local baseMana = (ctx and ctx.baseMana) or GetPlayerBaseMana()
+        if not baseMana or baseMana <= 0 then
+            baseMana = (ctx and ctx.maxMana) or (UnitPowerMax("player", 0) or 1)
+        end
+        cost = baseMana * def.manaCostPct
+    elseif cost and cost > 0 then
+        -- Level-aware scaling: the catalog stores the MAX-rank cost, but at
+        -- lower levels the player's known rank costs less.  Scale linearly
+        -- from ~20% of the max cost at the spell's minLevel (rank 1) to 100%
+        -- at level 70 so low-level play isn't over-blocked (e.g. PW:Fortitude
+        -- costs 1695 at max rank but only ~70 at rank 1).  %-of-base-mana
+        -- costs (manaCostPct) are level-independent and are NOT scaled.
+        local level = UnitLevel("player") or 70
+        local minLevel = def.minLevel or 1
+        local scale = (level - minLevel) / math.max(70 - minLevel, 1)
+        scale = math.max(0.2, math.min(1, scale))
+        cost = cost * scale
+    end
+    if not cost or cost <= 0 then return 0 end
+    -- Inner Focus makes the next spell free.  The forward simulation tracks
+    -- the buff in simBuffs when the spec tracks it; otherwise fall back to
+    -- the live buff.
+    local ifActive = false
+    if ctx and ctx.simBuffs and ctx.simBuffs["Inner Focus"] ~= nil then
+        ifActive = ctx.simBuffs["Inner Focus"].active == true
+    elseif A.HasBuff then
+        local ok, active = pcall(A.HasBuff, "player", "Inner Focus")
+        ifActive = ok and active == true
+    end
+    if ifActive then return 0 end
+    return cost
+end
+
+--- Safety filter shared by the main queue, the upcoming section, and the
+-- forward simulation so all paths agree.  Returns:
+--   "mana"   - the player can't afford the spell's mana cost,
+--   "threat" - casting it would push scaled threat to/past the aggro
+--              threshold (threat avoidance active, group content only),
+--   nil      - safe to cast.
+function RE.GetSpellSafetyBlock(spellKey, ctx)
+    if not spellKey or not ctx then return nil end
+    -- Mana affordability
+    local mCost = RE.GetSpellManaCost(spellKey, ctx)
+    if mCost and mCost > 0 and (ctx.currentMana or 0) < mCost then
+        return "mana"
+    end
+    -- Threat avoidance (party/raid only — solo scaled threat is meaningless
+    -- because the player is always the tank).
+    local mode = ctx.threatAvoidance or "never"
+    if mode ~= "never" and ctx.inGroup and ctx.threatPct and ctx.threatPct > 0 then
+        local scaled = ctx.threatPct
+        local threshold = (mode == "aggressive") and 100 or 95
+        local spellThreat = RE.EstimateSpellThreat(spellKey)
+        if spellThreat and spellThreat > 0 then
+            local threatValue = ctx.threatValue or 0
+            -- Buffs / free casts (threat ~1) can never pull aggro, so never
+            -- threat-block them: skip when the spell adds less than 1% of the
+            -- current threat value (it can't meaningfully move scaled threat).
+            if threatValue > 0 and spellThreat < threatValue * 0.01 then
+                return nil
+            end
+            -- scaledPct is proportional to total threat at a fixed distance,
+            -- so a cast's new scaled value is scaled * (1 + add/current).
+            -- Without an absolute threat value, fall back to the current
+            -- scaled percentage alone (the "scaledPct shortcut").
+            local newScaled = (threatValue > 0)
+                and (scaled * (threatValue + spellThreat) / threatValue)
+                or scaled
+            if newScaled >= threshold then
+                return "threat"
+            end
+        end
+    end
+    return nil
+end
+
 ------------------------------------------------------------------------
 -- Context builder — generic snapshot of all relevant game state.
 -- Class-specific fields are populated via spec.buildContext(ctx, spec).
@@ -1404,7 +1587,7 @@ function RE:BuildContext(spec)
     end
 
     local gcd          = math.max(1.0, 1.5 / hasteMul)
-    local gcdRemaining = GetGCDRemaining(now)
+    local gcdRemaining = GetGCDRemaining(now, gcd)
     local lat          = A.GetLatency()
     local SAFETY       = constants.SAFETY or 0.5
 
@@ -1415,8 +1598,9 @@ function RE:BuildContext(spec)
     if baseMana <= 0 then baseMana = maxMana end
     local manaPct      = currentMana / maxMana
     local baseManaPct  = currentMana / math.max(baseMana, 1)
-    local hpPct        = (UnitHealth("player") or 1) /
-                         math.max(UnitHealthMax("player") or 1, 1)
+    local playerHP     = UnitHealth("player") or 0
+    local playerMaxHP  = math.max(UnitHealthMax("player") or 1, 1)
+    local hpPct        = playerHP / playerMaxHP
 
     local sp           = (A.GetSpellPower and A.GetSpellPower()) or 0
     local targetHP, targetMaxHP = 0, 0
@@ -1424,6 +1608,33 @@ function RE:BuildContext(spec)
     if UnitExists("target") then
         targetHP    = UnitHealth("target")    or 0
         targetMaxHP = UnitHealthMax("target") or 0
+    end
+
+    -- Threat snapshot for the current target — read once per refresh instead
+    -- of per condition (threat_pct / threat_pct_lt / threat_pct_ge).
+    -- scaledPct = player threat scaled so the tank is 100 (100 = about to
+    -- pull aggro at current distance); threatValue = absolute threat units;
+    -- isTank = player is the mob's primary target.
+    local threatPct = 0
+    local threatValue = 0
+    local threatIsTank = false
+    if UnitExists("target") and type(UnitDetailedThreatSituation) == "function" then
+        local isTank, _, scaledPct, rawPct, tValue = UnitDetailedThreatSituation("player", "target")
+        threatPct = scaledPct or rawPct or 0
+        threatValue = tValue or 0
+        threatIsTank = isTank == true
+    end
+
+    -- Group presence (party/raid) — gates the threat avoidance filter, which
+    -- is meaningless solo (the player is always the primary target).
+    local inGroup = (GetNumGroupMembers and GetNumGroupMembers() > 0) or false
+
+    -- Threat avoidance mode from the active spec's settings ("never" for
+    -- specs that don't define it).
+    local threatAvoidance = "never"
+    if A.SpecVal then
+        local tv = A.SpecVal("threatAvoidance", "never")
+        if type(tv) == "string" then threatAvoidance = tv end
     end
 
     local timing         = constants.timing or {}
@@ -1435,32 +1646,27 @@ function RE:BuildContext(spec)
     -- Non-mana resource (energy / rage / focus)
     local resourcePower = UnitPower("player") or 0
 
-    -- Power/energy regen estimator
+    -- Power/energy regen estimator (per power type)
+    local currentPowerType = UnitPowerType("player") or 0
     do
         local nowP = now
-        local curr = resourcePower
-        if _powerState.lastPower ~= nil and _powerState.lastTime then
-            local dt = nowP - _powerState.lastTime
-            if dt > 0.05 then
-                local instant = (curr - _powerState.lastPower) / dt
-                _powerState.rate = _powerState.alpha * instant +
-                                   (1 - _powerState.alpha) * _powerState.rate
+        -- Track the current power type (energy / rage / focus).
+        _UpdatePowerTracker(currentPowerType, resourcePower, nowP)
+        -- Always track energy ticks too: druids regenerate energy in every form
+        -- (cat, bear, caster, moonkin), so the energy tick phase must be sampled
+        -- from the energy bar directly rather than only when the current power
+        -- type happens to be energy.  Form shifts therefore never reset the
+        -- energy cadence that energy-gated countdowns (Mangle/Shred) rely on.
+        if currentPowerType ~= 3 then
+            local eCurr = UnitPower("player", 3)
+            if eCurr ~= nil then
+                _UpdatePowerTracker(3, eCurr, nowP)
             end
-            -- Track only the tick PHASE (when the last tick landed) so
-            -- nextPowerTick stays aligned with the game's 2.0s cadence.
-            -- The interval itself is a fixed constant (see ENERGY_TICK_INTERVAL)
-            -- because an EMA estimate drifts whenever a tick is missed or
-            -- energy is capped, producing erratic energy-gated countdowns.
-            if curr > _powerState.lastPower + 0.5 then
-                _powerState.lastTickTime = nowP
-            end
-        else
-            _powerState.rate     = _powerState.rate or 0
-            _powerState.lastTickTime = _powerState.lastTickTime or nil
         end
-        _powerState.lastPower = curr
-        _powerState.lastTime  = nowP
     end
+    local currentPowerState = _powerState.byType[currentPowerType]
+    local energyPowerState  = _powerState.byType[3]
+    local currentRegen      = (currentPowerState and currentPowerState.rate) or 0
 
     -- HP decay
     UpdateHPDecay()
@@ -1482,33 +1688,47 @@ function RE:BuildContext(spec)
         targetTTD = (targetHP / targetMaxHP) / hpDecayRate
     end
 
-    -- Time until the next energy tick.  Because the cadence is a fixed 2.0s,
-    -- we project the phase forward with modulo so the estimate stays correct
-    -- even when the last detected tick is several seconds stale (e.g. after
-    -- energy was capped and no tick gain was observed).
+    -- Time until the next energy tick (or the current power's last detected
+    -- gain when the current power is not energy).  Because the cadence is a
+    -- fixed 2.0s, we project the phase forward with modulo so the estimate stays
+    -- correct even when the last detected tick is several seconds stale (e.g.
+    -- after energy was capped and no tick gain was observed).  For energy we
+    -- always use the ENERGY tracker's phase (maintained in every form), so form
+    -- shifts don't reset the countdown cadence.
     local nextPowerTick = nil
-    if _powerState.lastTickTime then
-        local sinceTick = now - _powerState.lastTickTime
+    local energyNextPowerTick = nil
+    local currentIsEnergy = (currentPowerType == 3) or
+        (Enum and Enum.PowerType and currentPowerType == Enum.PowerType.Energy)
+    local tickState = currentIsEnergy and energyPowerState or currentPowerState
+    if tickState and tickState.lastTickTime then
+        local sinceTick = now - tickState.lastTickTime
         if sinceTick < 0 then sinceTick = 0 end
         local intoTick = sinceTick % _powerState.tickInterval
         nextPowerTick = _powerState.tickInterval - intoTick
         if nextPowerTick >= _powerState.tickInterval - 0.0001 then nextPowerTick = 0 end
     end
+    if energyPowerState and energyPowerState.lastTickTime then
+        local sinceTick = now - energyPowerState.lastTickTime
+        if sinceTick < 0 then sinceTick = 0 end
+        local intoTick = sinceTick % _powerState.tickInterval
+        energyNextPowerTick = _powerState.tickInterval - intoTick
+        if energyNextPowerTick >= _powerState.tickInterval - 0.0001 then energyNextPowerTick = 0 end
+    end
     local readyIn       = math.max(castRemaining or 0, gcdRemaining or 0)
-    local powerType     = UnitPowerType("player")
+    local powerType     = currentPowerType
     local maxResource   = UnitPowerMax("player") or 100
     if maxResource <= 0 then maxResource = 100 end
 
     local resourceAtGCD = resourcePower
-    local isEnergyPower = powerType == 3 or (Enum and Enum.PowerType and powerType == Enum.PowerType.Energy)
+    local isEnergyPower = currentIsEnergy
     local powerTickInterval = math.max(_powerState.tickInterval or 2.0, 0.1)
     if isEnergyPower then
         if nextPowerTick and nextPowerTick <= readyIn then
             local ticks    = 1 + math.floor((readyIn - nextPowerTick) / powerTickInterval)
             resourceAtGCD  = resourcePower + ticks * 20
         end
-    elseif (_powerState.rate or 0) > 0 then
-        resourceAtGCD = resourcePower + (_powerState.rate * readyIn)
+    elseif currentRegen > 0 then
+        resourceAtGCD = resourcePower + (currentRegen * readyIn)
     end
     resourceAtGCD = math.min(resourceAtGCD, maxResource)
     local nextPowerTickWithGCD = nil
@@ -1626,20 +1846,28 @@ function RE:BuildContext(spec)
         baseMana       = baseMana,
         manaPct        = manaPct,
         baseManaPct    = baseManaPct,
+        playerHP       = playerHP,
         hpPct          = hpPct,
         sp             = sp,
         targetGUID     = targetGUID,
         targetHP       = targetHP,
         targetMaxHP    = targetMaxHP,
         targetTTD      = targetTTD,
+        threatPct      = threatPct,
+        threatValue    = threatValue,
+        threatIsTank   = threatIsTank,
+        inGroup        = inGroup,
+        threatAvoidance = threatAvoidance,
         inCombat       = UnitAffectingCombat("player"),
         WAIT_THRESHOLD = WAIT_THRESHOLD,
         recentCast     = recentCast,
         comboPoints    = comboPoints,
         powerType      = powerType,
+        maxResource    = maxResource,
         resourcePower  = resourcePower,
-        resourceRegen  = _powerState.rate,
+        resourceRegen  = currentRegen,
         nextPowerTick  = nextPowerTick,
+        energyNextPowerTick = energyNextPowerTick,
         resourceAtGCD  = resourceAtGCD,
         nextPowerTickWithGCD = nextPowerTickWithGCD,
         hpDecayRate    = hpDecayRate,
@@ -1657,6 +1885,49 @@ function RE:BuildContext(spec)
         swingOH        = swingOH,
         swingR         = swingR,
     }
+
+    -- Debug: power-state snapshot (POWER module).  Throttled to ~2 Hz so a fight
+    -- doesn't flood the 200-entry buffer.  Contains everything needed to
+    -- reproduce energy-gated countdown issues: the reported power type, every
+    -- power bar (mana/rage/energy), the per-type EMA rates and tick phases, the
+    -- next-tick projections, and the GCD/cast state.
+    if A.IsDebugModuleEnabled and A.IsDebugModuleEnabled("POWER") then
+        if (not _powerLastDebugAt) or (now - _powerLastDebugAt) >= 0.5 then
+            _powerLastDebugAt = now
+            local function SafePower(t)
+                local ok, v = pcall(UnitPower, "player", t)
+                return ok and v or "?"
+            end
+            local parts = {
+                string.format("type=%d bar=%d max=%d", currentPowerType, resourcePower, maxResource),
+                string.format("mana=%.0f/%.0f pct=%.1f", currentMana, maxMana, manaPct * 100),
+            }
+            if currentPowerType ~= 0 then
+                parts[#parts + 1] = string.format("manaExplicit=%s", tostring(SafePower(0)))
+            end
+            if currentPowerType ~= 1 then
+                parts[#parts + 1] = string.format("rage=%s", tostring(SafePower(1)))
+            end
+            if currentPowerType ~= 3 then
+                parts[#parts + 1] = string.format("energy=%s", tostring(SafePower(3)))
+            end
+            for pt, st in pairs(_powerState.byType) do
+                parts[#parts + 1] = string.format("trk[%d]:rate=%.2f lastTick=%s", pt, st.rate or 0,
+                    st.lastTickTime and string.format("%.2f", st.lastTickTime) or "nil")
+            end
+            parts[#parts + 1] = string.format("forms: cat=%s bear=%s dire=%s moonkin=%s",
+                tostring(PlayerHasBuff("Cat Form")), tostring(PlayerHasBuff("Bear Form")),
+                tostring(PlayerHasBuff("Dire Bear Form")), tostring(PlayerHasBuff("Moonkin Form")))
+            parts[#parts + 1] = string.format("regen=%.2f nextTick=%s energyNextTick=%s atGCD=%s",
+                currentRegen or 0,
+                nextPowerTick and string.format("%.2f", nextPowerTick) or "nil",
+                energyNextPowerTick and string.format("%.2f", energyNextPowerTick) or "nil",
+                tostring(resourceAtGCD))
+            parts[#parts + 1] = string.format("gcd=%.2f gcdRem=%.2f castRem=%s readyIn=%.2f",
+                gcd, gcdRemaining, tostring(castRemaining), readyIn)
+            A.DebugLog("POWER", table.concat(parts, " | "))
+        end
+    end
 
     -- Clip-aware cast remaining (DISABLED).
     -- Previously: when channeling a spell with `allowClipping = true`, this set
@@ -1785,10 +2056,11 @@ function RE:SimulateSpellEffect(ctx, spellKey, spec, advanceOverride)
     -- to simulate channel clipping – a shorter advance than the full channel
     -- time.
     local castEff = GetEffectiveSpellCastTime(spellKey, ctx) or 0
-    if def and def.castType == "channel" and (def.duration or def.castTime) then
-        local haste = (ctx and ctx.hasteMul) or 1
-        if haste <= 0 then haste = 1 end
-        castEff = ((def.duration or def.castTime) or 0) / haste
+    if def and def.castType == "channel" then
+        -- Channels occupy the player for their full haste-adjusted duration.
+        -- Use the same helper as ChainStepTime so the chain and the forward
+        -- simulation always agree on channel length.
+        castEff = GetEffectiveSpellChannelTime(spellKey, ctx) or 0
     end
     -- Spells that do NOT trigger the global cooldown (Inner Focus, trinkets,
     -- potions, runes) advance only by their cast time (0 for instants) — the
@@ -1824,10 +2096,25 @@ function RE:SimulateSpellEffect(ctx, spellKey, spec, advanceOverride)
         end
     end
     local regen = (ctx.resourceRegen or 0) * advance
-    local maxR  = UnitPowerMax("player") or 100
+    local maxR  = ctx.maxResource or (UnitPowerMax("player") or 100)
     if maxR <= 0 then maxR = 100 end
     p.resourcePower  = math.max(0, math.min(maxR, (ctx.resourcePower or 0) - cost + regen))
     p.resourceAtGCD  = p.resourcePower
+
+    -- Mana projection (mana classes): subtract the spell's mana cost and add
+    -- mana regen over the advance window so forward simulation stays honest
+    -- about affordability for positions 2-4.  Spells without mana cost data
+    -- (or free casts like Inner Focus) leave currentMana inherited.
+    if def and (def.manaCost ~= nil or def.manaCostPct ~= nil) then
+        local mCost = RE.GetSpellManaCost(spellKey, ctx)
+        if mCost and mCost > 0 then
+            local mRegen = (ctx.resourceRegen or 0) * advance
+            local maxM = ctx.maxMana or (UnitPowerMax("player", 0) or 1)
+            if maxM <= 0 then maxM = 1 end
+            p.currentMana = math.max(0, math.min(maxM, (ctx.currentMana or 0) - mCost + mRegen))
+            p.manaPct = p.currentMana / maxM
+        end
+    end
 
     -- Combo points
     local cp = ctx.comboPoints or 0
@@ -2124,7 +2411,7 @@ RE._condEval["resource_pct_lt"] = function(cond, ctx, spec, db)
     if resource == "mana" then return ctx.manaPct < pct end
     if resource == "hp" then return ctx.hpPct < pct end
     if resource == "energy" or resource == "rage" or resource == "focus" then
-        local max = UnitPowerMax("player") or 1
+        local max = ctx.maxResource or (UnitPowerMax("player") or 1)
         if max <= 0 then max = 1 end
         return (ctx.resourcePower / max) < pct
     end
@@ -2141,7 +2428,7 @@ RE._condEval["resource_pct_gt"] = function(cond, ctx, spec, db)
     if resource == "mana" then return ctx.manaPct > pct end
     if resource == "hp" then return ctx.hpPct > pct end
     if resource == "energy" or resource == "rage" or resource == "focus" then
-        local max = UnitPowerMax("player") or 1
+        local max = ctx.maxResource or (UnitPowerMax("player") or 1)
         if max <= 0 then max = 1 end
         return (ctx.resourcePower / max) > pct
     end
@@ -2308,12 +2595,16 @@ end
 
 RE._condEval["threat_pct_lt"] = function(cond, ctx, spec, db)
     local threshold = ResolveNumericValue(cond.pct, 100) or 100
-    return GetUnitThreatPercent(cond.unit or "target") < threshold
+    local unit = cond.unit or "target"
+    local threat = (unit == "target" and ctx.threatPct ~= nil) and ctx.threatPct or GetUnitThreatPercent(unit)
+    return threat < threshold
 end
 
 RE._condEval["threat_pct_ge"] = function(cond, ctx, spec, db)
     local threshold = ResolveNumericValue(cond.pct, 100) or 100
-    return GetUnitThreatPercent(cond.unit or "target") >= threshold
+    local unit = cond.unit or "target"
+    local threat = (unit == "target" and ctx.threatPct ~= nil) and ctx.threatPct or GetUnitThreatPercent(unit)
+    return threat >= threshold
 end
 
 ------------------------------------------------------------------------
@@ -2673,7 +2964,12 @@ RE._condEval["channeling"] = function(cond, ctx, spec, db)
         if not channelingSpell then return false end
         local def = A.GetSpellDefinition and A.GetSpellDefinition(cond.spellKey)
         local spellName = def and def.name or cond.spellKey
-        return channelingSpell == spellName
+        if channelingSpell == spellName then return true end
+        -- Non-English clients: UnitChannelInfo returns the localized name
+        -- (e.g. German "Gedankenschlag"). Resolve it via the spell DB
+        -- (which registers localized names) and compare by key.
+        local chDef = A.GetSpellDefinition and A.GetSpellDefinition(channelingSpell)
+        return chDef ~= nil and chDef.key == cond.spellKey
     end
     -- Without spellKey: true when any channel is active and we have its name.
     return isChanneling and ctx.castingSpell ~= nil and ctx.castingSpell ~= false
@@ -3059,7 +3355,12 @@ RE._condEval["totem_name"] = function(cond, ctx, spec, db)
     if not t or not t.name then return false end
     local required = cond.name or cond.totemName
     if not required then return false end
-    return t.name == required
+    if t.name == required then return true end
+    -- Non-English clients: totem names from GetTotemInfo are localized;
+    -- the spell DB registers localized names, so resolve and compare by
+    -- catalog key/name.
+    local def = A.GetSpellDefinition and A.GetSpellDefinition(t.name)
+    return def ~= nil and (def.name == required or def.key == required)
 end
 
 -- swing_time_remaining: checks time until the next auto-swing for a hand.
@@ -3451,7 +3752,7 @@ function RE:_EvaluateEntry(entry, index, ctx, spec, db, hasTarget, wantDiagnosti
                 end
             elseif cond.type == "resource_pct_gt" then
                 local pct = ResolveNumericValue(cond.pct, 0)
-                local max = UnitPowerMax("player") or 100
+                local max = ctx.maxResource or (UnitPowerMax("player") or 100)
                 local req = math.floor(max * ((pct or 0) / 100) + 0.5)
                 local passNow = (ctx.resourcePower or 0) >= req
                 if not passNow then
@@ -3498,7 +3799,7 @@ function RE:_EvaluateEntry(entry, index, ctx, spec, db, hasTarget, wantDiagnosti
                         req = ResolveNumericValue(cond.value, 0) or 0
                     else
                         local pct = ResolveNumericValue(cond.value, 0) or 0
-                        local max = UnitPowerMax("player") or 100
+                        local max = ctx.maxResource or (UnitPowerMax("player") or 100)
                         if max <= 0 then max = 100 end
                         req = math.floor(max * (pct / 100) + 0.5)
                     end
@@ -3668,7 +3969,7 @@ function RE:_EvaluateEntry(entry, index, ctx, spec, db, hasTarget, wantDiagnosti
                             req = ResolveNumericValue(resSub.amount, 0) or 0
                         elseif resSub.type == "resource_pct_gt" then
                             local pct = ResolveNumericValue(resSub.pct, 0) or 0
-                            local maxR = UnitPowerMax("player") or 100
+                            local maxR = ctx.maxResource or (UnitPowerMax("player") or 100)
                             req = math.floor(maxR * (pct / 100) + 0.5)
                         elseif resSub.type == "state_compare" then
                             req = ResolveNumericValue(resSub.value, 0) or 0
@@ -3717,6 +4018,24 @@ function RE:_EvaluateEntry(entry, index, ctx, spec, db, hasTarget, wantDiagnosti
     -- the rotation so the player can see the next suggestion while moving into
     -- range.  The display layer (Rotation.lua IsKeyInRange / SetTextureColor)
     -- tints them red as the standard "out of range" indicator.
+
+    -- Safety filters (mana affordability + threat avoidance), shared with the
+    -- upcoming section and the forward simulation via RE.GetSpellSafetyBlock.
+    -- A mana block becomes a resource block (countdown, never suggested while
+    -- unaffordable); a threat block just flags the candidate so the queue and
+    -- sim can drop it (the display then suggests Fade / the wand fallback).
+    local manaBlocked = false
+    local threatBlocked = false
+    if not otherFail and not resourceBlock then
+        local safety = RE.GetSpellSafetyBlock(entry.key, ctx)
+        if safety == "mana" then
+            manaBlocked = true
+            local mCost = RE.GetSpellManaCost(entry.key, ctx)
+            resourceBlock = { required = mCost or 0, resource = "mana" }
+        elseif safety == "threat" then
+            threatBlocked = true
+        end
+    end
 
     if not otherFail and resourceBlock and EntryHasConditionType(entry, "precombat") then
         otherFail = true
@@ -3771,21 +4090,33 @@ function RE:_EvaluateEntry(entry, index, ctx, spec, db, hasTarget, wantDiagnosti
             -- The tick-based formula is stable: as `now` advances by dt,
             -- `ctx.nextPowerTick` decreases by dt, so `now + eta` is constant
             -- between evaluations (changes only when a tick actually fires).
+            -- Energy spells are detected from the reported power type AND from the
+            -- spell's own definition (requiresCatForm / energy flag).  The flags
+            -- matter because UnitPowerType can report a stale or wrong index right
+            -- after a form shift — a cat-form ability is always energy-gated, so
+            -- its wait must stay tick-based instead of falling back to the
+            -- continuous EMA rate (which is what produced the multi-second "Mangle
+            -- not ready yet" countdowns).
             local isPowerTypeEnergy = (ctx.powerType == 3) or
-                (Enum and Enum.PowerType and ctx.powerType == Enum.PowerType.Energy)
+                (Enum and Enum.PowerType and ctx.powerType == Enum.PowerType.Energy) or
+                (entrySpell and entrySpell.meta and entrySpell.meta.flags and
+                    (entrySpell.meta.flags.requiresCatForm or entrySpell.meta.flags.energy or
+                     entrySpell.meta.flags.energyResource))
             if isPowerTypeEnergy then
                 local energyPerTick = ENERGY_PER_TICK
                 local tickInterval  = math.max(_powerState.tickInterval or ENERGY_TICK_INTERVAL or 2.0, 0.1)
                 local ticksNeeded   = math.max(math.ceil(need / energyPerTick), 1)
-                -- If we know the observed tick phase, use it. Otherwise fall
-                -- back to one full tick interval so energy waits stay tick-based
-                -- instead of reverting to the unstable EMA regen estimate.
-                local timeToFirstTick = ctx.nextPowerTick
+                -- Use the ENERGY tracker's tick phase, which is maintained in every
+                -- form (see BuildContext) and is independent of the reported power
+                -- type.  If the phase is unknown, fall back to one full tick
+                -- interval so energy waits stay tick-based instead of reverting to
+                -- the unstable EMA regen estimate.
+                local timeToFirstTick = ctx.energyNextPowerTick
                 if timeToFirstTick == nil then
                     timeToFirstTick = tickInterval
                 end
-                -- nextPowerTick = time to first tick.  Nth tick is at:
-                --   nextPowerTick + (N-1) * tickInterval
+                -- timeToFirstTick = time to first tick.  Nth tick is at:
+                --   timeToFirstTick + (N-1) * tickInterval
                 local timeToNthTick = timeToFirstTick + (ticksNeeded - 1) * tickInterval
                 eta = math.max(eta, timeToNthTick)
             else
@@ -3819,6 +4150,8 @@ function RE:_EvaluateEntry(entry, index, ctx, spec, db, hasTarget, wantDiagnosti
         clip  = false,
         entry = entry,
         priorityBucket = ResolveEntryPriorityBucket(entry),
+        manaBlocked    = manaBlocked,
+        threatBlocked  = threatBlocked,
     }, diag
 end
 
@@ -3829,6 +4162,21 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
     table.sort(candidates, function(a, b)
         return a.index < b.index
     end)
+
+    -- Safety filters: drop candidates the player can't afford (mana) or that
+    -- would pull aggro (threat avoidance).  These are removed entirely rather
+    -- than queued with an ETA — mana regen in combat is ~0 so a mana countdown
+    -- would never tick down, and the threat situation is resolved by Fade /
+    -- the wand fallback below, not by waiting.
+    do
+        local filtered = {}
+        for _, cand in ipairs(candidates) do
+            if not cand.manaBlocked and not cand.threatBlocked then
+                filtered[#filtered + 1] = cand
+            end
+        end
+        candidates = filtered
+    end
 
     local result = {}
     local seen   = {}
@@ -4078,6 +4426,33 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
         return nil
     end
 
+    -- Synth gate: a refresh-timer synth is only meaningful if the entry's
+    -- OTHER (non-timing) conditions hold NOW — form gates, spec options,
+    -- target validity, stealth, etc.  The synth represents "cast this when
+    -- the refresh deadline arrives", so an entry that can't be cast at all
+    -- (e.g. Mangle (Bear) while in cat form) must not contribute a refresh
+    -- countdown to the queue.  Conditions are checked in order, stopping at
+    -- the refresh-window condition that drives the synth (it legitimately
+    -- fails while the debuff is healthy) — mirroring _EvaluateEntry's
+    -- early-break semantics.  cooldown_ready is skipped: the synth
+    -- collector already requires the spell to be off cooldown.
+    local function SynthGatesPass(entry)
+        if not entry or not entry.conditions then return true end
+        for _, cond in ipairs(entry.conditions) do
+            if cond.type == "debuff_property_compare" and cond.property == "remaining"
+                    and (cond.op == "<" or cond.op == "<=" or cond.op == "lt" or cond.op == "lte" or cond.op == "le") then
+                return true
+            end
+            if cond.type ~= "cooldown_ready" then
+                local evalFn = self._condEval[cond.type]
+                if not evalFn then return false end
+                local ok, r = pcall(evalFn, cond, ctx, spec, nil)
+                if not ok or not r then return false end
+            end
+        end
+        return true
+    end
+
     -- Collect synths: refresh-pending entries not already in candidates.
     local seenCandKeys = {}
     for _, c in ipairs(readyCands)   do seenCandKeys[c.cand.key] = true end
@@ -4087,7 +4462,7 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
     for _, entry in ipairs(rotation) do
         if entry.key and not seenCandKeys[entry.key] and entry.conditions then
             local deadline = GetRefreshDeadline(entry)
-            if deadline ~= nil then
+            if deadline ~= nil and SynthGatesPass(entry) then
                 local spell = A.SPELLS[entry.key]
                 local rawCD = (spell and spell.id and (A.GetSpellCDReal(spell.id) or 0)) or 0
                 if spell and spell.id and rawCD <= READY_EPSILON then
@@ -4145,7 +4520,14 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
         -- the cast, which is 0 for spells where cast ≥ GCD).
         if i == 1 and ctx.castingSpell and not ctx.activeChannelSpellKey then
             local spellEntry = A.SPELLS and A.SPELLS[c.cand.key]
-            if spellEntry and spellEntry.name == ctx.castingSpell then
+            local isCastingCandidate = spellEntry and spellEntry.name == ctx.castingSpell
+            if not isCastingCandidate then
+                -- Non-English clients: UnitCastingInfo returns localized names
+                -- (e.g. German "Gedankenschlag"); resolve and compare by key.
+                local castDef = A.GetSpellDefinition and A.GetSpellDefinition(ctx.castingSpell)
+                isCastingCandidate = castDef ~= nil and castDef.key == c.cand.key
+            end
+            if isCastingCandidate then
                 -- Replace step with only the GCD overhang (almost always 0).
                 step = math.max((ctx.gcdRemaining or 0) - accTime, 0)
             end
@@ -4357,7 +4739,8 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
     if postCast and #blockedCands > 0 then
         local pCtx = setmetatable({}, { __index = ctx })
         local resource = postCast.resource or "energy"
-        local maxR = (resource == "mana" and (UnitPowerMax("player", 0) or 1)) or (UnitPowerMax("player") or 100)
+        local maxR = (resource == "mana" and (ctx.maxMana or (UnitPowerMax("player", 0) or 1)))
+                         or (ctx.maxResource or (UnitPowerMax("player") or 100))
         if maxR <= 0 then maxR = 100 end
 
         local newVal
@@ -4445,6 +4828,15 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
             end
             if fillerKey then
                 Add(fillerEntry, fillerKey)
+            elseif (ctx.threatAvoidance or "never") ~= "never" and ctx.inGroup
+                   and (ctx.threatPct or 0) >= 90 then
+                -- Threat-blocked fallback: everything safe is filtered out and
+                -- the player is close to/at aggro — suggest Fade to drop threat.
+                Add(nil, "Fade")
+            elseif ctx.wandEquipped then
+                -- Mana-blocked fallback: wand keeps the player DPSing when no
+                -- spell is affordable.
+                Add(nil, "WAND")
             else
                 return nil
             end
@@ -4495,22 +4887,30 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
             if key and not seen[key] then
                 local spell = A.SPELLS and A.SPELLS[key]
                 local known = spell and (not A.KnowsSpell or A.KnowsSpell(spell.id))
-                if known ~= false then
-                    -- Use the same generic refresh-ETA helper that powers
-                    -- predictive timers for DoT/cooldown/refresh windows.
-                    local eta = RE._ComputeEntryRefreshETA(rEntry, ctx, spec)
-                    if eta == nil then
-                        local cd = GetProjectedSpellCooldown(key, ctx)
-                        if cd and cd > 0 then eta = cd end
-                    end
-                    if eta and eta > 0 then
-                        upcoming[#upcoming + 1] = {
-                            entry = rEntry,
-                            key = key,
-                            eta = eta,
-                            cooldownEnd = now + eta,
-                            priorityBucket = ResolveEntryPriorityBucket(rEntry),
-                        }
+                -- Same synth gate as the refresh synths: an entry whose
+                -- non-timing conditions fail (e.g. Mangle (Bear) while in cat
+                -- form) must not surface an "upcoming" countdown either.
+                if known ~= false and SynthGatesPass(rEntry) then
+                    -- Skip spells the player currently can't afford or that
+                    -- would pull aggro (same safety filters as the main queue).
+                    local safety = RE.GetSpellSafetyBlock(key, ctx)
+                    if safety == nil then
+                        -- Use the same generic refresh-ETA helper that powers
+                        -- predictive timers for DoT/cooldown/refresh windows.
+                        local eta = RE._ComputeEntryRefreshETA(rEntry, ctx, spec)
+                        if eta == nil then
+                            local cd = GetProjectedSpellCooldown(key, ctx)
+                            if cd and cd > 0 then eta = cd end
+                        end
+                        if eta and eta > 0 then
+                            upcoming[#upcoming + 1] = {
+                                entry = rEntry,
+                                key = key,
+                                eta = eta,
+                                cooldownEnd = now + eta,
+                                priorityBucket = ResolveEntryPriorityBucket(rEntry),
+                            }
+                        end
                     end
                 end
             end
@@ -4683,7 +5083,8 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
                                                 1, projCtx, spec,
                                                 A.db and A.db.specs and A.db.specs[spec and spec.meta and spec.meta.id],
                                                 hasTarget, false)
-                    if ok_eval and cand and ((cand.eta or 0) <= 0.05) then
+                    if ok_eval and cand and not cand.manaBlocked and not cand.threatBlocked
+                       and ((cand.eta or 0) <= 0.05) then
                         bestKey = eKey
                         break
                     end
@@ -4798,7 +5199,7 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
             if key and not seen[key] and rEntry.conditions then
                 local spell = A.SPELLS and A.SPELLS[key]
                 local known = spell and (not A.KnowsSpell or A.KnowsSpell(spell.id))
-                if known ~= false then
+                if known ~= false and SynthGatesPass(rEntry) then
                     local deadline = GetRefreshDeadline(rEntry)
                     if deadline and deadline > 0 then
                         if not fallbackRefresh or deadline < fallbackRefresh.eta then
@@ -4819,26 +5220,12 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
         end
     end
 
-    if hasTarget and #result > 0 then
-        for _, entry in ipairs(result) do
-            local targetEntry = entry.entry
-            if not targetEntry then
-                for _, rEntry in ipairs(rotation) do
-                    if rEntry.key == entry.key then
-                        targetEntry = rEntry
-                        break
-                    end
-                end
-            end
-            if targetEntry then
-                local refreshDeadline = GetRefreshDeadline(targetEntry)
-                if refreshDeadline then
-                    entry.showTimer = true
-                    entry.timerRemaining = refreshDeadline
-                end
-            end
-        end
-    end
+    -- No countdown on refresh synths: they are OFF cooldown (except GCD),
+    -- and the cast signal is their queue position plus the flip to slot 1
+    -- when the refresh condition actually fires.  Showing the refresh
+    -- deadline as a timer made them look like a very long global cooldown
+    -- and suggested them 4+ s before they should be cast (user request).
+    -- See the TIMER RULE comment above FlushSynthsBefore.
 
     return result
 end

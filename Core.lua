@@ -969,7 +969,7 @@ function A.GetKnownDebugModules()
         modules[#modules + 1] = key
     end
 
-    for _, key in ipairs({ "ALL", "CAST", "CORE", "ENGINE", "ERR", "EVT", "ROT" }) do
+    for _, key in ipairs({ "ALL", "CAST", "CORE", "ENGINE", "ERR", "EVT", "POWER", "ROT" }) do
         Add(key)
     end
     if A._debugSeenModules then
@@ -1731,8 +1731,18 @@ function A.InitTickManager()
 
         local channelInfo = nil
         if A.ChannelHelper then
-            channelInfo = A.ChannelHelper._activeChannelInfo
-                or (A.ChannelHelper.KNOWN_CHANNELS and A.ChannelHelper.KNOWN_CHANNELS[cleuSpellName])
+            local CH = A.ChannelHelper
+            channelInfo = CH._activeChannelInfo
+                or (CH.KNOWN_CHANNELS and CH.KNOWN_CHANNELS[cleuSpellName])
+            if not channelInfo and CH.KNOWN_CHANNELS then
+                -- Non-English clients: CLEU spell names are localized (e.g.
+                -- German "Gedankenschlag"); resolve via the spell DB and
+                -- retry with the English key/name.
+                local def = A.GetSpellDefinition and A.GetSpellDefinition(cleuSpellName)
+                if def then
+                    channelInfo = CH.KNOWN_CHANNELS[def.key] or CH.KNOWN_CHANNELS[def.name]
+                end
+            end
         end
         if not channelInfo then return end
 
