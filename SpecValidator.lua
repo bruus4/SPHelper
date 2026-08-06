@@ -29,7 +29,6 @@ SV.ALLOWED_CONDITION_TYPES = {
     threat_pct_lt               = true,
     threat_pct_ge               = true,
     target_classification       = true,
-    -- Phase 8 additions
     buff_on_player              = true,
     buff_stacks_gte             = true,
     target_hp_pct_lt            = true,
@@ -51,7 +50,6 @@ SV.ALLOWED_CONDITION_TYPES = {
     cooldown_lt                 = true,
     spell_usable                = true,
     group_size_gte              = true,
-    -- Phase 9 additions
     cat_form                    = true,
     bear_form                   = true,
     behind_target               = true,
@@ -104,7 +102,6 @@ SV.ALLOWED_CONDITION_TYPES = {
     trinket_ready               = true,
     classification_from_setting = true,
     classification_any_target = true,
-    -- Phase 10 / TBC spec additions
     is_moving                   = true,
     not_is_moving               = true,
     pet_alive                   = true,

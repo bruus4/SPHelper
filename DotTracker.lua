@@ -772,8 +772,8 @@ function A:InitDotTracker()
             local sp = def.spell()
             if sp and sp.name then
                 -- ID-first lookup via the catalog key (all ranks/sibling IDs, name fallback)
-                local name = A.FindPlayerDebuff(unit, def.spellKey or sp.name)
-                if name and expirationTime and expirationTime > now then
+                local _, _, _, _, _, expirationTime = A.FindPlayerDebuff(unit, def.spellKey or sp.name)
+                if expirationTime and expirationTime > now then
                     hasTrackedDebuff = true
                     break
                 end

@@ -7,8 +7,8 @@
 --   2. Amplify Curse on cooldown, then Curse of Agony.
 --   3. Maintain Corruption (+ optional Immolate) while the pet tanks.
 --   4. Drain Soul on low-HP mobs (soul shards + Improved Drain Soul mana).
---   5. Shadow Bolt as the filler.
---   6. Drain Life to self-heal, Life Tap to convert health into mana.
+--   5. Drain Life to self-heal, Life Tap to convert health into mana.
+--   6. Shadow Bolt as the last-resort filler (only when nothing else is castable).
 --
 -- This spec is opt-in (like all non-reference specs): enable it via /sph.
 -- It activates below level 70 while the Demonology tree has the most points;
@@ -159,15 +159,6 @@ local spec = {
             },
         },
 
-        -- ── FILLER ──────────────────────────────────────────────────
-        {
-            key = "Shadow Bolt",
-            conditions = {
-                { type = "target_valid" },
-                { type = "not_is_moving" },
-            },
-        },
-
         -- ── SELF-HEAL / MANA ────────────────────────────────────────
         {
             key = "Drain Life",
@@ -223,6 +214,18 @@ local spec = {
                 { type = "target_valid" },
                 { type = "trinket_ready", slot = 14 },
                 { type = "classification_any_target", settingKey = "trinket_2_classification" },
+            },
+        },
+
+        -- ── FILLER (last resort) ────────────────────────────────────
+        -- Shadow Bolt is the filler: only suggested when nothing else in
+        -- the rotation can be cast (kept at the bottom of the priority
+        -- list so Drain Life / Life Tap / consumables win when ready).
+        {
+            key = "Shadow Bolt",
+            conditions = {
+                { type = "target_valid" },
+                { type = "not_is_moving" },
             },
         },
     },

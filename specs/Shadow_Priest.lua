@@ -209,7 +209,7 @@ local spec = {
         { key = "channelClipCues",      type = "checkbox", label = "Show clip zone on cast bar", default = true,
           tooltip = "Draw a green overlay on the cast bar for each tick. With Fake Queue enabled the zone starts 189ms before the tick (where FQ can hold) and ends 100ms after the tick (safe clip moment); without FQ only the 100ms after-tick window is shown." },
         { key = "tickSound",            type = "dropdown", label = "Tick sound",           default = "click",
-          values = {"none","click","tap","pop","snap","blip","coin","beep","ping","chime","ding","bell","alert"},
+          values = {"none","click","impact","pop","blip","coin","tick","chink","ping","note","popup","slash","bite","clank","chop","fizzle","bell","alert"},
           tooltip = "Sound played on each channel tick. Helps confirm ticks registered." },
         { key = "tickFlash",            type = "dropdown", label = "Tick flash effect",    default = "green",
           values = {"none","green","purple","shadow","white","red","green_top","purple_top","shadow_top","white_top","red_top","green_sides","purple_sides","shadow_sides","white_sides","red_sides"},
@@ -224,6 +224,9 @@ local spec = {
     -------------------------------------------------------------------
     rotation = {
         _fromFile = true,
+        -- Execution kill-shot: highest priority so a killable target is
+        -- finished before DoT refreshes / filler.  The normal "Shadow Word:
+        -- Death" entry below handles the per-content always/execute settings.
         { key = "SWD_EXEC", conditions = {{ type = "spell_can_kill_target", spellKey = "Shadow Word: Death", safetyKey = "swdSafetyPct" }, { type = "cooldown_ready", spellKey = "Shadow Word: Death" }, { type = "spec_option_enabled", optionKey = "use_SWD" }} },
         { key = "TRINKET1", optional = true, conditions = {{ type = "spec_option_enabled", optionKey = "use_trinket_1" }, { type = "target_valid" }, { type = "trinket_ready", slot = 13 }, { type = "classification_any_target", settingKey = "trinket_1_classification" }} },
         { key = "TRINKET2", optional = true, conditions = {{ type = "spec_option_enabled", optionKey = "use_trinket_2" }, { type = "target_valid" }, { type = "trinket_ready", slot = 14 }, { type = "classification_any_target", settingKey = "trinket_2_classification" }} },

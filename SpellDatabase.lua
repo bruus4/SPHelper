@@ -1,6 +1,6 @@
 ﻿------------------------------------------------------------------------
 -- SPHelper  â€“  SpellDatabase.lua
--- Static spell catalog plus NAG-style spellbook resolution.
+-- Static spell catalog plus ID-first spellbook resolution.
 -- The catalog stores stable low-rank/base spell IDs and useful non-API
 -- metadata; runtime entries resolve to the player's effective known rank.
 ------------------------------------------------------------------------
@@ -1615,7 +1615,7 @@ DB.catalog = {
         castType = "instant",
         hasteType = "gcd",
         duration = 30,
-        cooldown = 180,          -- 3 min in TBC (NAG tbc/data/ClassSpells.lua)
+        cooldown = 180,          -- 3 min in TBC
         flags = { utility = true, cooldown = true },
         talentModifiers = {},
         threatMultiplier = 1.0,
@@ -1780,7 +1780,7 @@ DB.catalog = {
         spec = "AFFLICTION",
         name = "Curse of Agony",
         baseId = 980,
-        resolveIds = { 980, 1014, 6217, 11711, 11712 },   -- All TBC ranks (NAG tbc/data/ClassSpells.lua)
+        resolveIds = { 980, 1014, 6217, 11711, 11712 },   -- All TBC ranks
         debuffAuraIds = { 980, 1014, 6217, 11711, 11712 }, -- Aura spell IDs for ID-based debuff matching
         school = "shadow",
         schoolMask = 32,
@@ -1799,11 +1799,11 @@ DB.catalog = {
     ["Curse of Elements"] = {
         class = "WARLOCK",
         spec = "AFFLICTION",
-        name = "Curse of the Elements",   -- Real in-game name on the TBC/Anniversary client (NAG tbc/Classes/Warlock.lua)
+        name = "Curse of the Elements",   -- Real in-game name on the TBC/Anniversary client
         debuffAura = "Curse of the Elements", -- Exact in-game aura name shown on target
         aliasNames = { "Curse of Elements" }, -- Retired name so old lookups still resolve
         baseId = 1490,
-        resolveIds = { 1490, 11721, 11722, 27228 },   -- All TBC ranks (NAG tbc/data/ClassSpells.lua)
+        resolveIds = { 1490, 11721, 11722, 27228 },   -- All TBC ranks
         debuffAuraIds = { 1490, 11721, 11722, 27228 }, -- Aura spell IDs for ID-based debuff matching
         school = "shadow",
         schoolMask = 32,
@@ -1822,7 +1822,7 @@ DB.catalog = {
         spec = "AFFLICTION",
         name = "Curse of Doom",
         baseId = 603,
-        resolveIds = { 603, 30910 },        -- All TBC ranks (NAG tbc/data/ClassSpells.lua)
+        resolveIds = { 603, 30910 },        -- All TBC ranks
         debuffAuraIds = { 603, 30910 },       -- Aura spell IDs for ID-based debuff matching
         school = "shadow",
         schoolMask = 32,
@@ -1910,7 +1910,7 @@ DB.catalog = {
         spec = "AFFLICTION",
         name = "Curse of Tongues",
         baseId = 1714,
-        resolveIds = { 1714, 11719 },        -- All TBC ranks (NAG tbc/data/ClassSpells.lua)
+        resolveIds = { 1714, 11719 },        -- All TBC ranks
         debuffAuraIds = { 1714, 11719 },       -- Aura spell IDs for ID-based debuff matching
         school = "shadow",
         schoolMask = 32,
@@ -1929,7 +1929,7 @@ DB.catalog = {
         spec = "AFFLICTION",
         name = "Curse of Weakness",
         baseId = 702,
-        resolveIds = { 702, 1108, 6205, 7646, 11707, 11708, 27224, 30909 },  -- All TBC ranks (NAG tbc/data/ClassSpells.lua)
+        resolveIds = { 702, 1108, 6205, 7646, 11707, 11708, 27224, 30909 },  -- All TBC ranks
         debuffAuraIds = { 702, 1108, 6205, 7646, 11707, 11708, 27224, 30909 }, -- Aura spell IDs for ID-based debuff matching
         school = "shadow",
         schoolMask = 32,
@@ -5218,7 +5218,10 @@ end
 --   label    : display name shown in the rotation editor and pickers
 --   spellKey : canonical spell this pseudo-key aliases (nil for item actions)
 DB.pseudoKeys = DB.pseudoKeys or {
-    SWD_EXEC = { label = "Shadow Word: Death (execute)", spellKey = "Shadow Word: Death" },
+    -- SWD_EXEC's label matches the base spell so the rotation editor shows
+    -- both SWD entries as the same ability ("Shadow Word: Death"); the
+    -- picker dedupes it against the real spell (see SpellData.GetPlayerSpells).
+    SWD_EXEC = { label = "Shadow Word: Death", spellKey = "Shadow Word: Death" },
     TRINKET1 = { label = "Trinket 1 (on-use)", spellKey = nil },
     TRINKET2 = { label = "Trinket 2 (on-use)", spellKey = nil },
     POTION   = { label = "Mana Potion",        spellKey = nil },

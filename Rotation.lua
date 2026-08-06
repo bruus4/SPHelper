@@ -814,18 +814,35 @@ function A:InitRotation()
     local function GetBindForKey(key)
         if bindCache[key] ~= nil then return bindCache[key] end
         local spell = A.SPELLS[key]
-        -- TRINKET1/TRINKET2 are not in the spell catalog; resolve dynamically
-        if not spell and (key == "TRINKET1" or key == "TRINKET2") then
-            local invSlot = (key == "TRINKET1") and 13 or 14
-            local _, itemId = pcall(GetInventoryItemID, "player", invSlot)
-            if itemId then
-                local _, _, spellId = pcall(GetItemSpell, itemId)
-                if spellId then
-                    spell = { id = spellId, name = GetSpellInfo(spellId) }
+        -- Item-driven keys (trinkets, potions, runes) have no spell id; the
+        -- bound action is resolved by DIRECT item-id match against the action
+        -- bars (GetItemSpell often returns nil on this client, so the old
+        -- spell-id route silently found nothing for dragged items).
+        local itemIdForKey = nil
+        if key == "TRINKET1" or key == "TRINKET2" or key == "POTION" or key == "RUNE" then
+            if key == "TRINKET1" or key == "TRINKET2" then
+                local invSlot = (key == "TRINKET1") and 13 or 14
+                local _, eItem = pcall(GetInventoryItemID, "player", invSlot)
+                if eItem then
+                    itemIdForKey = eItem
+                    -- Also try the spell route (works when item data loaded):
+                    -- lets item/macro actions match on the use spell too.
+                    local _, _, sId = pcall(GetItemSpell, eItem)
+                    if sId then
+                        spell = { id = sId, name = GetSpellInfo(sId) }
+                    end
                 end
+            elseif key == "POTION" then
+                local pId = A.db and A.db.selectedPotionItem
+                if type(pId) == "string" then pId = tonumber(pId) end
+                if pId and pId ~= "none" then itemIdForKey = pId end
+            elseif key == "RUNE" then
+                local rId = A.db and A.db.selectedRuneItem
+                if type(rId) == "string" then rId = tonumber(rId) end
+                if rId and rId ~= "none" then itemIdForKey = rId end
             end
         end
-        if not spell or not spell.id then
+        if (not spell or not spell.id) and not itemIdForKey then
             bindCache[key] = ""
             return ""
         end
@@ -839,15 +856,20 @@ function A:InitRotation()
                     local actionType, actionId = GetActionInfo(slot)
                     local matched = false
                     if actionType == "spell" then
-                        matched = (actionId == spell.id) or (GetSpellInfo(actionId) == spell.name)
+                        if spell and spell.id then
+                            matched = (actionId == spell.id) or (GetSpellInfo(actionId) == spell.name)
+                        end
                     elseif actionType == "item" then
-                        local ok, _, sId = pcall(GetItemSpell, actionId)
-                        if ok and sId then
-                            matched = (sId == spell.id)
+                        matched = (itemIdForKey ~= nil and actionId == itemIdForKey)
+                        if not matched and spell and spell.id then
+                            local ok, _, sId = pcall(GetItemSpell, actionId)
+                            if ok and sId then
+                                matched = (sId == spell.id)
+                            end
                         end
                     elseif actionType == "macro" then
                         local _, macroSpell = pcall(GetMacroSpell, actionId)
-                        if macroSpell and macroSpell > 0 then
+                        if macroSpell and macroSpell > 0 and spell and spell.id then
                             matched = (macroSpell == spell.id) or (GetSpellInfo(macroSpell) == spell.name)
                         end
                     end
@@ -871,15 +893,20 @@ function A:InitRotation()
                 local actionType, actionId = GetActionInfo(slot)
                 local matched = false
                 if actionType == "spell" then
-                    matched = (actionId == spell.id) or (GetSpellInfo(actionId) == spell.name)
+                    if spell and spell.id then
+                        matched = (actionId == spell.id) or (GetSpellInfo(actionId) == spell.name)
+                    end
                 elseif actionType == "item" then
-                    local ok, _, sId = pcall(GetItemSpell, actionId)
-                    if ok and sId then
-                        matched = (sId == spell.id)
+                    matched = (itemIdForKey ~= nil and actionId == itemIdForKey)
+                    if not matched and spell and spell.id then
+                        local ok, _, sId = pcall(GetItemSpell, actionId)
+                        if ok and sId then
+                            matched = (sId == spell.id)
+                        end
                     end
                 elseif actionType == "macro" then
                     local _, macroSpell = pcall(GetMacroSpell, actionId)
-                    if macroSpell and macroSpell > 0 then
+                    if macroSpell and macroSpell > 0 and spell and spell.id then
                         matched = (macroSpell == spell.id) or (GetSpellInfo(macroSpell) == spell.name)
                     end
                 end
@@ -954,14 +981,12 @@ function A:InitRotation()
                         normal[#normal + 1] = ent
                     end
                 end
-                -- Rebuild prio. Ready optionals stay visible at the TOP of the
-                -- main list (they used to be bonus-slot only, which hid e.g. a
-                -- ready trinket from the ability list entirely); the bonus slot
-                -- still shows them for the inflate-timers behavior the user
-                -- requested. Chain/timer semantics are untouched - Rotation.lua
-                -- is display-only; auto-cast lives in RotationEngine.
+                -- Rebuild prio. Ready optionals go ONLY to the bonus slot
+                -- (never duplicated at the top of the main list); on-cooldown
+                -- optionals stay in the queue. Chain/timer semantics are
+                -- untouched - Rotation.lua is display-only; auto-cast lives in
+                -- RotationEngine.
                 local ordered = {}
-                for _, ent in ipairs(bonus) do ordered[#ordered + 1] = ent end
                 for _, ent in ipairs(normal) do ordered[#ordered + 1] = ent end
                 for _, ent in ipairs(cooldownOpt) do ordered[#ordered + 1] = ent end
 

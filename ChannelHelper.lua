@@ -71,6 +71,9 @@ local function GetRotationForSpec(spec)
 end
 
 local function GetEntryId(entry, index)
+    -- Stable per-entry ID used as the key in saved helperOptions. Prefers an
+    -- explicit entry.id; otherwise derives one from the spell name + spell ID
+    -- so it survives rotation reordering (index is not part of the key).
     if entry and entry.id and entry.id ~= "" then return entry.id end
     local def = A.GetSpellDefinition and A.GetSpellDefinition(entry and entry.key)
     local name = (def and def.name) or (entry and entry.key) or "entry"
@@ -504,6 +507,10 @@ function CH:LoadChannelSpells(spec)
     self._channelSpellDefs = defs
     for _, cs in ipairs(defs) do
         if cs.spellName then
+            -- Per-spell saved overrides live under "cs_<spellKey>_<field>" in
+            -- the spec namespace. Rotation-defined entries (fromRotation)
+            -- are authoritative and ignore those overrides; catalog/legacy
+            -- entries fall back to the saved value, then the entry default.
             local prefix = "cs_" .. (cs.spellKey or "") .. "_"
             local fromRotation = cs._fromRotation == true
             self.KNOWN_CHANNELS[cs.spellName] = {
@@ -1055,6 +1062,7 @@ function CH:CreateMacroForSpell(spellName)
     local ok, result = pcall(CreateMacro, macroName, iconTexture, body, 1)
     if ok and result then return "created" end
 
+    -- Some client builds reject the 4-arg form (slot index); retry without it.
     local ok2, result2 = pcall(CreateMacro, macroName, iconTexture, body, nil)
     if ok2 and result2 then return "created" end
     return "failed"

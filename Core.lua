@@ -74,6 +74,10 @@ function A.GetItemInfoCached(itemRef)
     return unpack(result, 1, result.n)
 end
 
+-- The client returns the generic question-mark texture while item data is
+-- still loading; caching it would pin the wrong icon on the display forever.
+-- Only real icons are cached (the display re-resolves on its 0.1s ticker).
+local _QUESTION_MARK_ICON = "Interface\\Icons\\INV_Misc_QuestionMark"
 function A.GetItemIconCached(itemRef)
     local cache = A._apiCache.itemIcon
     local cached = cache[itemRef]
@@ -82,7 +86,7 @@ function A.GetItemIconCached(itemRef)
     end
 
     local icon = GetItemIcon(itemRef)
-    if icon then
+    if icon and icon ~= _QUESTION_MARK_ICON then
         cache[itemRef] = icon
     end
     return icon
@@ -232,6 +236,9 @@ local function UpdateTravelRecord(store, key, sample, now)
 
     rec.last = sample
     rec.samples = (rec.samples or 0) + 1
+    -- Exponential moving average (25% weight on the new sample) so the
+    -- estimate reacts to real travel-time changes without jittering on
+    -- single outliers.
     rec.ema = ((rec.ema or sample) * 0.75) + (sample * 0.25)
     rec.updatedAt = now
 end
@@ -280,6 +287,8 @@ function A.RecordSpellTravelImpact(spellId, spellName, destGUID, impactTime)
     if not pending or #pending == 0 then return nil end
 
     local matchIndex = nil
+    -- First pass: match a pending launch for this spell whose target GUID
+    -- matches the impact destination (and whose age is within 5s).
     for i = #pending, 1, -1 do
         local launch = pending[i]
         local age = impactTime - (launch.launchTime or impactTime)
@@ -289,6 +298,8 @@ function A.RecordSpellTravelImpact(spellId, spellName, destGUID, impactTime)
         end
     end
 
+    -- Second pass: if no target match (e.g. the target GUID was unknown at
+    -- launch time), fall back to any recent launch of the same spell.
     if not matchIndex then
         for i = #pending, 1, -1 do
             local launch = pending[i]
@@ -365,29 +376,47 @@ A.COLORS = {
 }
 
 ------------------------------------------------------------------------
--- MF tick sound options — all entries are very short (< 0.4 s) unless
--- marked "medium". SoundKit IDs verified for the TBC Anniversary client.
+-- MF tick sound options — all entries are very short sounds (< 0.4 s)
+-- unless marked "medium". SoundKit IDs verified against the TBC client's
+-- SoundEntries data (names from the Vanilla 1.12 / TBC SoundEntries.dbc
+-- + SoundKitConstants; each key maps to a distinct sound file):
+--   click=856  igMainMenuOptionCheckBoxOn   impact=567 BasiliskWound
+--   pop=3332   FriendJoinGame               blip=3081 TellMessage
+--   coin=120   LootWindowCoinSound          tick=864  igBackPackCoinSelect
+--   chink=865  igBackPackCoinOK             ping=3175 MapPing
+--   note=880   igPlayerInvite               popup=7355 TutorialPopup
+--   slash=705  RaptorWound                  bite=7374 BiteMedium
+--   clank=3263 Shield Metal Impact          chop=3202 Axe1H_HitWood
+--   fizzle=1424 SpellFizzleFire             bell=5274 AuctionWindowOpen
+--   alert=8959 RaidWarning
 ------------------------------------------------------------------------
 A.TICK_SOUNDS = {
-    { key = "none",   label = "None",             id = nil  },
+    { key = "none",    label = "None",              id = nil  },
     -- Short, crisp clicks / pops
-    { key = "click",  label = "Click",            id = 856  },
-    { key = "tap",    label = "Tap",              id = 567  },
-    { key = "pop",    label = "Pop",              id = 869  },
-    { key = "snap",   label = "Snap",             id = 860  },
-    { key = "blip",   label = "Blip",             id = 563  },
+    { key = "click",   label = "Click",             id = 856  },
+    { key = "impact",  label = "Impact",            id = 567  },
+    { key = "pop",     label = "Pop",               id = 3332 },
+    { key = "blip",    label = "Blip",              id = 3081 },
     -- Tonal / pitched
-    { key = "coin",   label = "Coin",             id = 120  },
-    { key = "beep",   label = "Beep",             id = 793  },
-    { key = "ping",   label = "Ping",             id = 3175 },
-    { key = "chime",  label = "Chime",            id = 879  },
-    { key = "ding",   label = "Ding",             id = 855  },
+    { key = "coin",    label = "Coin",              id = 120  },
+    { key = "tick",    label = "Tick",              id = 864  },
+    { key = "chink",   label = "Chink",             id = 865  },
+    { key = "ping",    label = "Ping",              id = 3175 },
+    { key = "note",    label = "Note",              id = 880  },
+    { key = "popup",   label = "Popup",             id = 7355 },
+    -- Short impacts (no voice, < 0.4 s)
+    { key = "slash",   label = "Slash",             id = 705  },
+    { key = "bite",    label = "Bite",              id = 7374 },
+    { key = "clank",   label = "Clank",             id = 3263 },
+    { key = "chop",    label = "Chop",              id = 3202 },
+    { key = "fizzle",  label = "Fizzle",            id = 1424 },
     -- Medium-length (pleasant but audible)
-    { key = "bell",   label = "Bell (medium)",    id = 5274 },
-    { key = "alert",  label = "Alert (medium)",   id = 8959 },
+    { key = "bell",    label = "Bell (medium)",     id = 5274 },
+    { key = "alert",   label = "Alert (medium)",    id = 8959 },
 }
 
 function A.GetTickSoundId(key)
+    if key == "tap" then key = "impact" end -- pre-rename saved values
     for _, s in ipairs(A.TICK_SOUNDS) do
         if s.key == key then return s.id end
     end
@@ -473,25 +502,98 @@ function A.GetItemCooldownSafe(itemId)
     return start or 0, dur or 0, enable
 end
 
--- Detect whether the item in an inventory slot has an on-use effect.
--- Uses GetItemSpell which returns (spellName, spellId, spellSchool, spellTrigger)
--- on Classic/TBC and (spellId, spellName, spellSchool, spellTrigger) on retail.
--- r4 is always spellTrigger regardless of ordering.
-function A.ItemHasOnUseEffect(itemId)
-    if type(GetItemSpell) ~= "function" then
-        return true  -- can't detect, assume on-use
+-- Detect whether the item has an on-use ("Use:") effect.
+-- GetItemSpell returns only (spellName, spellID) and reports only the FIRST
+-- item effect (proc/equip included), so it cannot distinguish on-use from
+-- passive items on this client.  Ground truth sources, in order:
+--   1. slot (optional): GetInventoryItemCooldown's third return is the item's
+--      cooldown CAPABILITY ("1 if the inventory item is capable of having a
+--      cooldown, 0 if not").  A passive trinket reports 0 even while a proc's
+--      internal cooldown is ticking; an on-use trinket reports 1 even when
+--      ready.  Deterministic and tooltip-independent.
+--   2. a non-zero item cooldown positively confirms on-use (a READY on-use
+--      item reads 0,0 so absence proves nothing).  NOT cached: a transient
+--      proc/internal cooldown must not permanently paint the item on-use.
+--   3. the item tooltip's "Use:" line (A._ScanItemUseTip, throttled); while
+--      the item's data is still loading we return true so a real on-use
+--      trinket is never hidden.  Only these tooltip verdicts are cached.
+function A.ItemHasOnUseEffect(itemId, slot)
+    if not itemId then return false end
+    local cache = A._onUseCache
+    if cache and cache[itemId] ~= nil then return cache[itemId] end
+
+    if slot and type(GetInventoryItemCooldown) == "function" then
+        local ok, _, _, enable = pcall(GetInventoryItemCooldown, "player", slot)
+        if ok and enable ~= nil then
+            if enable == 0 then
+                return false  -- passive: not pressable (not cached; re-checked per tick)
+            end
+            -- enable > 0: capable of a use cooldown -> on-use capable.
+            local cdStart, cdDur = A.GetItemCooldownSafe(itemId)
+            if cdDur and cdDur > 0 then
+                return true  -- on a use cooldown right now
+            end
+            -- Capable but ready: confirm via the tooltip scan below.
+            return A.ItemHasOnUseTooltip(itemId)
+        end
     end
-    local r1, _, _, r4 = GetItemSpell(itemId)
-    if not r1 then
-        return false  -- no spell at all → passive item
+
+    -- Positive: the item is currently on a use cooldown (passives have none).
+    -- Not cached: see the note above (transient cooldowns must not poison).
+    local cdStart, cdDur = A.GetItemCooldownSafe(itemId)
+    if cdDur and cdDur > 0 then
+        return true
     end
-    -- r4 = spellTrigger in both orderings
-    if type(r4) == "string" then
-        return r4:upper() == "USE"
+
+    -- Tooltip ground truth (throttled to 1s while item data is loading).
+    return A.ItemHasOnUseTooltip(itemId)
+end
+
+-- Tooltip-based on-use verdict, throttled and cached (see ItemHasOnUseEffect).
+function A.ItemHasOnUseTooltip(itemId)
+    local cache = A._onUseCache
+    if cache and cache[itemId] ~= nil then return cache[itemId] end
+    local now = GetTime()
+    if A._onUseTipRetry and (now - A._onUseTipRetry) < 1 then
+        return true  -- undetermined yet; never hide a real on-use trinket
     end
-    -- r4 is not a string (Classic might return nil for the trigger on older
-    -- builds). If the first value is a string, it's the spell name → on-use.
-    return type(r1) == "string"
+    A._onUseTipRetry = now
+    local verdict = A._ScanItemUseTip(itemId)
+    if verdict ~= nil then
+        if not cache then cache = {} A._onUseCache = cache end
+        cache[itemId] = verdict
+        return verdict
+    end
+    return true  -- item data not loaded; re-check after the throttle
+end
+
+-- Internal: scan the item tooltip for a "Use:" line (the in-game marker of an
+-- on-use effect; English client).  Returns true/false when decisive, nil when
+-- the item's data is not loaded yet or the tooltip cannot be read (the caller
+-- treats nil as "unknown").  State lives on A so the test harness can mock it.
+function A._ScanItemUseTip(itemId)
+    local link = nil
+    local ok = pcall(function() link = select(2, GetItemInfo(itemId)) end)
+    if not ok or not link then return nil end
+    if not A._onUseTip then
+        local tip = CreateFrame("GameTooltip", "SPHelperOnUseTip", UIParent, "GameTooltipTemplate")
+        tip:SetOwner(UIParent, "ANCHOR_NONE")
+        A._onUseTip = tip
+    end
+    local tip = A._onUseTip
+    local n = nil
+    ok = pcall(function()
+        tip:SetHyperlink(link)
+        n = tip:NumLines()
+    end)
+    if not ok or not n or n == 0 then return nil end
+    for i = 1, n do
+        local text = tip:GetText(i)
+        if text and text:match("^%s*Use:") then
+            return true
+        end
+    end
+    return false
 end
 
 -- Simple error reporter: logs the error and shows a message.
@@ -562,7 +664,7 @@ function A.GetHaste()
 end
 
 ------------------------------------------------------------------------
--- ID-first aura resolution (NAG-style).
+-- ID-first aura resolution.
 --
 -- Name-based matching alone is fragile: TBC has several auras whose real
 -- in-game name differs from what a naive database uses (e.g. spell 1490 is
@@ -660,7 +762,7 @@ local function ScanAurasByRef(apiFn, unit, filter, ref)
               _, _, spellId = apiFn(unit, i, filter)
         if not name then break end
 
-        -- ID-first (NAG-style): the aura's spellId is authoritative.
+        -- ID-first: the aura's spellId is authoritative.
         if idSet then
             for _, wantedId in ipairs(ref.ids) do
                 if spellId and spellId == wantedId then
@@ -911,6 +1013,9 @@ end
 local function EnsureDebugConfig()
     if not A.db then return nil end
     A.db.debug = A.db.debug or {}
+    -- InitDB shallow-copies the default table, so a fresh DB's modules table
+    -- IS the defaults table by reference. Copy it so per-module toggles are
+    -- stored in the saved DB and never mutate the shared defaults.
     if type(A.db.debug.modules) ~= "table" or A.db.debug.modules == A.defaults.debug.modules then
         local copy = {}
         if type(A.db.debug.modules) == "table" then
@@ -1052,15 +1157,13 @@ A.defaults = {
                     maxTargets = 8, warnSeconds = 3, blinkSpeed = 4, dotIconSize = 18,
                     portraitSide = "left", warnMode = "border",
                     warnBorderSize = 4, warnBarAlpha = 0.35, warnIconAlpha = 0.6, newTargetPosition = "bottom", anchorPosition = "top", sortMode = "addOrder" },
-    rotation    = { enabled = true, iconSize = 58, primaryIconSize = 58, enableBonusSlot = true, bonusSpacing = 4 },
+    rotation    = { enabled = true, iconSize = 58, primaryIconSize = 58, enableBonusSlot = true, bonusSpacing = 4, showKeybinds = true },
     debug       = { echo = false, bufferSize = 200, modules = {} },
     -- Per-frame saved positions (point/relPoint/x/y) keyed by frame name.
     framePositions = {},
     -- Per-spec settings namespace (populated by migration and SpecManager)
     specs       = {},
     -- Legacy flat keys kept for backward compatibility during migration.
-    -- Phase 2 will update all readers to use A.SpecVal(); these can be
-    -- removed after Phase 2 is complete.
     selectedPotionItem = 22832,
     selectedRuneItem   = 20520,
     swdMode     = "always",
@@ -1084,9 +1187,7 @@ A.defaults = {
 
 ------------------------------------------------------------------------
 -- Spec-specific defaults (Shadow Priest).
--- These are the canonical defaults for the shadow_priest spec.
--- They live here temporarily; Phase 1b moves them into the spec file.
-------------------------------------------------------------------------
+-- Canonical defaults for the shadow_priest spec.
 A.SPEC_DEFAULTS = {
     shadow_priest = {
         selectedPotionItem = 22832,
@@ -1242,10 +1343,8 @@ function A.InitDB()
         A.db.runeManaThreshold = A.db.consumableManaThreshold
     end
 
-    -- Debug logging removed; no runtime toggle to sync.
-
     --------------------------------------------------------------------
-    -- Phase 0 migration: copy spec-specific flat keys into
+    -- Migration: copy spec-specific flat keys into
     -- A.db.specs["shadow_priest"] if they exist at the top level.
     -- This runs every load but only copies when the spec namespace
     -- is missing a key that the flat table has.  The flat keys are
@@ -1303,7 +1402,7 @@ function A.ResetAll()
     -- A wiped DB must behave like a fresh install: stamp every registered
     -- spec's current settingVersion.  Without this, the next login's
     -- ProcessSettingChanges would re-run all migrations against the freshly
-    -- defaulted values (Phase 0 migration re-populates spec keys with the
+    -- defaulted values (the migration re-populates spec keys with the
     -- flat defaults, and the hasSavedData heuristic then treats the wiped
     -- DB as an upgrade) — prompting for settings whose saved value is
     -- identical to the new default.
@@ -1540,7 +1639,7 @@ end
 -- InitDB and after specs are fully registered (safe at ADDON_LOADED time).
 -- A prompt is queued ONLY when the saved value genuinely differs from the
 -- new default — a mere presence check would list settings whose saved and
--- default values are identical (e.g. after a Full Reset, Phase 0 migration
+-- default values are identical (e.g. after a Full Reset, the migration
 -- re-populates spec keys with the flat defaults).
 function A.ProcessSettingChanges()
     if not A.SpecManager or not A.SpecManager.GetRegisteredSpecs then return end
@@ -1942,6 +2041,12 @@ loader:RegisterEvent("ADDON_LOADED")
 loader:SetScript("OnEvent", function(self, event, addon)
     if addon ~= "SPHelper" then return end
     A.InitDB()
+
+    -- Editor mode is a per-session toggle, not a saved preference: always
+    -- start with it off so the panel opens read-only until the user opts in
+    -- via /sph edit.
+    A.db.specUI = A.db.specUI or {}
+    A.db.specUI.editMode = false
 
     -- Check for setting version changes (must be after InitDB + after all specs loaded)
     A.ProcessSettingChanges()

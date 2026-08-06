@@ -363,6 +363,10 @@ end
 function SD:GetPlayerSpells(classFilter)
     local spells = {}
     local resolvedClass = ResolveClassFilter(classFilter)
+    -- Display names already listed, so spell-variant pseudo-keys whose label
+    -- duplicates a real spell (e.g. SWD_EXEC = "Shadow Word: Death") are not
+    -- offered a second time in the picker.
+    local presentNames = {}
     if A.SpellDatabase and A.SpellDatabase.sortedKeys and A.SpellDatabase.catalog then
         for _, key in ipairs(A.SpellDatabase.sortedKeys) do
             if key ~= "CLEARCASTING" then
@@ -371,6 +375,7 @@ function SD:GetPlayerSpells(classFilter)
                     local spell = A.SPELLS and A.SPELLS[key] or nil
                     local displayName = MakeClassTaggedName(def)
                     local resolvedName = (spell and spell.name) or def.name
+                    presentNames[resolvedName] = true
                     spells[#spells + 1] = {
                         key          = key,
                         id           = (spell and spell.id) or def.baseId,
@@ -395,9 +400,13 @@ function SD:GetPlayerSpells(classFilter)
             for pseudoKey, pdef in pairs(A.SpellDatabase.pseudoKeys) do
                 local pseudoSpell = A.SPELLS and A.SPELLS[pseudoKey] or nil
                 if pdef.spellKey then
-                    -- Variant of a real spell: only list for the matching class
+                    -- Variant of a real spell: only list for the matching class,
+                    -- and skip it when its label duplicates the real spell so the
+                    -- picker shows one entry per ability.
                     if not resolvedClass or (pseudoSpell and pseudoSpell.class == resolvedClass) then
-                        AddPseudoEntry(spells, pseudoKey, pdef, pseudoSpell)
+                        if not presentNames[pdef.label] then
+                            AddPseudoEntry(spells, pseudoKey, pdef, pseudoSpell)
+                        end
                     end
                 else
                     -- Item actions: list for every class
@@ -412,23 +421,28 @@ function SD:GetPlayerSpells(classFilter)
         for key, spell in pairs(A.SPELLS) do
             if key ~= "CLEARCASTING" and (not resolvedClass or spell.class == resolvedClass) then
                 if spell.pseudo then
-                    spells[#spells + 1] = {
-                        key          = key,
-                        value        = key,
-                        label        = spell.label or key,
-                        id           = spell.id,
-                        baseId       = spell.baseId or spell.id,
-                        name         = spell.label or key,
-                        resolvedName = spell.name or spell.label or key,
-                        rank         = spell.rank or "",
-                        icon         = spell.icon,
-                        known        = spell.known or false,
-                        castTime     = 0,
-                        class        = spell.class,
-                        spec         = spell.spec,
-                        pseudo       = true,
-                    }
+                    -- Skip spell-variant pseudo entries whose label duplicates a
+                    -- real spell already listed (same dedupe as the catalog path).
+                    if not presentNames[spell.label or key] then
+                        spells[#spells + 1] = {
+                            key          = key,
+                            value        = key,
+                            label        = spell.label or key,
+                            id           = spell.id,
+                            baseId       = spell.baseId or spell.id,
+                            name         = spell.label or key,
+                            resolvedName = spell.name or spell.label or key,
+                            rank         = spell.rank or "",
+                            icon         = spell.icon,
+                            known        = spell.known or false,
+                            castTime     = 0,
+                            class        = spell.class,
+                            spec         = spell.spec,
+                            pseudo       = true,
+                        }
+                    end
                 else
+                    presentNames[spell.name] = true
                     spells[#spells + 1] = {
                         key          = key,
                         id           = spell.id,

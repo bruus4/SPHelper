@@ -116,6 +116,8 @@ end
 local dropdownCounter = 0
 
 local function MakeDropdown(parent, label, options, get, set, yOff, labels)
+    -- UIDropDownMenuTemplate requires a unique GLOBAL frame name per dropdown,
+    -- so each instance gets a monotonically increasing suffix.
     dropdownCounter = dropdownCounter + 1
     local globalName = "SPHelperDropdown" .. dropdownCounter
 
@@ -252,60 +254,37 @@ local function BuildControls(panel)
     desc:SetFont("Fonts\\FRIZQT__.TTF", 10)
     desc:SetPoint("TOPLEFT", content, "TOPLEFT", 16, y)
     desc:SetTextColor(0.8, 0.8, 0.8, 1)
-    desc:SetText("Use the commands below to configure SPHelper.")
-    y = y - 30
+    desc:SetText("Open your spec's settings to edit the rotation, options, and cast bar.")
+    y = y - 36
 
-    MakeSectionHeader(content, "Commands", y); y = y - 24
-
-    local commands = {
-        { cmd = "/sph",             desc = "Open this panel" },
-        { cmd = "/sph spec",        desc = "Open spec & rotation editor (all spec settings)" },
-        { cmd = "/sph visuals",     desc = "Open visual layout options (sizes, colors)" },
-        { cmd = "/sph debug",       desc = "List or toggle module debug logging" },
-        { cmd = "/sph lock",        desc = "Lock all frame positions" },
-        { cmd = "/sph unlock",      desc = "Unlock frames for dragging" },
-        { cmd = "/sph scale N",     desc = "Set global UI scale (0.5-3.0)" },
-        { cmd = "/sph macros",      desc = "Print Fake Queue macro templates" },
-        { cmd = "/sph reset",       desc = "Show reset options — see 'Reset' section below" },
-    }
-
-    for _, entry in ipairs(commands) do
-        local cmdStr = content:CreateFontString(nil, "OVERLAY")
-        cmdStr:SetFont("Fonts\\FRIZQT__.TTF", 11, "OUTLINE")
-        cmdStr:SetPoint("TOPLEFT", content, "TOPLEFT", 24, y)
-        cmdStr:SetTextColor(1, 0.85, 0.4, 1)
-        cmdStr:SetText(entry.cmd)
-
-        local descStr = content:CreateFontString(nil, "OVERLAY")
-        descStr:SetFont("Fonts\\FRIZQT__.TTF", 10)
-        descStr:SetPoint("TOPLEFT", content, "TOPLEFT", 180, y)
-        descStr:SetTextColor(0.85, 0.85, 0.85, 1)
-        descStr:SetText(entry.desc)
-        y = y - 17
+    -- Primary action: open the active spec's settings
+    local activeLabel = nil
+    if A.SpecManager and A.SpecManager.GetSpecByID and A._activeSpecID then
+        local active = A.SpecManager:GetSpecByID(A._activeSpecID)
+        activeLabel = active and (active.meta and active.meta.specName or A._activeSpecID)
     end
-
-    y = y - 8
-
-    -- Quick-open buttons on a single row
-    MakeButton(content, "Open Spec Editor", 160, 24, function()
+    local editBtn = MakeButton(content, "Open Spec Settings", 200, 26, function()
         if A.SpecUI and A.SpecUI.Open then A.SpecUI:Open() end
     end, y)
-    -- Create New Spec: explicit button so users can create specs regardless
-    -- of current class/spec state.
-    MakeButton(content, "Create New Spec", 150, 24, function()
-        if A.SpecUI and A.SpecUI.OpenNewSpecDialog then
-            A.SpecUI.OpenNewSpecDialog()
-        elseif A.SpecUI and A.SpecUI.Open then
-            -- Fallback: open Spec UI with nil to trigger dialog when no active spec
-            pcall(function() A.SpecUI:Open(nil) end)
-        else
-            print("|cff8882d5SPHelper|r: Spec UI not available.")
-        end
-    end, y, 190)
+    editBtn:SetBackdropColor(0.3, 0.24, 0.5, 1)
+    editBtn:SetBackdropBorderColor(0.6, 0.5, 0.9, 1)
     MakeButton(content, "Open Visuals", 150, 24, function()
         if A.OpenVisualsWindow then A.OpenVisualsWindow() end
-    end, y, 352)
-    y = y - 30
+    end, y + 1, 232)
+    y = y - 44
+
+    -- Active-spec hint under the buttons
+    local hint = content:CreateFontString(nil, "OVERLAY")
+    hint:SetFont("Fonts\\FRIZQT__.TTF", 9)
+    hint:SetPoint("TOPLEFT", content, "TOPLEFT", 18, y)
+    if activeLabel then
+        hint:SetTextColor(0.6, 0.85, 0.6, 1)
+        hint:SetText("Active spec: " .. activeLabel)
+    else
+        hint:SetTextColor(0.85, 0.7, 0.4, 1)
+        hint:SetText("No active spec — opening settings will offer to create one.")
+    end
+    y = y - 26
 
     -- Enable/disable toggles (require reload)
     MakeSectionHeader(content, "Module toggles  (reload required)", y); y = y - 24
@@ -379,6 +358,14 @@ local function BuildControls(panel)
     resetNote2:SetPoint("TOPLEFT", content, "TOPLEFT", 16, y)
     resetNote2:SetTextColor(0.7, 0.4, 0.4, 1)
     resetNote2:SetText("Hover buttons for details. Single-spec resets: /sph reset")
+    y = y - 20
+
+    -- Compact command reference (kept small so commands are not the focus)
+    local cmdNote = content:CreateFontString(nil, "OVERLAY")
+    cmdNote:SetFont("Fonts\\FRIZQT__.TTF", 9)
+    cmdNote:SetPoint("TOPLEFT", content, "TOPLEFT", 16, y)
+    cmdNote:SetTextColor(0.55, 0.55, 0.55, 1)
+    cmdNote:SetText("Commands: /sph edit · /sph visuals · /sph lock · /sph unlock · /sph scale N · /sph macros · /sph reset")
 end
 
 -- ====================================================================
@@ -766,6 +753,12 @@ function A:InitConfig()
                     if A.RotationPreviewOn then A.RotationPreviewOn() end
                 end, yOff)
             yOff = yOff - 42
+            MakeCheckbox(content, "Show keybindings",
+                function() return A.db.rotation.showKeybinds ~= false end,
+                function(v)
+                    A.db.rotation.showKeybinds = v
+                end, yOff)
+            yOff = yOff - 30
 
             -- Bonus slot options (optional suggestions like trinkets)
             MakeSubHeader(content, "Bonus Slot (optional suggestions)", yOff); yOff = yOff - 22

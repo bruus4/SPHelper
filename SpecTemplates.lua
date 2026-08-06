@@ -761,7 +761,7 @@ function T.BuildFeralDruidRotation(spec)
         }),
 
         -- ── BEAR TANK ROTATION ────────────────────────────────────
-        -- 1. Frenzied Regeneration – defensive cooldown.
+        -- Frenzied Regeneration – defensive cooldown.
         T.SpellEntry({
             key = "Frenzied Regeneration",
             spellKey = "Frenzied Regeneration",
@@ -773,7 +773,7 @@ function T.BuildFeralDruidRotation(spec)
                 T.StateCompare("player_hp_pct", "<", "bear_fr_hp_pct"),
             },
         }),
-        -- 2. Bash – interrupt.
+        -- Bash – interrupt.
         T.SpellEntry({
             key = "Bash",
             spellKey = "Bash",
@@ -785,7 +785,7 @@ function T.BuildFeralDruidRotation(spec)
                 T.UnitInterruptible("target"),
             },
         }),
-        -- 3. Demoralizing Roar – maintain AP debuff.
+        -- Demoralizing Roar – maintain AP debuff.
         T.SpellEntry({
             key = "Demoralizing Roar",
             spellKey = "Demoralizing Roar",
@@ -796,7 +796,7 @@ function T.BuildFeralDruidRotation(spec)
                 T.DebuffPropertyCompare("Demoralizing Roar", "any", "remaining", "<", 4),
             },
         }),
-        -- 4. Faerie Fire (Feral) – maintain armour debuff if no Boomkin.
+        -- Faerie Fire (Feral) – maintain armour debuff if no Boomkin.
         T.SpellEntry({
             key = "Faerie Fire (Feral)",
             spellKey = "Faerie Fire (Feral)",
@@ -807,7 +807,7 @@ function T.BuildFeralDruidRotation(spec)
                 T.DebuffPropertyCompare("Faerie Fire (Feral)", "any", "remaining", "<", "faerie_fire_refresh_seconds"),
             },
         }),
-        -- 5. Mangle (Bear) – on cooldown, highest TPR.
+        -- Mangle (Bear) – on cooldown, highest TPR.
         T.SpellEntry({
             key = "Mangle (Bear)",
             spellKey = "Mangle (Bear)",
@@ -816,7 +816,7 @@ function T.BuildFeralDruidRotation(spec)
             cooldownSpellKey = "Mangle (Bear)",
             resourceGte = 20,
         }),
-        -- 6. Lacerate – stack to 5 and refresh.
+        -- Lacerate – stack to 5 and refresh.
         T.SpellEntry({
             key = "Lacerate",
             spellKey = "Lacerate",
@@ -830,7 +830,7 @@ function T.BuildFeralDruidRotation(spec)
                 }),
             },
         }),
-        -- 7. Swipe – filler when Lacerate is at 5 and not expiring.
+        -- Swipe – filler when Lacerate is at 5 and not expiring.
         T.SpellEntry({
             key = "Swipe",
             spellKey = "Swipe",
@@ -842,7 +842,7 @@ function T.BuildFeralDruidRotation(spec)
                 T.DebuffPropertyCompare("Lacerate", "player", "remaining", ">=", 4),
             },
         }),
-        -- 8. Maul – rage dump.
+        -- Maul – rage dump.
         T.SpellEntry({
             key = "Maul",
             spellKey = "Maul",

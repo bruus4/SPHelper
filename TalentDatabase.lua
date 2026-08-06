@@ -1,8 +1,8 @@
 ﻿------------------------------------------------------------------------
 -- SPHelper  â€“  TalentDatabase.lua
--- Comprehensive talent definitions for TBC Classic, imported from NAG
--- schema and mapped to our tab/index system. Used for validation,
--- display, and rotation logic that depends on specific talents.
+-- Comprehensive talent definitions for TBC Classic, mapped to our
+-- tab/index system. Used for validation, display, and rotation logic
+-- that depends on specific talents.
 ------------------------------------------------------------------------
 local A = SPHelper
 
@@ -286,7 +286,7 @@ local warlockDestruction = {
 }
 
 ----------------------------------------------------------------------
--- SHAMAN (Elemental=1, Enhancement=2, Restoration=3) â€” from NAG schema
+-- SHAMAN (Elemental=1, Enhancement=2, Restoration=3)
 ----------------------------------------------------------------------
 local shamanElemental = {
     ["Convection"] = { class = "SHAMAN", tab = 1, index = 1, maxRank = 3 },
@@ -358,7 +358,7 @@ local shamanRestoration = {
 }
 
 ----------------------------------------------------------------------
--- MAGE (Arcane=1, Fire=2, Frost=3) â€” from NAG schema
+-- MAGE (Arcane=1, Fire=2, Frost=3)
 ----------------------------------------------------------------------
 local mageArcane = {
     ["Arcane Subtlety"] = { class = "MAGE", tab = 1, index = 1, maxRank = 5 },
@@ -414,7 +414,7 @@ local mageFrost = {
 }
 
 ----------------------------------------------------------------------
--- HUNTER (Beast Mastery=1, Marksmanship=2, Survival=3) â€” from NAG schema
+-- HUNTER (Beast Mastery=1, Marksmanship=2, Survival=3)
 ----------------------------------------------------------------------
 local hunterBeastMastery = {
     ["Endurance Training"] = { class = "HUNTER", tab = 1, index = 1, maxRank = 5 },
@@ -468,7 +468,7 @@ local hunterSurvival = {
 }
 
 ----------------------------------------------------------------------
--- PALADIN (Holy=1, Protection=2, Retribution=3) â€” from NAG schema
+-- PALADIN (Holy=1, Protection=2, Retribution=3)
 ----------------------------------------------------------------------
 local paladinHoly = {
     ["Divine Strength"] = { class = "PALADIN", tab = 1, index = 1, maxRank = 5 },

@@ -203,6 +203,9 @@ function A:InitCastBar()
                 showTick = A.ChannelHelper:ShouldShowTickMarker(f.channelInfo, i)
             end
             if showTick then
+                -- Channel bars drain right→left (progress goes 1→0), so tick i
+                -- lands where the spark will be at fraction (tickCount-i)/tickCount.
+                -- Markers are therefore placed at that same fraction from the left.
                 local frac = (f.tickCount - i) / f.tickCount
                 t:ClearAllPoints()
                 t:SetPoint("CENTER", bar, "LEFT", BAR_W * frac, 0)

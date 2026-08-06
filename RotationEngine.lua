@@ -5,7 +5,7 @@
 -- and produces an ordered priority list each evaluation cycle.
 --
 -- Replaces the hardcoded GetPriority() in Rotation.lua when
--- A.db.useRotationEngine is true (default: true after Phase 4).
+-- A.db.useRotationEngine is true (default: true).
 ------------------------------------------------------------------------
 local A = SPHelper
 
@@ -574,7 +574,7 @@ local function ShouldApplyDebuff(spellKey, target, ctx)
     -- Helper: choose lookup function based on whether we care about any source or only this player's copy.
     -- A.FindDebuff     -> scans all debuffs regardless of caster (for "any source" modes).
     -- A.FindPlayerDebuff -> scans only debuffs cast by us (for per-player modes).
-    -- Both are ID-first (NAG-style) with name fallback, so rank/localization mismatches
+    -- Both are ID-first with name fallback, so rank/localization mismatches
     -- (e.g. "Curse of the Elements" vs "Curse of Elements") are handled.
     local function GetLookupFn(checkAnySource)
         if checkAnySource then return A.FindDebuff else return A.FindPlayerDebuff end
@@ -919,7 +919,7 @@ local function GetTrackedDebuffState(spec, ctx, spellKey)
     end
     -- Prefer the SpellDatabase's debuffAura (exact in-game name) over the spell name.
     -- Lookups go through the catalog spell KEY so A.FindDebuff/FindPlayerDebuff
-    -- resolve all TBC aura spell IDs first (NAG-style) with name fallback.
+    -- resolve all TBC aura spell IDs first with name fallback.
     local spellRef = def.spellKey or spellKey
     local spellDef = A.GetSpellDefinition and A.GetSpellDefinition(spellRef)
     local spellName = def.name
@@ -1250,7 +1250,7 @@ local function ResolveDebuffPropertyValue(cond, ctx, spec, db)
         end
     end
     -- Prefer the spell KEY for the lookup: A.FindDebuff resolves it to all TBC
-    -- aura spell IDs (ID-first, NAG-style) plus the aura names, so rank and
+    -- aura spell IDs (ID-first) plus the aura names, so rank and
     -- naming mismatches (e.g. "Curse of the Elements") are handled.
     local name, count, _, expirationTime = GetUnitDebuffInfo("target", cond.spellKey or debuffName, source)
 
@@ -2371,7 +2371,7 @@ RE._condEval["player_has_debuff"] = function(cond, ctx, spec, db)
     local playerGUID = ctx and ctx.playerGUID
     if not playerGUID then return false end
 
-    -- ID-first (NAG-style): resolve all TBC aura spell IDs + names for this key.
+    -- ID-first: resolve all TBC aura spell IDs + names for this key.
     local ref = A.ResolveAuraRef and A.ResolveAuraRef(key)
     local ids = ref and ref.ids or {}
     local names = ref and (ref.names or {}) or { key }
@@ -2649,7 +2649,7 @@ RE._condEval["threat_pct_ge"] = function(cond, ctx, spec, db)
 end
 
 ------------------------------------------------------------------------
--- Phase 8 condition evaluators
+-- Condition evaluators
 ------------------------------------------------------------------------
 
 -- Helper: resolve a buff/debuff name from a name string or a numeric spell ID.
@@ -3081,7 +3081,7 @@ RE._condEval["group_size_gte"] = function(cond, ctx, spec, db)
 end
 
 ------------------------------------------------------------------------
--- Phase 9 – Feral / positional / resource / HP-decay evaluators
+-- Feral / positional / resource / HP-decay evaluators
 ------------------------------------------------------------------------
 
 -- True if the player is behind the target.
@@ -3312,19 +3312,24 @@ RE._condEval["item_ready_by_key"] = function(cond, ctx, spec, db)
 end
 
 -- trinket_ready: checks if a trinket in the given inventory slot (13 or 14)
--- is equipped and its on-use cooldown is ready.
+-- is equipped, has an on-use effect, and its cooldown is ready.  Passive
+-- proc/equip trinkets (no "Use:" effect) never satisfy this condition.
 RE._condEval["trinket_ready"] = function(cond, ctx, spec, db)
     local slot = tonumber(cond.slot) or 13
     if slot ~= 13 and slot ~= 14 then return false end
     local ok, itemId = pcall(GetInventoryItemID, "player", slot)
     if not ok or not itemId then return false end
-    -- Skip passive trinkets (no on-use effect)
-    if not A.ItemHasOnUseEffect(itemId) then return false end
+    if not A.ItemHasOnUseEffect(itemId, slot) then
+        if A.DebugLog then
+            A.DebugLog("ROT", "trinket_ready: slot " .. slot .. " item " .. tostring(itemId) .. " has no on-use effect (passive) - skipped")
+        end
+        return false
+    end
     local start, dur = GetInventoryItemCooldown("player", slot)
     if start and start > 0 then
         return (start + dur - ctx.now) <= 0
     end
-    -- start == 0: on-use trinket off cooldown → ready.
+    -- start == 0: trinket off cooldown → ready.
     return true
 end
 
@@ -3661,7 +3666,7 @@ local function ResolveDebuffRemaining(spec, ctx, cond)
     end
     local now = (ctx and ctx.now) or GetTime()
 
-    -- ID-first (NAG-style): resolve by catalog spell key so all TBC aura spell
+    -- ID-first: resolve by catalog spell key so all TBC aura spell
     -- IDs (and sibling variants) are matched before falling back to names.
     if spellKey then
         local fn = (source == "any" and A.FindDebuff) or A.FindPlayerDebuff
@@ -3736,10 +3741,12 @@ function RE._ComputeEntryRefreshETA(entry, ctx, spec)
             elseif t == "trinket_ready" then
                 local slot = tonumber(cond.slot) or 13
                 local ok_e, itemId = pcall(GetInventoryItemID, "player", slot)
-                if ok_e and itemId and not A.ItemHasOnUseEffect(itemId) then break end
-                local start, dur = GetInventoryItemCooldown("player", slot)
-                if start and start > 0 then
-                    bump(math.max(start + dur - (ctx.now or GetTime()), 0))
+                -- Only on-use trinkets are suggestable (see _EvaluatePrepared).
+                if ok_e and itemId and A.ItemHasOnUseEffect(itemId, slot) then
+                    local start, dur = GetInventoryItemCooldown("player", slot)
+                    if start and start > 0 then
+                        bump(math.max(start + dur - (ctx.now or GetTime()), 0))
+                    end
                 end
             end
         end
@@ -3772,7 +3779,13 @@ function RE:_EvaluateEntry(entry, index, ctx, spec, db, hasTarget, wantDiagnosti
     local otherFail = false
     local entrySpell = entry.key and A.SPELLS and A.SPELLS[entry.key]
 
-    if entrySpell and not A.KnowsSpell(entrySpell.id) then
+    -- Pseudo-keys (TRINKET1/2, POTION, RUNE, WAND) have no spell id
+    -- (spellKey = nil): never gate them on spell knowledge, or they get
+    -- blocked as "unknown_spell" (A.KnowsSpell(nil) == false) and silently
+    -- vanish from suggestions. Their item conditions (equipped slot,
+    -- cooldown) already handle availability.
+    local entrySpellId = entrySpell and (entrySpell.id or entrySpell.baseId)
+    if entrySpell and entrySpellId and not A.KnowsSpell(entrySpellId) then
         otherFail = true
         if diag then diag.status = "unknown_spell" end
     else
@@ -4517,6 +4530,13 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
     -- accTime accumulates chain time starting from the end of the current
     -- cast/channel. Always uses full remaining channel time (clip-aware logic disabled).
     local accTime = (ctx.clipCastRemaining ~= nil) and ctx.clipCastRemaining or (ctx.castRemaining or 0)
+    -- queueTime is the cast-state-INDEPENDENT queue timeline: every chain
+    -- position costs its full ChainStepTime, and the in-flight cast remainder
+    -- is NOT folded in.  The DoT-refresh synth horizon and the chain-fill
+    -- placement must use queueTime so the queue content (filler run vs
+    -- refresh countdown) is identical whether the player is mid-cast or idle.
+    -- accTime (wall-clock) still drives the chained countdown anchors.
+    local queueTime = 0
     local si = 1  -- next unplaced synth index
 
     local activeChannelConfig = GetChannelSpellConfig(spec, ctx.activeChannelSpellKey)
@@ -4541,11 +4561,13 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
             -- should be cast (user request).
             Add(s.entry, s.key, 0, false, ResolveEntryPriorityBucket(s.entry), nil)
             accTime = accTime + ChainStepTime(s.key)
+            queueTime = queueTime + ChainStepTime(s.key)
         end
     end
 
     for i, c in ipairs(readyCands) do
         local step = ChainStepTime(c.cand.key)
+        local fullStep = step  -- uncorrected step for the state-independent queueTime
 
         -- ── Casting-spell correction ──────────────────────────────────
         -- `accTime` is initialised to `castRemaining`, which already
@@ -4590,7 +4612,7 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
         -- position-1 transition when the tracked debuff crosses its
         -- threshold.
         if i > 1 then
-            FlushSynthsBefore(accTime + step)
+            FlushSynthsBefore(queueTime + step)
         end
 
         local channelClip = false
@@ -4661,6 +4683,7 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
             Add(c.cand.entry, c.cand.key, 0, c.clip, c.cand.priorityBucket, chainCooldownEnd, true)
         end
         accTime = accTime + step
+        queueTime = queueTime + fullStep
     end
 
     -- Tail synths: show any synth whose deadline falls within the chain
@@ -4740,9 +4763,22 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
             priorityBucket = ResolveEntryPriorityBucket(fillerCand.entry),
         }
         accTime = accTime + fillerStep
+        queueTime = queueTime + fillerStep
     end
 
-    local tailHorizon = accTime + (ctx.gcd or 1.5) * 8
+    -- Tail horizon: show the refresh synth (and its filler run) as soon as
+    -- the deadline is within the max filler run span, so the queue shows the
+    -- "cast fillers until the refresh" plan early instead of only when the
+    -- refresh is ~8 GCDs away.  Without a filler the 8-GCD lookahead stands.
+    -- (User report: with a 3 s-cast filler the 8-GCD horizon only admitted
+    -- ~4 fills, so the run appeared several seconds late mid-fight.)
+    local tailHorizon = queueTime + (ctx.gcd or 1.5) * 8
+    if fillerCand and fillerStep > READY_EPSILON then
+        -- Cover the full plan: max filler run + the refresh's own step, so a
+        -- freshly-applied DoT (e.g. CoA at 24 s) shows its filler run right
+        -- away instead of only once the deadline is ~8 GCDs out.
+        tailHorizon = math.max(tailHorizon, queueTime + MAX_CHAIN_FILLS * fillerStep + (ctx.gcd or 1.5))
+    end
     local fillsUsed = 0
     while si <= #synths do
         local s = synths[si]; si = si + 1
@@ -4750,7 +4786,7 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
             -- Fill the chain with repeatable filler casts until the refresh
             -- deadline is the next thing that must happen.
             if fillerCand then
-                while fillsUsed < MAX_CHAIN_FILLS and (accTime + fillerStep) < s.deadline do
+                while fillsUsed < MAX_CHAIN_FILLS and (queueTime + fillerStep) < s.deadline do
                     AddChainFiller()
                     fillsUsed = fillsUsed + 1
                 end
@@ -4763,6 +4799,7 @@ function RE:_BuildResultFromCandidates(ctx, rotation, hasTarget, candidates, spe
             -- should be cast (user request).
             Add(s.entry, s.key, 0, false, ResolveEntryPriorityBucket(s.entry), nil)
             accTime = accTime + ChainStepTime(s.key)
+            queueTime = queueTime + ChainStepTime(s.key)
         end
     end
 
@@ -5308,21 +5345,34 @@ function RE:_EvaluatePrepared(spec, ctx, db, rotation, hasTarget, wantDiagnostic
             local candidate, diag = self:_EvaluateEntry(evalEntry, i, ctx, spec, db, hasTarget, wantDiagnostics)
             if candidate then
                 -- For trinket entries, set eta from actual remaining cooldown.
-                -- Also filter out passive/missing trinkets (trinket_ready used to do this).
+                -- Gate: only trinkets with an on-use ("Use:") effect are
+                -- suggested - passive proc/equip trinkets are not pressable.
+                -- Detection is tooltip-based (GetItemSpell only reports the
+                -- FIRST item effect and cannot distinguish USE from EQUIP).
                 if isTrinketEntry and trinketSlot then
                     local ok, itemId = pcall(GetInventoryItemID, "player", trinketSlot)
-                    if ok and itemId and A.ItemHasOnUseEffect(itemId) then
-                        local start, dur = GetInventoryItemCooldown("player", trinketSlot)
-                        if start and start > 0 then
-                            -- On CD: eta = remaining cooldown (no buffer).
-                            -- Trinket travels through the queue as CD ticks down.
-                            candidate.eta = math.max(start + dur - ctx.now, 0)
+                    if ok and itemId then
+                        if not A.ItemHasOnUseEffect(itemId, trinketSlot) then
+                            if A.DebugLog then
+                                A.DebugLog("ROT", "trinket filter: slot " .. trinketSlot .. " item " .. tostring(itemId) .. " has no on-use effect (passive) - skipped")
+                            end
+                            candidate = nil
                         else
-                            -- Off CD: ready immediately, goes to bonus slot.
-                            candidate.eta = 0
+                            local start, dur = GetInventoryItemCooldown("player", trinketSlot)
+                            if start and start > 0 then
+                                -- On CD: eta = remaining cooldown (no buffer).
+                                -- Trinket travels through the queue as CD ticks down.
+                                candidate.eta = math.max(start + dur - ctx.now, 0)
+                            else
+                                -- Off CD: ready immediately, goes to bonus slot.
+                                candidate.eta = 0
+                            end
                         end
                     else
-                        -- No equipped on-use trinket: don't add as candidate
+                        -- No equipped item: don't add as candidate.
+                        if A.DebugLog then
+                            A.DebugLog("ROT", "trinket filter: slot " .. trinketSlot .. " has no equipped item")
+                        end
                         candidate = nil
                     end
                 end

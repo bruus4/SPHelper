@@ -241,14 +241,33 @@ local function OpenScrollableListMenu(anchor, title, items, onSelect, selectedVa
     end
     CloseActiveScrollMenu()
 
-    -- Sort items alphabetically by display text.
+    -- Sort items alphabetically by display text, WITHIN each section: runs
+    -- of plain items between isHeader items are sorted independently and
+    -- headers keep their position. Menus without headers (a single run)
+    -- sort globally, exactly as before.
     local sortedItems = {}
     for _, item in ipairs(items) do
         sortedItems[#sortedItems + 1] = item
     end
-    table.sort(sortedItems, function(a, b)
-        return tostring(a.text or a.value or "") < tostring(b.text or b.value or "")
-    end)
+    local function SortRun(a, b)
+        local ta = tostring(a.text or a.value or "")
+        local tb = tostring(b.text or b.value or "")
+        if ta == tb then return false end
+        return ta < tb
+    end
+    local runStart = 1
+    for i = 1, #sortedItems + 1 do
+        local item = sortedItems[i]
+        if i > #sortedItems or (item and item.isHeader) then
+            if runStart < i then
+                local run = {}
+                for j = runStart, i - 1 do run[#run + 1] = sortedItems[j] end
+                table.sort(run, SortRun)
+                for j = 1, #run do sortedItems[runStart + j - 1] = run[j] end
+            end
+            runStart = i + 1
+        end
+    end
 
     scrollMenuCounter = scrollMenuCounter + 1
     local frame = CreateFrame("Frame", "SPHScrollMenu" .. scrollMenuCounter, UIParent, "BackdropTemplate")
@@ -380,6 +399,22 @@ local function OpenScrollableListMenu(anchor, title, items, onSelect, selectedVa
         local btn = CreateFrame("Button", nil, content)
         btn:SetSize(menuW - 48, rowHeight)
 
+        if item.isHeader then
+            -- Section header: dim, non-clickable divider row.
+            local bg = btn:CreateTexture(nil, "BACKGROUND")
+            bg:SetAllPoints()
+            bg:SetColorTexture(0.16, 0.13, 0.22, 0.95)
+            local htxt = btn:CreateFontString(nil, "OVERLAY")
+            htxt:SetFont(FONT, 9, "OUTLINE")
+            htxt:SetPoint("LEFT",  btn, "LEFT",  6, 0)
+            htxt:SetPoint("RIGHT", btn, "RIGHT", -6, 0)
+            htxt:SetJustifyH("LEFT")
+            htxt:SetText(tostring(item.text or ""))
+            htxt:SetTextColor(1, 0.82, 0.4, 1)
+            btn:EnableMouseWheel(true)
+            btn:SetScript("OnMouseWheel", function(_, delta) DoScroll(delta) end)
+            rowBtns[#rowBtns + 1] = { btn = btn, item = item }
+        else
         local bg = btn:CreateTexture(nil, "BACKGROUND")
         bg:SetAllPoints()
         if item.value == selectedValue then
@@ -394,7 +429,17 @@ local function OpenScrollableListMenu(anchor, title, items, onSelect, selectedVa
 
         local txt = btn:CreateFontString(nil, "OVERLAY")
         txt:SetFont(FONT, 9, "")
-        txt:SetPoint("LEFT",  btn, "LEFT",  6, 0)
+        -- Optional 14px spell icon left of the label (used by the ability
+        -- pickers); the text shifts right to make room for it.
+        local textLeft = 6
+        if item.icon then
+            local ic = btn:CreateTexture(nil, "ARTWORK")
+            ic:SetSize(14, 14)
+            ic:SetPoint("LEFT", btn, "LEFT", 6, 0)
+            ic:SetTexture(item.icon)
+            textLeft = 26
+        end
+        txt:SetPoint("LEFT",  btn, "LEFT",  textLeft, 0)
         txt:SetPoint("RIGHT", btn, "RIGHT", -6, 0)
         txt:SetJustifyH("LEFT")
         txt:SetText(tostring(item.text or item.value or ""))
@@ -417,6 +462,7 @@ local function OpenScrollableListMenu(anchor, title, items, onSelect, selectedVa
             end)
             btn:SetScript("OnLeave", function() GameTooltip:Hide() end)
         end
+        end -- /else (non-header row)
 
         rowBtns[#rowBtns + 1] = { btn = btn, item = item }
     end
@@ -427,7 +473,10 @@ local function OpenScrollableListMenu(anchor, title, items, onSelect, selectedVa
         local visY = 0
         for _, row in ipairs(rowBtns) do
             local itemText = tostring(row.item.text or row.item.value or ""):lower()
-            if filter == "" or itemText:find(filter, 1, true) then
+            local isHdr = row.item.isHeader
+            -- Headers show only with an empty filter (sections would be
+            -- confusing mid-search); plain rows match the filter as usual.
+            if (isHdr and filter == "") or (not isHdr and (filter == "" or itemText:find(filter, 1, true))) then
                 row.btn:ClearAllPoints()
                 row.btn:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -visY)
                 row.btn:Show()
@@ -448,10 +497,10 @@ local function OpenScrollableListMenu(anchor, title, items, onSelect, selectedVa
         RefreshList(txt)
     end)
 
-    -- Enter: pick first visible row
+    -- Enter: pick first visible non-header row
     searchEB:SetScript("OnEnterPressed", function()
         for _, row in ipairs(rowBtns) do
-            if row.btn:IsShown() then
+            if not row.item.isHeader and row.btn:IsShown() then
                 if onSelect then onSelect(row.item.value) end
                 frame:Hide()
                 return
@@ -465,6 +514,10 @@ local function OpenScrollableListMenu(anchor, title, items, onSelect, selectedVa
             activeScrollMenu = nil
         end
     end)
+
+    -- Show explicitly: focusing the search box does NOT make a hidden
+    -- frame visible, so without this the menu would never appear.
+    frame:Show()
 
     -- Focus search box so the user can type immediately.
     searchEB:SetFocus()
@@ -694,22 +747,34 @@ local function GetMergedOptions(spec, specID)
     local function AddKey(key)
         if seen[key] or deleted[key] then return end
         seen[key] = true
+        local opt
         if defs and defs[key] then
-            merged[#merged + 1] = DefToOpt(key, defs[key])
+            opt = DefToOpt(key, defs[key])
         elseif spec.uiOptions then
-            for _, opt in ipairs(spec.uiOptions) do
-                if opt.key == key then
-                    local copy = {}
-                    for k, v in pairs(opt) do copy[k] = v end
-                    copy._fromFile = true
-                    merged[#merged + 1] = copy
-                    return
+            for _, o in ipairs(spec.uiOptions) do
+                if o.key == key then
+                    opt = {}
+                    for k, v in pairs(o) do opt[k] = v end
+                    opt._fromFile = true
+                    break
                 end
             end
         end
+        -- DB overrides (edits made from the General tab in edit mode) are
+        -- merged over the file definition so they survive reloads.
+        if opt then
+            local ov = sdb and sdb.settingOverrides and sdb.settingOverrides[key]
+            if ov then
+                for k, v in pairs(ov) do
+                    if k ~= "key" and k ~= "_fromFile" then opt[k] = v end
+                end
+                opt._hasOverride = true
+            end
+            merged[#merged + 1] = opt
+        end
     end
 
-    -- Phase 1: rotation-referenced settings (in encounter order).
+    -- Rotation-referenced settings (in encounter order).
     -- Priority: in-memory editor data (reflects unsaved deletions/additions)
     -- → DB-saved rotation.
     -- NOTE: spec.rotation (file default) is intentionally NOT used here so
@@ -720,13 +785,13 @@ local function GetMergedOptions(spec, specID)
     local rotKeys = CollectRotationSettingKeys(effectiveRotation)
     for _, key in ipairs(rotKeys) do AddKey(key) end
 
-    -- Phase 1.5: spec-declared extra General settings (settings read by
+    -- Spec-declared extra General settings (settings read by
     -- engine logic rather than directly referenced in rotation conditions)
     if spec.generalSettings then
         for _, key in ipairs(spec.generalSettings) do AddKey(key) end
     end
 
-    -- Phase 2: all remaining settingDefs not yet surfaced.
+    -- All remaining settingDefs not yet surfaced.
     -- This ensures every spec-declared setting is visible in the General tab
     -- regardless of whether the rotation has been saved yet.
     if defs then
@@ -738,7 +803,7 @@ local function GetMergedOptions(spec, specID)
         for _, key in ipairs(remainingKeys) do AddKey(key) end
     end
 
-    -- Phase 4: castBarOptions
+    -- castBarOptions (rendered in the CastBar & FQ tab; exposed here too)
     for _, opt in ipairs(spec.castBarOptions or {}) do
         if not deleted[opt.key] and not seen[opt.key] then
             seen[opt.key] = true
@@ -750,9 +815,9 @@ local function GetMergedOptions(spec, specID)
         end
     end
 
-    -- Phase 5: DB custom options
+    -- DB custom options
     -- Skip any entry whose key is already defined in settingDefs — those were
-    -- erroneously auto-created before Phase 10a knew about settingDefs.
+    -- erroneously auto-created before settingDefs existed.
     local customOpts = sdb and sdb.customOptions or {}
     for _, opt in ipairs(customOpts) do
         if not seen[opt.key] and not (defs and defs[opt.key]) then
@@ -827,7 +892,36 @@ end
 -- Render a single spec option row (checkbox / slider / dropdown) at offset y
 -- inside `container`.  Shared by the General tab and the Rotation editor's
 -- Options section.  Returns the new y offset (negative, growing downward).
+-- Forward declaration: SUIButtonR is defined further below (with the other
+-- rotation-tab layout helpers) but RenderOptionRow and BuildGeneralTab use
+-- it.  Lua resolves non-local names at compile time, so without this
+-- declaration the references would compile as (nil) globals and the General
+-- tab would error on every open.
+local SUIButtonR
+
 local function RenderOptionRow(container, opt, y)
+    -- Per-option reset to default (G5): drops the DB override so the value
+    -- falls back to the option's default. Placed left of the edit/del
+    -- cluster; visible in read-only mode too so defaults can be restored
+    -- without entering edit mode.
+    local rstBtn = SUIButtonR(container, "Reset", 44, 16, function()
+        local specID = A._activeSpecID
+        local sdb = A.db and A.db.specs and A.db.specs[specID]
+        if sdb and sdb[opt.key] ~= nil then
+            sdb[opt.key] = nil
+        end
+        if A.SpecUI and A.SpecUI.RefreshCurrentTab then
+            A.SpecUI:RefreshCurrentTab()
+        end
+    end, 84, y)
+    rstBtn:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetText("Reset to default", 1, 1, 1, 1, true)
+        GameTooltip:AddLine("Removes your override for this option; the default value applies again.", 1, 1, 1, true)
+        GameTooltip:Show()
+    end)
+    rstBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
     local tooltip = opt.tooltip
     if opt.type == "checkbox" then
         local cb, lbl = SUICheckbox(container, opt.label,
@@ -852,7 +946,13 @@ local function RenderOptionRow(container, opt, y)
     elseif opt.type == "dropdown" then
         local dd, lbl = SUIDropdown(container, opt.label, opt.values or {},
             function() return A.SpecVal(opt.key, opt.default) end,
-            function(v) A.SetSpecVal(opt.key, v) end,
+            function(v)
+                A.SetSpecVal(opt.key, v)
+                -- Preview tick sounds immediately when their dropdown changes.
+                if A.PlayTickSound and opt.key and opt.key:match("tickSound$") then
+                    pcall(A.PlayTickSound, v)
+                end
+            end,
             16, y)
         if tooltip and lbl then
             lbl:SetScript("OnEnter", function(self) GameTooltip:SetOwner(self, "ANCHOR_RIGHT"); GameTooltip:SetText(opt.label); GameTooltip:AddLine(tooltip, 1, 1, 1, true); GameTooltip:Show() end)
@@ -863,18 +963,67 @@ local function RenderOptionRow(container, opt, y)
     return y
 end
 
+-- Forward declaration: OpenAddOptionDialog is defined further below (with the
+-- Add Option dialog) but BuildGeneralTab's "+ Add Option" button calls it.
+-- Same compile-time resolution rule as SUIButtonR above.
+local OpenAddOptionDialog
+
+-- Forward declaration: GetTabIndex is defined further below (with the tab
+-- helpers) but the Preview ticker, the CastBar refresh and the Load Cond.
+-- tab call it. Without this declaration those calls compile as (nil)
+-- globals and crash at runtime ("attempt to call a nil value").
+local GetTabIndex
+
+------------------------------------------------------------------------
+-- Rotation-reference awareness for General tab options.
+------------------------------------------------------------------------
+
+-- Effective rotation entries for a spec: DB override first, else file.
+local function GetSpecRotationEntries(spec)
+    if not spec or not spec.meta then return {} end
+    local db = A.db and A.db.specs and A.db.specs[spec.meta.id]
+    return (db and db.rotation) or spec.rotation or {}
+end
+
+-- Count rotation conditions that reference `key` via their optionKey /
+-- settingKey / safetyKey / value fields, recursing through nested
+-- any_of / all_of / not groups.  Used to warn when editing/deleting an
+-- option that the rotation depends on.
+local function CountRotationOptionRefs(entries, key)
+    if not key then return 0 end
+    local count = 0
+    local function ScanConditions(conds)
+        for _, cond in ipairs(conds or {}) do
+            if cond.optionKey == key or cond.settingKey == key
+                or cond.safetyKey == key or cond.value == key then
+                count = count + 1
+            end
+            if cond.conditions then ScanConditions(cond.conditions) end
+            if cond.condition then ScanConditions({ cond.condition }) end
+        end
+    end
+    for _, entry in ipairs(entries or {}) do
+        ScanConditions(entry.conditions)
+    end
+    return count
+end
+
 local function BuildGeneralTab(container, spec)
     local y = -8
     local specID = spec.meta.id
     local sdb = A.db and A.db.specs and A.db.specs[specID]
+    -- Edit mode (toggled via /sph edit) gates the custom-option controls:
+    -- without it the General tab is read-only.
+    local editMode = A.db and A.db.specUI and A.db.specUI.editMode
 
-    -- Informational header: settings are derived automatically from the rotation.
-    local hdr = container:CreateFontString(nil, "OVERLAY")
-    hdr:SetFont(FONT, 9, "")
-    hdr:SetPoint("TOPLEFT", container, "TOPLEFT", 16, y)
-    hdr:SetTextColor(0.6, 0.6, 0.6, 1)
-    hdr:SetText("Settings are generated automatically from the Rotation tab.")
-    y = y - 20
+    -- Custom options are created and removed here (file options are fixed).
+    -- Visible only in edit mode.
+    if editMode then
+        SUIButtonR(container, "+ Add Option", 84, 18, function()
+            OpenAddOptionDialog(spec)
+        end, 116, y)
+    end
+    y = y - 26
 
     local merged = GetMergedOptions(spec, specID)
 
@@ -949,7 +1098,77 @@ local function BuildGeneralTab(container, spec)
             lastGroup = nil
         end
 
+        local rowY = y
         y = RenderOptionRow(container, opt, y)
+        -- Edit/Del buttons for every option, shown only in edit mode.
+        -- Custom options are edited/removed in the DB directly; file options
+        -- are edited via a per-spec override (the spec file is never mutated)
+        -- and "deleted" by hiding them (see the Restore button below).
+        if editMode then
+            local editKey = opt.key
+            SUIButtonR(container, "Edit", 24, 16, function()
+                if opt._fromFile then
+                    -- Pass the merged option; Save writes a DB override.
+                    OpenAddOptionDialog(spec, opt)
+                else
+                    local co = sdb and sdb.customOptions
+                    if co then
+                        for _, entry in ipairs(co) do
+                            if entry.key == editKey then
+                                -- Reopen the Add Option dialog prefilled; Save
+                                -- updates this entry in place.
+                                OpenAddOptionDialog(spec, entry)
+                                break
+                            end
+                        end
+                    end
+                end
+            end, 56, rowY)
+            local delKey = opt.key
+            SUIButtonR(container, "Del", 24, 16, function()
+                -- Warn when the rotation still references this option.
+                local refs = CountRotationOptionRefs(GetSpecRotationEntries(spec), opt.key)
+                if refs > 0 then
+                    print(string.format("|cffffcc00[SPHelper] Warning: option '%s' is used by %d rotation condition(s).|r", opt.key, refs))
+                end
+                if opt._fromFile then
+                    -- Hide a file option: mark it deleted so GetMergedOptions
+                    -- skips it, and drop any override for it.  Create the
+                    -- per-spec namespace on demand (it may not exist yet for
+                    -- specs that were never customized).
+                    if not sdb then
+                        if not A.db.specs then A.db.specs = {} end
+                        sdb = {}
+                        A.db.specs[specID] = sdb
+                    end
+                    sdb.deletedOptions = sdb.deletedOptions or {}
+                    sdb.deletedOptions[delKey] = true
+                    if sdb.settingOverrides then sdb.settingOverrides[delKey] = nil end
+                else
+                    local co = sdb and sdb.customOptions
+                    if co then
+                        for ci = #co, 1, -1 do
+                            if co[ci].key == delKey then table.remove(co, ci) end
+                        end
+                    end
+                end
+                if A.SpecUI and A.SpecUI.RefreshCurrentTab then
+                    A.SpecUI:RefreshCurrentTab()
+                end
+            end, 28, rowY)
+        end
+    end
+
+    -- In edit mode, offer to bring back file options hidden with Del.
+    if editMode and sdb and sdb.deletedOptions and next(sdb.deletedOptions) then
+        y = y - 12
+        SUIButtonR(container, "Restore hidden options", 150, 18, function()
+            sdb.deletedOptions = {}
+            if A.SpecUI and A.SpecUI.RefreshCurrentTab then
+                A.SpecUI:RefreshCurrentTab()
+            end
+        end, 16, y)
+        y = y - 24
     end
 
     container:SetHeight(math.abs(y) + 20)
@@ -996,7 +1215,6 @@ local COND_TYPES = {
     { type = "cooldown_lt",                label = "Cooldown < Seconds",   fields = { "spellKey", "seconds" } },
     { type = "spell_usable",               label = "Spell Ready",          fields = { "spellKey" } },
     { type = "group_size_gte",             label = "Group Size >=",         fields = { "size" } },
-    -- Phase 9
     { type = "behind_target",              label = "Behind Target",         fields = {} },
     { type = "not_behind_target",          label = "Not Behind Target",    fields = {} },
     { type = "combo_points_gte",           label = "Combo Points >=",       fields = { "points" } },
@@ -1024,7 +1242,6 @@ local COND_TYPES = {
     { type = "any_of",                     label = "OR Group",             fields = {} },
     { type = "all_of",                     label = "AND Group",            fields = {} },
     { type = "not",                        label = "Not",                  fields = {} },
-    -- Phase 10 additions
     { type = "player_mana_pct_lt",         label = "Player Mana % <",      fields = { "pct" } },
     { type = "player_mana_pct_gt",         label = "Player Mana % >",      fields = { "pct" } },
     { type = "player_base_mana_pct_lt",    label = "Player Base Mana % <", fields = { "pct" } },
@@ -1036,6 +1253,18 @@ local COND_TYPES = {
     { type = "next_power_tick_with_gcd_lt",label = "Next Tick @ Ready <",   fields = { "seconds" } },
     { type = "next_power_tick_with_gcd_gt",label = "Next Tick @ Ready >",   fields = { "seconds" } },
     { type = "setting_compare",            label = "Setting Compare",       fields = { "optionKey", "op", "value" } },
+}
+
+-- Section grouping for the condition-type picker menu (G7). Each group is
+-- rendered under a header row; items sort alphabetically within their group.
+local COND_GROUPS = {
+    { "Flow & Combat",      { "always", "target_valid", "in_combat", "not_in_combat", "precombat", "channeling", "any_of", "all_of", "not" } },
+    { "Target & Damage",    { "target_hp_pct_lt", "target_hp_pct_gt", "target_hp_lt", "target_dying_fast", "target_ttd_gte", "target_ttd_lt", "target_classification", "option_gated_classification", "classification_any_target", "classification_from_setting", "spell_can_kill_target", "behind_target", "not_behind_target", "melee_range", "not_melee_range", "wand_equipped" } },
+    { "Player & Resources", { "player_hp_pct_lt", "player_hp_pct_gt", "player_mana_pct_lt", "player_mana_pct_gt", "player_base_mana_pct_lt", "player_base_mana_pct_gt", "resource_pct_lt", "resource_pct_gt", "resource_gte", "resource_lt", "resource_required_gte", "resource_at_gcd_lt", "resource_at_gcd_gt", "next_power_tick_with_gcd_lt", "next_power_tick_with_gcd_gt", "combo_points_gte", "combo_points_lt", "state_compare" } },
+    { "Buffs & Debuffs",    { "buff_on_player", "buff_stacks_gte", "not_buff_on_player", "buff_property_compare", "debuff_on_target", "debuff_time_left_lt", "not_debuff_on_target", "debuff_property_compare", "dot_missing", "projected_dot_time_left_lt", "dot_time_left_lt", "other_targets_with_debuff_lt" } },
+    { "Cooldowns & Items",  { "cooldown_ready", "cooldown_lt", "spell_usable", "spell_property_compare", "not_recently_cast", "unit_cast_compare", "unit_interruptible", "trinket_ready", "item_ready_and_owned", "item_ready_by_key" } },
+    { "Spec Options",       { "spec_option_enabled", "spec_option_value", "setting_compare", "content_mode_allow", "content_type" } },
+    { "Threat & Group",     { "threat_pct_lt", "threat_pct_ge", "group_size_gte" } },
 }
 
 -- Fields that should render as dropdowns instead of free-text edit boxes
@@ -1084,6 +1313,8 @@ local editorSpecID = nil
 local editorRefreshFn = nil  -- set by BuildRotationTab
 local condEditorFrame = nil
 local ceState = {}
+local pendingPickerRow = nil  -- row index whose spell picker should auto-open after Refresh
+local advExpanded = {}        -- entry table -> advanced row expanded (keyed by table identity)
 
 local function GetEditorSpellClass()
     if ceState and ceState.spec and ceState.spec.meta and ceState.spec.meta.class then
@@ -1207,6 +1438,7 @@ local FIELD_DROPDOWNS = {
                         value = displayName,
                         class = spell.class,
                         resolvedName = spell.resolvedName,
+                        icon = spell.icon,
                     }
                 end
             end
@@ -1673,11 +1905,81 @@ local function InitEditorData(spec)
     editorData._fromFile = nil
     editorDirty = false
 end
+
+--- Persist the rotation editor buffer to the DB. Used by the Save button and
+--- by the auto-save guards (window close, spec switch) so unsaved edits are
+--- never silently discarded. Returns true on success.
+local function SaveRotationEditor()
+    if not editorData or not editorSpecID then return false end
+    local spec = A.SpecManager and A.SpecManager.GetSpecByID and A.SpecManager:GetSpecByID(editorSpecID)
+    if not spec then return false end
+    -- Validate the editor buffer before persisting: malformed conditions,
+    -- empty keys and bad repeatLimits should be caught here, not silently saved.
+    if A.SpecValidator and A.SpecValidator.ValidateRotation then
+        local ok, valErr = A.SpecValidator:ValidateRotation(editorData)
+        if not ok then
+            print("|cffff4444SPHelper|r: Rotation NOT saved: " .. tostring(valErr))
+            return false, valErr
+        end
+    end
+    if not A.db.specs then A.db.specs = {} end
+    if not A.db.specs[editorSpecID] then A.db.specs[editorSpecID] = {} end
+    A.db.specs[editorSpecID].rotation = DeepCopy(editorData)
+    -- RotationEngine reads DB rotation on every Evaluate() call, so no
+    -- deactivate/reactivate needed - the next tick picks up the new data.
+    editorDirty = false
+    if editorRefreshFn then editorRefreshFn() end
+
+    -- Auto-discover spec_option references and create missing options
+    local referencedKeys = {}
+    for _, entry in ipairs(editorData) do
+        for _, cond in ipairs(entry.conditions or {}) do
+            if (cond.type == "spec_option_enabled" or cond.type == "spec_option_value") and cond.optionKey then
+                referencedKeys[cond.optionKey] = true
+            end
+        end
+    end
+    local existingKeys = {}
+    if spec.settingDefs then
+        for key in pairs(spec.settingDefs) do existingKeys[key] = true end
+    end
+    for _, opt in ipairs(spec.uiOptions or {}) do existingKeys[opt.key] = true end
+    local custOpts = A.db.specs[editorSpecID] and A.db.specs[editorSpecID].customOptions or {}
+    for _, opt in ipairs(custOpts) do existingKeys[opt.key] = true end
+    local missing = {}
+    for k in pairs(referencedKeys) do
+        if not existingKeys[k] then missing[#missing + 1] = k end
+    end
+    if #missing > 0 then
+        if not A.db.specs[editorSpecID].customOptions then
+            A.db.specs[editorSpecID].customOptions = {}
+        end
+        local co = A.db.specs[editorSpecID].customOptions
+        for _, k in ipairs(missing) do
+            co[#co + 1] = { key = k, type = "checkbox", label = k, default = true }
+        end
+        print("|cff8882d5SPHelper|r: Auto-created config options: " .. table.concat(missing, ", "))
+    end
+
+    -- Warn (but don't block) about keys that resolve to no known spell or
+    -- pseudo-key — typo'd spell names save silently and never cast.
+    local unresolved = {}
+    for _, entry in ipairs(editorData) do
+        if entry.key and not A.SPELLS[entry.key] then
+            unresolved[#unresolved + 1] = entry.key
+        end
+    end
+    if #unresolved > 0 then
+        print("|cffffcc00SPHelper|r: Warning - entries with unknown spell keys (they will never cast): " .. table.concat(unresolved, ", "))
+    end
+
+    print("|cff8882d5SPHelper|r: Rotation saved.")
+    return true
+end
 ------------------------------------------------------------------------
 -- Advanced Condition Editor Popup  (stack-based, recursive)
 ------------------------------------------------------------------------
 local function RebuildCondEditor() end  -- forward declaration
-local OpenAddOptionDialog = nil       -- forward declaration (defined below)
 
 -- Navigate the ceState.navStack to get the condition at the current depth.
 -- navStack = {} means root (ceState.working.cond).
@@ -1877,9 +2179,29 @@ RebuildCondEditor = function()
     typePickBtn._label:SetPoint("LEFT", typePickBtn, "LEFT", 6, 0)
     typePickBtn._label:SetPoint("RIGHT", typePickBtn, "RIGHT", -6, 0)
     typePickBtn:SetScript("OnClick", function(self)
+        -- Grouped menu: section headers + alphabetically sorted items per
+        -- group; anything not covered by a group lands under "Other".
         local menuItems = {}
+        local covered = {}
+        for _, group in ipairs(COND_GROUPS) do
+            local gName, gTypes = group[1], group[2]
+            menuItems[#menuItems + 1] = { isHeader = true, text = gName }
+            for _, ct in ipairs(COND_TYPES) do
+                if gTypes[ct.type] then
+                    covered[ct.type] = true
+                    menuItems[#menuItems + 1] = { text = ct.label, value = ct.type }
+                end
+            end
+        end
+        local hasOther = false
         for _, ct in ipairs(COND_TYPES) do
-            menuItems[#menuItems + 1] = { text = ct.label, value = ct.type }
+            if not covered[ct.type] then
+                if not hasOther then
+                    menuItems[#menuItems + 1] = { isHeader = true, text = "Other" }
+                    hasOther = true
+                end
+                menuItems[#menuItems + 1] = { text = ct.label, value = ct.type }
+            end
         end
         OpenScrollableListMenu(self, "Condition Type", menuItems, function(value)
             local nc = { type = value }
@@ -2161,7 +2483,7 @@ end
 
 -- Button anchored to the parent's right edge (fixed action columns).
 -- rightOff is the distance from the parent's right edge.
-local function SUIButtonR(parent, text, w, h, onClick, rightOff, y)
+SUIButtonR = function(parent, text, w, h, onClick, rightOff, y)
     local btn = SUIButton(parent, text, w, h, onClick, 0, y)
     btn:ClearAllPoints()
     btn:SetPoint("TOPLEFT", parent, "TOPRIGHT", -rightOff - (w or 80), y)
@@ -2177,7 +2499,7 @@ local addOptFrame = nil
 -- in the General tab and can be referenced by spec_option_enabled /
 -- spec_option_value conditions (the rotation Save handler auto-creates
 -- missing referenced options; this dialog creates them up front).
-OpenAddOptionDialog = function(spec)
+OpenAddOptionDialog = function(spec, existing)
     if not addOptFrame then
         addOptFrame = CreateFrame("Frame", nil, UIParent, "BackdropTemplate")
         addOptFrame:SetSize(380, 300)
@@ -2193,24 +2515,40 @@ OpenAddOptionDialog = function(spec)
     end
     local f = addOptFrame
     local content = f._content
-    local kids = { content:GetChildren() }
-    for _, c in ipairs(kids) do c:Hide(); c:SetParent(nil) end
-    local regions = { content:GetRegions() }
-    for _, r in ipairs(regions) do if r.Hide then r:Hide() end end
+    -- `existing` (a DB custom option) prefills the form for editing; when
+    -- present, Save updates that entry in place instead of creating a new one.
+    local optDef = {
+        type    = existing and existing.type or "checkbox",
+        key     = existing and existing.key,
+        label   = existing and existing.label,
+        default = existing and existing.default,
+        min     = existing and existing.min,
+        max     = existing and existing.max,
+        step    = existing and existing.step,
+        values  = existing and existing.values,
+    }
 
-    local y = -30
-    local t = content:CreateFontString(nil, "OVERLAY")
-    t:SetFont(FONT, 11, "OUTLINE"); t:SetPoint("TOP", content, "TOP", 0, -8)
-    t:SetText("|cff8882d5Add Option|r")
-    local closeBtn = CreateFrame("Button", nil, content)
-    closeBtn:SetSize(20, 20); closeBtn:SetPoint("TOPRIGHT", content, "TOPRIGHT", -6, -6)
-    local xl = closeBtn:CreateFontString(nil, "OVERLAY")
-    xl:SetFont(FONT, 12, "OUTLINE"); xl:SetPoint("CENTER"); xl:SetText("X")
-    closeBtn:SetScript("OnClick", function() f:Hide() end)
+    -- Rebuilds the whole form from `optDef`.  Runs on open and whenever the
+    -- Type changes, so only the fields that apply to the current type are
+    -- shown (no slider range for a checkbox, no values for a slider).  All
+    -- inputs write into `optDef` live, so nothing typed is lost on rebuild.
+    local function BuildForm()
+        local kids = { content:GetChildren() }
+        for _, c in ipairs(kids) do c:Hide(); c:SetParent(nil) end
+        local regions = { content:GetRegions() }
+        for _, r in ipairs(regions) do if r.Hide then r:Hide() end end
 
-    local optDef = { type = "checkbox" }
+        local y = -30
+        local t = content:CreateFontString(nil, "OVERLAY")
+        t:SetFont(FONT, 11, "OUTLINE"); t:SetPoint("TOP", content, "TOP", 0, -8)
+        t:SetText(existing and "|cff8882d5Edit Option|r" or "|cff8882d5Add Option|r")
+        local closeBtn = CreateFrame("Button", nil, content)
+        closeBtn:SetSize(20, 20); closeBtn:SetPoint("TOPRIGHT", content, "TOPRIGHT", -6, -6)
+        local xl = closeBtn:CreateFontString(nil, "OVERLAY")
+        xl:SetFont(FONT, 12, "OUTLINE"); xl:SetPoint("CENTER"); xl:SetText("X")
+        closeBtn:SetScript("OnClick", function() f:Hide() end)
 
-    local function RowLabel(text, tooltip)
+        local function RowLabel(text, tooltip)
         local fs = content:CreateFontString(nil, "OVERLAY")
         fs:SetFont(FONT, 9)
         fs:SetPoint("TOPLEFT", content, "TOPLEFT", 16, y)
@@ -2230,46 +2568,84 @@ OpenAddOptionDialog = function(spec)
 
     -- Key
     RowLabel("Key (referenced by conditions):", "This setting appears in the General tab. Reference it from rotation entries with the 'Spec Option Enabled' / 'Spec Option = Value' conditions - pick it from the Option list in the condition editor.")
-    local keyEB = SUIMakeEditBox(content, 240, 16, y - 16, "", function(v) if v then optDef.key = v end end)
-    y = y - 42
-
-    -- Type (split declaration/assignment: the closure captures `typeBtn` as
-    -- an upvalue - a one-liner would see nil in Lua 5.1, same as the picker)
-    RowLabel("Type:", "checkbox / slider / dropdown.")
-    local typeBtn
-    typeBtn = SUIButton(content, "checkbox", 110, 16, function()
-        local items = {}
-        for _, tv in ipairs({ "checkbox", "slider", "dropdown" }) do
-            items[#items + 1] = { text = tv, value = tv }
+    local rotationEntries = GetSpecRotationEntries(spec)
+    local usageFs = content:CreateFontString(nil, "OVERLAY")
+    usageFs:SetFont(FONT, 9, "")
+    usageFs:SetPoint("TOPLEFT", content, "TOPLEFT", 16, y - 34)
+    -- Rotation-reference awareness: shows whether any rotation condition
+    -- (including nested groups) uses this option key.  Rechecked when the
+    -- key is committed in the editbox.
+    local function UpdateUsage()
+        local refs = CountRotationOptionRefs(rotationEntries, optDef.key)
+        if refs > 0 then
+            usageFs:SetText(string.format("|cff88ff88Referenced by %d rotation condition(s).|r", refs))
+        else
+            usageFs:SetText("|cff888888Not referenced by the rotation.|r")
         end
-        OpenScrollableListMenu(typeBtn, "Option Type", items, function(v)
-            optDef.type = v
-            if typeBtn._label then typeBtn._label:SetText(v) end
-        end, optDef.type)
-    end, 16, y - 16)
-    y = y - 40
+    end
+    local keyEB = SUIMakeEditBox(content, 240, 16, y - 16, optDef.key or "", function(v)
+        if v then optDef.key = v end
+        UpdateUsage()
+    end)
+    UpdateUsage()
+    -- File options keep their key: overrides only apply to keys that exist in
+    -- the spec file, so renaming a file option would orphan the override.
+    if existing and existing._fromFile then
+        keyEB:SetEnabled(false)
+    end
+    y = y - 42
+    y = y - 18
+
+    -- Type.  Uses the Blizzard UIDropDownMenu (the same mechanism as the
+    -- tick-sound dropdown, confirmed working in-game) because the custom
+    -- scroll-menu picker's rows were unresponsive in the live client.  The
+    -- template's own button opens the list on click.
+    RowLabel("Type:", "checkbox / slider / dropdown.")
+    suiDropdownCounter = suiDropdownCounter + 1
+    local typeDD = CreateFrame("Frame", "SPHSpecUIDDType" .. suiDropdownCounter, content, "UIDropDownMenuTemplate")
+    typeDD:SetPoint("TOPLEFT", content, "TOPLEFT", 16, y - 16)
+    UIDropDownMenu_SetWidth(typeDD, 110)
+    UIDropDownMenu_SetText(typeDD, optDef.type or "checkbox")
+    UIDropDownMenu_Initialize(typeDD, function(self, level)
+        for _, tv in ipairs({ "checkbox", "slider", "dropdown" }) do
+            local info = UIDropDownMenu_CreateInfo()
+            info.text    = tv
+            info.value   = tv
+            info.checked = (tv == optDef.type)
+            info.func    = function(self2)
+                optDef.type = self2.value
+                UIDropDownMenu_SetText(typeDD, tostring(optDef.type))
+                -- Rebuild so only the fields for the new type are shown.
+                BuildForm()
+            end
+            UIDropDownMenu_AddButton(info, level)
+        end
+    end)
+    y = y - 48
 
     -- Label
     RowLabel("Label (shown in tabs):")
-    local labelEB = SUIMakeEditBox(content, 240, 16, y - 16, "", function(v) if v then optDef.label = v end end)
+    local labelEB = SUIMakeEditBox(content, 240, 16, y - 16, optDef.label or "", function(v) if v then optDef.label = v end end)
     y = y - 42
 
     -- Default
     RowLabel("Default:", "Checkbox: true/false. Slider: number. Dropdown: one of the values.")
-    local defaultEB = SUIMakeEditBox(content, 240, 16, y - 16, "", function(v) if v then optDef.default = v end end)
+    local defaultEB = SUIMakeEditBox(content, 240, 16, y - 16, tostring(optDef.default or ""), function(v) if v then optDef.default = v end end)
     y = y - 42
 
-    -- Values (dropdown only)
-    RowLabel("Values (comma-separated, dropdown only):")
-    local valuesEB = SUIMakeEditBox(content, 240, 16, y - 16, "", function(v) if v then optDef.valuesText = v end end)
-    y = y - 42
-
-    -- Min / Max / Step (slider only)
-    RowLabel("Slider range - Min / Max / Step (slider only):")
-    local minEB = SUIMakeEditBox(content, 70, 16, y - 16, "0", function(v) if v then optDef.min = tonumber(v) end end)
-    local maxEB = SUIMakeEditBox(content, 70, 92, y - 16, "100", function(v) if v then optDef.max = tonumber(v) end end)
-    local stepEB = SUIMakeEditBox(content, 70, 168, y - 16, "1", function(v) if v then optDef.step = tonumber(v) end end)
-    y = y - 42
+    -- Type-specific fields: values for dropdowns, slider range for sliders,
+    -- nothing extra for checkboxes.
+    if optDef.type == "dropdown" then
+        RowLabel("Values (comma-separated):")
+        local valuesEB = SUIMakeEditBox(content, 240, 16, y - 16, optDef.values and table.concat(optDef.values, ",") or "", function(v) if v then optDef.valuesText = v end end)
+        y = y - 42
+    elseif optDef.type == "slider" then
+        RowLabel("Slider range - Min / Max / Step:")
+        local minEB = SUIMakeEditBox(content, 70, 16, y - 16, tostring(optDef.min or 0), function(v) if v then optDef.min = tonumber(v) end end)
+        local maxEB = SUIMakeEditBox(content, 70, 92, y - 16, tostring(optDef.max or 100), function(v) if v then optDef.max = tonumber(v) end end)
+        local stepEB = SUIMakeEditBox(content, 70, 168, y - 16, tostring(optDef.step or 1), function(v) if v then optDef.step = tonumber(v) end end)
+        y = y - 42
+    end
 
     -- Save / Cancel
     local saveFn = function()
@@ -2280,8 +2656,14 @@ OpenAddOptionDialog = function(spec)
         end
         if optDef.type == "dropdown" then
             local values = {}
-            for part in (tostring(optDef.valuesText or ""):gsub("%s+", "")):gmatch("[^,]+") do
-                values[#values + 1] = part
+            -- If the user never touched the values box, keep the prefilled
+            -- values from edit mode (valuesText stays nil in that case).
+            if optDef.valuesText then
+                for part in (tostring(optDef.valuesText or ""):gsub("%s+", "")):gmatch("[^,]+") do
+                    values[#values + 1] = part
+                end
+            else
+                for _, v in ipairs(optDef.values or {}) do values[#values + 1] = v end
             end
             if #values == 0 then
                 print("|cffff4444[SPHelper] Dropdown options need at least one value.|r")
@@ -2303,12 +2685,7 @@ OpenAddOptionDialog = function(spec)
         if not sdb[editorSpecID] then sdb[editorSpecID] = {} end
         if not sdb[editorSpecID].customOptions then sdb[editorSpecID].customOptions = {} end
         local co = sdb[editorSpecID].customOptions
-        for _, existing in ipairs(co) do
-            if existing.key == key then
-                print("|cffff4444[SPHelper] Option '" .. key .. "' already exists.|r")
-                return
-            end
-        end
+
         local newOpt = {
             key     = key,
             type    = optDef.type,
@@ -2319,12 +2696,64 @@ OpenAddOptionDialog = function(spec)
             step    = optDef.step,
             values  = optDef.values,
         }
-        co[#co + 1] = newOpt
+        if existing then
+            if existing._fromFile then
+                -- File option edit: persist a per-spec override that
+                -- GetMergedOptions merges over the file definition.  The
+                -- spec file itself is never modified.  A key change just
+                -- moves the override (and must not collide with another
+                -- file key).
+                local defs = spec.settingDefs
+                if key ~= existing.key and defs and defs[key] then
+                    print("|cffff4444[SPHelper] Option '" .. key .. "' already exists in the spec file.|r")
+                    return
+                end
+                local sSpec = sdb[editorSpecID]
+                sSpec.settingOverrides = sSpec.settingOverrides or {}
+                if key ~= existing.key then
+                    sSpec.settingOverrides[existing.key] = nil
+                end
+                sSpec.settingOverrides[key] = {
+                    type    = optDef.type,
+                    label   = optDef.label or key,
+                    default = optDef.default,
+                    min     = optDef.min,
+                    max     = optDef.max,
+                    step    = optDef.step,
+                    values  = optDef.values,
+                }
+            else
+                -- Edit mode: replace the existing entry's fields in place.  If the
+                -- key changed, first make sure the new key isn't taken by another
+                -- option (the entry being edited itself is exempt).
+                for _, other in ipairs(co) do
+                    if other ~= existing and other.key == key then
+                        print("|cffff4444[SPHelper] Option '" .. key .. "' already exists.|r")
+                        return
+                    end
+                end
+                for k, v in pairs(newOpt) do existing[k] = v end
+            end
+        else
+            -- Add mode: reject duplicate keys.
+            for _, other in ipairs(co) do
+                if other.key == key then
+                    print("|cffff4444[SPHelper] Option '" .. key .. "' already exists.|r")
+                    return
+                end
+            end
+            co[#co + 1] = newOpt
+        end
         if editorRefreshFn then editorRefreshFn() end
         -- If the dialog was opened from the condition editor's option picker,
         -- rebuild the editor so the new setting shows up in the picker.
         if condEditorFrame and condEditorFrame:IsShown() and RebuildCondEditor then
             RebuildCondEditor()
+        end
+        -- Opened from the General tab: rebuild it so the new/edited option
+        -- appears (editorRefreshFn is only set while the Rotation tab is up).
+        if not editorRefreshFn and A.SpecUI and A.SpecUI.RefreshCurrentTab then
+            A.SpecUI:RefreshCurrentTab()
         end
         f:Hide()
     end
@@ -2332,7 +2761,21 @@ OpenAddOptionDialog = function(spec)
     sv:ClearAllPoints(); sv:SetPoint("BOTTOMLEFT", content, "BOTTOMLEFT", 16, 12)
     local cn = SUIButton(content, "Cancel", 80, 22, function() f:Hide() end, 0, 0)
     cn:ClearAllPoints(); cn:SetPoint("BOTTOMLEFT", content, "BOTTOMLEFT", 106, 12)
+    end
 
+    BuildForm()
+    -- Blizzard dropdowns open on the shared DropDownList1..10 frames, which
+    -- default to DIALOG strata and render BEHIND this TOOLTIP-strata dialog
+    -- (the Type list was clickable but invisible for that reason).  Raise
+    -- them so any menu opened from this dialog draws above it; the lists are
+    -- hidden again whenever the menu closes, so this is safe to leave set.
+    for i = 1, 10 do
+        local dl = _G["DropDownList" .. i]
+        if dl then
+            dl:SetFrameStrata("TOOLTIP")
+            dl:SetToplevel(true)
+        end
+    end
     f:Show()
 end
 
@@ -2351,12 +2794,13 @@ local function BuildRotationTab(container, spec)
     end
 
     -- Column grid (fixed positions; right cluster adapts to window width).
-    -- Main row:      [#] [^][v] [Ability......] [...] [Prio]      [Dup][Del]
-    -- Condition row:                     AND  <desc..flex..>      [Edit][x]
+    -- Main row:      [#] [^][v] [icon] [Ability......] [...] [Prio]   [Dup][Del]
+    -- Condition row:                     AND  <desc..flex..>          [Edit][x]
     local COL_IDX   = 12    -- index number
     local COL_UP    = 36    -- move-up button (16)
     local COL_DN    = 54    -- move-down button (16)
-    local COL_KEY   = 72    -- ability editbox (150)
+    local COL_ICON  = 72    -- ability icon (16)
+    local COL_KEY   = 92    -- ability editbox (130)
     local COL_PICK  = 226   -- spell picker (24)
     local COL_PRIO  = 254   -- split-bucket priority editbox (40)
     local COL_COND  = 108   -- condition joiner/description start
@@ -2385,46 +2829,10 @@ local function BuildRotationTab(container, spec)
 
     local btnY = y - 1
     local saveBtn = SUIButtonR(container, "Save", 60, 20, function()
-        if not A.db.specs then A.db.specs = {} end
-        if not A.db.specs[editorSpecID] then A.db.specs[editorSpecID] = {} end
-        A.db.specs[editorSpecID].rotation = DeepCopy(editorData)
-        -- RotationEngine reads DB rotation on every Evaluate() call, so no
-        -- deactivate/reactivate needed - the next tick picks up the new data.
-        editorDirty = false
-        Refresh()
-
-        -- Auto-discover spec_option references and create missing options
-        local referencedKeys = {}
-        for _, entry in ipairs(editorData) do
-            for _, cond in ipairs(entry.conditions or {}) do
-                if (cond.type == "spec_option_enabled" or cond.type == "spec_option_value") and cond.optionKey then
-                    referencedKeys[cond.optionKey] = true
-                end
-            end
+        local ok, valErr = SaveRotationEditor()
+        if not ok and valErr then
+            status:SetText(TruncateToWidth(container, "|cffff4444Not saved: " .. tostring(valErr) .. "|r", W - 368))
         end
-        local existingKeys = {}
-        if spec.settingDefs then
-            for key in pairs(spec.settingDefs) do existingKeys[key] = true end
-        end
-        for _, opt in ipairs(spec.uiOptions or {}) do existingKeys[opt.key] = true end
-        local custOpts = A.db.specs[editorSpecID] and A.db.specs[editorSpecID].customOptions or {}
-        for _, opt in ipairs(custOpts) do existingKeys[opt.key] = true end
-        local missing = {}
-        for k in pairs(referencedKeys) do
-            if not existingKeys[k] then missing[#missing + 1] = k end
-        end
-        if #missing > 0 then
-            if not A.db.specs[editorSpecID].customOptions then
-                A.db.specs[editorSpecID].customOptions = {}
-            end
-            local co = A.db.specs[editorSpecID].customOptions
-            for _, k in ipairs(missing) do
-                co[#co + 1] = { key = k, type = "checkbox", label = k, default = true }
-            end
-            print("|cff8882d5SPHelper|r: Auto-created config options: " .. table.concat(missing, ", "))
-        end
-
-        print("|cff8882d5SPHelper|r: Rotation saved.")
     end, 12, btnY)
     saveBtn:SetEnabled(editorDirty)
     saveBtn:SetScript("OnEnter", function(self)
@@ -2457,8 +2865,36 @@ local function BuildRotationTab(container, spec)
         }
         editorData[#editorData + 1] = newEntry
         editorDirty = true
+        pendingPickerRow = #editorData
         Refresh()
     end, 256, btnY)
+
+    -- Validate the editor buffer in place (structure + unknown spell keys).
+    SUIButtonR(container, "Validate", 60, 20, function()
+        if not editorData then return end
+        if A.SpecValidator and A.SpecValidator.ValidateRotation then
+            local ok, valErr = A.SpecValidator:ValidateRotation(editorData)
+            if not ok then
+                status:SetText(TruncateToWidth(container, "|cffff4444Invalid: " .. tostring(valErr) .. "|r", W - 368))
+            else
+                local unresolved = {}
+                for _, entry in ipairs(editorData) do
+                    if entry.key and not A.SPELLS[entry.key] then
+                        unresolved[#unresolved + 1] = entry.key
+                    end
+                end
+                if #unresolved > 0 then
+                    status:SetText(TruncateToWidth(container,
+                        "|cffffcc00Valid structure, unknown keys: " .. table.concat(unresolved, ", ") .. "|r", W - 368))
+                else
+                    status:SetText(TruncateToWidth(container,
+                        "|cff00ff00Valid rotation: " .. #editorData .. " entries|r", W - 368))
+                end
+            end
+        else
+            status:SetText(TruncateToWidth(container, "|cffffcc00Validator not loaded|r", W - 368))
+        end
+    end, 356, btnY)
     y = y - 26
 
     ---------------------------------------------------------------
@@ -2493,6 +2929,7 @@ local function BuildRotationTab(container, spec)
     -- Empty state
     ---------------------------------------------------------------
     if #editorData == 0 then
+        pendingPickerRow = nil
         local empty = container:CreateFontString(nil, "OVERLAY")
         empty:SetFont(FONT, 9)
         empty:SetPoint("TOPLEFT", container, "TOPLEFT", 12, y)
@@ -2540,11 +2977,23 @@ local function BuildRotationTab(container, spec)
         end)
         dnBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
+        -- Ability icon (small; question mark for pseudo-keys like IF/NEW)
+        local iconDef = A.SPELLS and A.SPELLS[entry.key]
+        local iconPath = iconDef and (iconDef.icon
+            or (A.GetSpellIconCached and A.GetSpellIconCached(iconDef.id or iconDef.baseId)))
+        if not iconPath then
+            iconPath = "Interface\\Icons\\INV_Misc_QuestionMark"
+        end
+        local iconTex = container:CreateTexture(nil, "OVERLAY")
+        iconTex:SetSize(16, 16)
+        iconTex:SetPoint("TOPLEFT", container, "TOPLEFT", COL_ICON, y + 1)
+        iconTex:SetTexture(iconPath)
+
         -- Ability key editbox (shows the resolved spell label; empty edits are
         -- rejected; known labels/keys resolve to their canonical key, unknown
         -- text is accepted as a raw key so custom pseudo-keys stay possible)
         local keyEB
-        keyEB = SUIMakeEditBox(container, 150, COL_KEY, y, SpellDisplayLabel(entry.key), function(val)
+        keyEB = SUIMakeEditBox(container, 130, COL_KEY, y, SpellDisplayLabel(entry.key), function(val)
             local resolved = SpellKeyFromLabel(val)
             if not resolved then
                 local trimmed = tostring(val or ""):gsub("^%s+", ""):gsub("%s+$", "")
@@ -2571,6 +3020,13 @@ local function BuildRotationTab(container, spec)
         end)
         -- Spell tooltip on key field
         keyEB:SetScript("OnEnter", function(self)
+            if entry.key == "NEW" then
+                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                GameTooltip:SetText("NEW - no ability selected yet", 1, 0.4, 0.4, 1, true)
+                GameTooltip:AddLine("Pick an ability with the '...' button, or type a key manually.", 1, 1, 1, true)
+                GameTooltip:Show()
+                return
+            end
             local spellInfo = A.SPELLS and A.SPELLS[entry.key]
             if spellInfo and A.SpellData then
                 local tip = A.SpellData:GetSpellTooltipText(spellInfo.id)
@@ -2587,6 +3043,10 @@ local function BuildRotationTab(container, spec)
             end
         end)
         keyEB:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        -- Placeholder entries get a red key so an un-assigned ability stands out.
+        if entry.key == "NEW" then
+            keyEB:SetTextColor(1, 0.4, 0.4)
+        end
 
         -- Spell picker button (shows dropdown of known spell keys).
         -- NOTE: split declaration/assignment - a closure passed as an
@@ -2618,6 +3078,7 @@ local function BuildRotationTab(container, spec)
                 local item = {
                     text = displayText,
                     value = spellValue,
+                    icon = spellEntry.icon,
                 }
                 if A.SpellData then
                     local okTip, tip = pcall(A.SpellData.GetSpellTooltipText, A.SpellData,
@@ -2648,6 +3109,20 @@ local function BuildRotationTab(container, spec)
         end)
         spellPickBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
+        -- Freshly added entries auto-open the spell picker so the user can
+        -- replace the placeholder "NEW" key right away (deferred until the
+        -- current rebuild is fully done; immediate fallback keeps test mocks
+        -- working where C_Timer is absent).
+        if pendingPickerRow == i then
+            pendingPickerRow = nil
+            local btn = spellPickBtn
+            if C_Timer and C_Timer.After then
+                C_Timer.After(0.05, function() btn:Click() end)
+            else
+                btn:Click()
+            end
+        end
+
         -- Split bucket priority (integer only)
         local prEB
         prEB = SUIMakeEditBox(container, 40, COL_PRIO, y,
@@ -2676,6 +3151,26 @@ local function BuildRotationTab(container, spec)
         end)
         prEB:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
+        -- Advanced toggle (right cluster; expands an extra settings row).
+        -- Hidden for IF pseudo-keys, which have no advanced options.
+        if entry.key ~= "IF" then
+            local advBtn = SUIButtonR(container, "Adv", 24, 18, function()
+                if advExpanded[entry] then
+                    advExpanded[entry] = nil
+                else
+                    advExpanded[entry] = true
+                end
+                Refresh()
+            end, CLUSTER_W + 28, y)
+            advBtn:SetScript("OnEnter", function(self)
+                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                GameTooltip:SetText("Advanced options", 1, 1, 1, 1, true)
+                GameTooltip:AddLine("Filler cast, repeat limit and instant-cast settings.", 1, 1, 1, true)
+                GameTooltip:Show()
+            end)
+            advBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        end
+
         -- Duplicate / remove (right cluster, same columns as Edit/x below)
         SUIButtonR(container, "Dup", 24, 18, function()
             local copy = DeepCopy(entry)
@@ -2690,6 +3185,76 @@ local function BuildRotationTab(container, spec)
             Refresh()
         end, 28, y)
         y = y - 24
+
+        -- Advanced settings row (filler / repeat limit / instant cast)
+        if advExpanded[entry] and entry.key ~= "IF" then
+            local advLbl = container:CreateFontString(nil, "OVERLAY")
+            advLbl:SetFont(FONT, 8)
+            advLbl:SetPoint("TOPLEFT", container, "TOPLEFT", 14, y + 3)
+            advLbl:SetTextColor(0.7, 0.7, 0.7, 1)
+            advLbl:SetText("Advanced:")
+
+            local fillCB, fillLbl = SUICheckbox(container, "Filler", function()
+                return entry.isFiller or false
+            end, function(v)
+                entry.isFiller = v
+                editorDirty = true
+            end, 92, y)
+            fillCB:SetScript("OnEnter", function(self)
+                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                GameTooltip:SetText("Filler cast", 1, 1, 1, 1, true)
+                GameTooltip:AddLine("Casts this ability whenever no higher-priority action is ready.", 1, 1, 1, true)
+                GameTooltip:Show()
+            end)
+            fillCB:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+            local repLbl = container:CreateFontString(nil, "OVERLAY")
+            repLbl:SetFont(FONT, 9)
+            repLbl:SetPoint("TOPLEFT", container, "TOPLEFT", 200, y + 3)
+            repLbl:SetTextColor(1, 1, 1, 1)
+            repLbl:SetText("Repeat:")
+            local repEB
+            repEB = SUIMakeEditBox(container, 30, 248, y,
+                (entry.repeatLimit ~= nil) and tostring(entry.repeatLimit) or "", function(val)
+                if not val then
+                    entry.repeatLimit = nil
+                    repEB:SetText("")
+                else
+                    local num = tonumber(val)
+                    if num and num == math.floor(num) and num >= 1 then
+                        entry.repeatLimit = num
+                        repEB:SetText(tostring(num))
+                    else
+                        repEB:SetText((entry.repeatLimit ~= nil) and tostring(entry.repeatLimit) or "")
+                        return
+                    end
+                end
+                editorDirty = true
+            end)
+            repEB:SetScript("OnEnter", function(self)
+                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                GameTooltip:SetText("Repeat limit", 1, 1, 1, 1, true)
+                GameTooltip:AddLine("Maximum consecutive casts before the rotation moves on (optional).", 1, 1, 1, true)
+                GameTooltip:Show()
+            end)
+            repEB:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+            local instCB, instLbl = SUICheckbox(container, "Instant", function()
+                return entry.isInstant or false
+            end, function(v)
+                entry.isInstant = v
+                editorDirty = true
+            end, 300, y)
+            instCB:SetScript("OnEnter", function(self)
+                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                GameTooltip:SetText("Instant cast", 1, 1, 1, 1, true)
+                GameTooltip:AddLine("Treat this ability as instant for the cast-time clip simulation.", 1, 1, 1, true)
+                GameTooltip:Show()
+            end)
+            instCB:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+            y = y - 24
+        end
 
         -- Insert-before row (optional - for entries that insert before another key)
         if entry.insertBefore or entry.key == "IF" or entry.key == "NEW" then
@@ -2770,71 +3335,6 @@ local function BuildRotationTab(container, spec)
         y = y - 8
     end
 
-    ---------------------------------------------------------------
-    -- Options section: every spec option referenced by this rotation
-    -- (or declared by the spec) can be changed right here with the same
-    -- controls as the General tab, and new custom options can be added.
-    ---------------------------------------------------------------
-    y = y - 12
-    local optHdr = container:CreateFontString(nil, "OVERLAY")
-    optHdr:SetFont(FONT, 9, "OUTLINE")
-    optHdr:SetPoint("TOPLEFT", container, "TOPLEFT", 16, y)
-    optHdr:SetTextColor(1, 0.82, 0, 1)
-    optHdr:SetText("Options")
-    SUIButtonR(container, "+ Add Option", 84, 18, function()
-        OpenAddOptionDialog(spec)
-    end, 116, y)
-    y = y - 20
-    local optSep = container:CreateTexture(nil, "ARTWORK")
-    optSep:SetColorTexture(0.45, 0.38, 0.62, 0.7)
-    optSep:SetHeight(1)
-    optSep:SetPoint("TOPLEFT", container, "TOPLEFT", 16, y)
-    optSep:SetPoint("RIGHT", container, "RIGHT", -16, 0)
-    y = y - 6
-
-    local mergedOpts = GetMergedOptions(spec, editorSpecID)
-    local lastOptGroup = nil
-    for _, opt in ipairs(mergedOpts) do
-        if not opt._fromCastBar then
-            -- Group header + separator between groups (same style as General tab)
-            if opt.group and opt.group ~= lastOptGroup then
-                y = y - 12
-                local grpLabel = container:CreateFontString(nil, "OVERLAY")
-                grpLabel:SetFont(FONT, 9, "")
-                grpLabel:SetPoint("TOPLEFT", container, "TOPLEFT", 16, y)
-                grpLabel:SetTextColor(0.85, 0.72, 1, 1)
-                grpLabel:SetText(opt.group)
-                y = y - 14
-                local sepLine = container:CreateTexture(nil, "OVERLAY")
-                sepLine:SetPoint("TOPLEFT", container, "TOPLEFT", 16, y)
-                sepLine:SetPoint("TOPRIGHT", container, "TOPRIGHT", -16, y)
-                sepLine:SetHeight(1)
-                sepLine:SetColorTexture(0.45, 0.38, 0.62, 0.7)
-                y = y - 8
-                lastOptGroup = opt.group
-            elseif not opt.group then
-                lastOptGroup = nil
-            end
-            local rowY = y
-            y = RenderOptionRow(container, opt, y)
-            -- Delete button for user-created options only (file options live
-            -- in the spec file and cannot be removed from the UI).
-            if not opt._fromFile then
-                local delKey = opt.key
-                SUIButtonR(container, "Del", 24, 16, function()
-                    local sdb = A.db and A.db.specs and A.db.specs[editorSpecID]
-                    local co = sdb and sdb.customOptions
-                    if co then
-                        for ci = #co, 1, -1 do
-                            if co[ci].key == delKey then table.remove(co, ci) end
-                        end
-                    end
-                    Refresh()
-                end, 28, rowY)
-            end
-        end
-    end
-
     container:SetHeight(math.abs(y) + 20)
 end
 ------------------------------------------------------------------------
@@ -2850,9 +3350,15 @@ local function BuildPreviewTab(container, spec)
     title:SetTextColor(1, 0.85, 0.4, 1)
     title:SetText("Live Rotation Evaluator Preview")
 
+    local sourceLbl = container:CreateFontString(nil, "OVERLAY")
+    sourceLbl:SetFont(FONT, 8)
+    sourceLbl:SetPoint("TOPLEFT", container, "TOPLEFT", 12, -20)
+    sourceLbl:SetTextColor(0.7, 0.7, 0.7, 1)
+    sourceLbl:SetText("")
+
     local output = container:CreateFontString(nil, "OVERLAY")
     output:SetFont(FONT, 9)
-    output:SetPoint("TOPLEFT", container, "TOPLEFT", 12, -28)
+    output:SetPoint("TOPLEFT", container, "TOPLEFT", 12, -36)
     output:SetTextColor(0.85, 0.85, 0.85, 1)
     output:SetWidth(560)
     output:SetJustifyH("LEFT")
@@ -2861,16 +3367,55 @@ local function BuildPreviewTab(container, spec)
     local function UpdatePreview()
         if not A.RotationEngine then
             output:SetText("RotationEngine not loaded.")
+            sourceLbl:SetText("")
             return
         end
         local RE = A.RotationEngine
         local activeSpec = A.SpecManager and A.SpecManager:GetSpecByID(A._activeSpecID or "")
         if not activeSpec then
             output:SetText("No active spec.")
+            sourceLbl:SetText("")
             return
         end
 
+        -- G1: with unsaved edits in the rotation editor for the active spec,
+        -- preview the EDITOR BUFFER instead of the saved rotation, and label
+        -- which data source is being evaluated so it is never ambiguous.
+        local previewBuffer = editorSpecID == (activeSpec.meta and activeSpec.meta.id)
+            and editorData ~= nil
+            and editorDirty
+            and A.db ~= nil and A.db.specs ~= nil
+        local specName = activeSpec.meta.specName or activeSpec.meta.id
+        if previewBuffer then
+            sourceLbl:SetText("Previewing UNSAVED rotation of " .. specName .. " (editor buffer)")
+            sourceLbl:SetTextColor(1, 0.7, 0.2, 1)
+        else
+            sourceLbl:SetText("Previewing saved rotation of active spec: " .. specName)
+            sourceLbl:SetTextColor(0.7, 0.7, 0.7, 1)
+        end
+
+        -- The evaluator reads the spec's rotation from A.db.specs[<id>].rotation
+        -- (falling back to spec.rotation). Temporarily point that at the editor
+        -- buffer for the duration of the evaluation, then restore - the buffer
+        -- is only ever swapped in, never saved.
+        local db = A.db.specs[activeSpec.meta.id]
+        local hadDb = (db ~= nil)
+        local prevRot = db and db.rotation
+        if previewBuffer then
+            if not hadDb then
+                db = {}
+                A.db.specs[activeSpec.meta.id] = db
+            end
+            db.rotation = DeepCopy(editorData)
+        end
         local ok, debugData = pcall(function() return RE:DebugEvaluate(activeSpec) end)
+        if previewBuffer then
+            if hadDb then
+                db.rotation = prevRot
+            else
+                A.db.specs[activeSpec.meta.id] = nil
+            end
+        end
         if not ok or not debugData or not debugData.ctx then
             output:SetText("Error evaluating rotation: " .. tostring(debugData))
             return
@@ -3537,7 +4082,13 @@ local function BuildCastBarTab(container, spec)
         elseif opt.type == "dropdown" then
             local dd, lbl = SUIDropdown(container, opt.label, opt.values or {},
                 function() return A.SpecVal(opt.key, opt.default) end,
-                function(v) A.SetSpecVal(opt.key, v) end,
+                function(v)
+                    A.SetSpecVal(opt.key, v)
+                    -- Preview tick sounds immediately when their dropdown changes.
+                    if A.PlayTickSound and opt.key and opt.key:match("tickSound$") then
+                        pcall(A.PlayTickSound, v)
+                    end
+                end,
                 16, y)
             if tooltip and lbl then
                 lbl:SetScript("OnEnter", function(self) GameTooltip:SetOwner(self, "ANCHOR_RIGHT"); GameTooltip:SetText(opt.label); GameTooltip:AddLine(tooltip, 1, 1, 1, true); GameTooltip:Show() end)
@@ -3701,19 +4252,38 @@ local function BuildImportExportTab(container, spec)
         editorData._fromFile = nil
         editorDirty = true
 
-        -- Apply options to DB
+        -- Apply options to DB (validated: only well-formed custom options,
+        -- string keys for the deletedOptions map, and values for known
+        -- option keys so hand-edited payloads can't pollute the DB).
         if options then
             local sdb = A.db.specs and A.db.specs[specID]
             if sdb then
                 if options.customOptions then
-                    sdb.customOptions = options.customOptions
+                    local valid = {}
+                    for _, opt in ipairs(options.customOptions) do
+                        if type(opt) == "table" and type(opt.key) == "string" and opt.key ~= "" then
+                            valid[#valid + 1] = opt
+                        end
+                    end
+                    sdb.customOptions = valid
                 end
                 if options.deletedOptions then
-                    sdb.deletedOptions = options.deletedOptions
+                    local valid = {}
+                    for k in pairs(options.deletedOptions) do
+                        if type(k) == "string" then valid[k] = true end
+                    end
+                    sdb.deletedOptions = valid
                 end
                 if options.values then
+                    -- Only write values whose key exists in the merged option set
+                    local known = {}
+                    local merged = GetMergedOptions(spec, specID)
+                    for _, opt in ipairs(merged) do known[opt.key] = true end
+                    for _, opt in ipairs(sdb.customOptions or {}) do known[opt.key] = true end
                     for k, v in pairs(options.values) do
-                        sdb[k] = v
+                        if known[k] then
+                            sdb[k] = v
+                        end
                     end
                 end
             end
@@ -3933,7 +4503,7 @@ local function BuildLoadConditionsTab(container, spec)
         end
         -- Min level
         local ml = tonumber(strtrim(minLevelEB:GetText()))
-        if ml and ml > 1 then newLC.minLevel = ml end
+        if ml and ml >= 1 then newLC.minLevel = ml end
 
         -- Store override in DB
         if not A.db.specs then A.db.specs = {} end
@@ -3945,9 +4515,10 @@ local function BuildLoadConditionsTab(container, spec)
         if A.SpecManager then A.SpecManager:ReEvaluate() end
         statusLbl:SetText("|cff00ff00Load conditions saved.|r")
         print("|cff8882d5SPHelper|r: Load conditions updated for " .. (spec.meta.specName or specID) .. ".")
-        -- Print the exact saved loadConditions for debugging
-        if Serialize then
-            print("|cff8882d5SPHelper|r: Saved loadConditions: " .. Serialize(newLC))
+        -- Rebuild the tab so the talent-tree dropdown reflects the saved value
+        local loadTabIdx = GetTabIndex("LoadConditions")
+        if SUI.frame and SUI.frame:IsShown() and loadTabIdx and SUI._activeTab == loadTabIdx then
+            SUI:SwitchTab(loadTabIdx, spec)
         end
     end, 16, y)
 
@@ -3958,7 +4529,8 @@ local function BuildLoadConditionsTab(container, spec)
         -- Restore from file-defined loadConditions (need to look at _available)
         local origSpec = A.SpecManager and A.SpecManager:GetSpecByID(specID)
         if origSpec and origSpec._fileLoadConditions then
-            origSpec.loadConditions = origSpec._fileLoadConditions
+            -- Copy so later in-place edits can't corrupt the file snapshot
+            origSpec.loadConditions = DeepCopy(origSpec._fileLoadConditions)
         end
         if A.SpecManager then A.SpecManager:ReEvaluate() end
         statusLbl:SetText("|cff00ff00Reset to file defaults.|r")
@@ -4043,6 +4615,29 @@ end
 ------------------------------------------------------------------------
 -- "Create New Spec" modal (shown when /sph is used without an active spec)
 ------------------------------------------------------------------------
+
+-- Default castBarOptions for created specs (G4): seeded from the built-in
+-- Shadow Priest spec when registered, so the CastBar & FQ tab's global
+-- section is never empty for a new spec. Falls back to a minimal hardcoded
+-- seed if the built-in spec is not available.
+local function DefaultCastBarOptions()
+    if A.SpecManager and A.SpecManager.GetSpecByID then
+        local spriest = A.SpecManager:GetSpecByID("shadow_priest")
+        if spriest and type(spriest.castBarOptions) == "table" and #spriest.castBarOptions > 0 then
+            return DeepCopy(spriest.castBarOptions)
+        end
+    end
+    return {
+        { key = "channelFakeQueue",     type = "checkbox", label = "Enable Fake Queue (clip assist)", default = true },
+        { key = "channelClipCues",      type = "checkbox", label = "Show clip zone on cast bar", default = true },
+        { key = "tickSound",            type = "dropdown", label = "Tick sound",           default = "click",
+          values = {"none","click","impact","pop","blip","coin","tick","chink","ping","note","popup","slash","bite","clank","chop","fizzle","bell","alert"} },
+        { key = "tickFlash",            type = "dropdown", label = "Tick flash effect",    default = "green",
+          values = {"none","green","purple","shadow","white","red","green_top","purple_top","shadow_top","white_top","red_top","green_sides","purple_sides","shadow_sides","white_sides","red_sides"} },
+        { key = "tickFeedbackOffsetMs", type = "slider",   label = "Tick feedback offset (ms)", default = 0, min = 0, max = 300, step = 10 },
+    }
+end
+
 
 local newSpecFrame = nil
 
@@ -4143,7 +4738,7 @@ local function OpenNewSpecDialog()
             end)
             ly = ly - 28
 
-            SUIButton(f, "Enable", 80, 22, function()
+            SUIButton(f, "Enable Spec", 80, 22, function()
                 local sid = builtinDD._selected
                 if not sid then
                     statusLbl:SetText("|cffff4444Pick a spec first.|r")
@@ -4193,7 +4788,7 @@ local function OpenNewSpecDialog()
                 loadConditions  = { class = playerClass },
                 helpers         = { "RotationEngine", "SpecUI", "Config" },
                 uiOptions       = {},
-                castBarOptions  = {},
+                castBarOptions  = DefaultCastBarOptions(),
                 channelSpells   = {},
                 rotation        = {},
             }
@@ -4217,6 +4812,9 @@ local function OpenNewSpecDialog()
         local xl = closeBtn:CreateFontString(nil, "OVERLAY")
         xl:SetFont(FONT, 12, "OUTLINE"); xl:SetPoint("CENTER"); xl:SetText("X")
         closeBtn:SetScript("OnClick", function() f:Hide() end)
+
+        -- Size the dialog to its content (the built-in spec section is optional)
+        f:SetHeight(math.abs(ly) + 30)
     end
     newSpecFrame:Show()
 end
@@ -4251,7 +4849,9 @@ local function GetVisibleTabs()
 end
 
 --- Return the visual index of a tab by its build key, or nil if not visible.
-local function GetTabIndex(buildKey)
+-- (Assignment, not `local function`, so it binds to the forward declaration
+-- above - see the compile-time resolution rule documented there.)
+GetTabIndex = function(buildKey)
     local visible = GetVisibleTabs()
     for i, tab in ipairs(visible) do
         if tab.build == buildKey then return i end
@@ -4278,6 +4878,10 @@ function SUI:Open(specID)
         local prevID = self._spec and self._spec.meta and self._spec.meta.id
         self._spec = spec
         if prevID ~= spec.meta.id then
+            -- Auto-save pending rotation edits before switching specs
+            if editorDirty and editorData then
+                SaveRotationEditor()
+            end
             editorData = nil  -- reset editor only when switching to a different spec
         end
         -- Rebuild tabs in case edit mode was toggled while the frame was closed
@@ -4345,6 +4949,29 @@ function SUI:Open(specID)
     title:SetText("|cff8882d5SPHelper|r – " .. (spec.meta.specName or specID))
     self._title = title
 
+    -- Edit-mode toggle button (mirrors /sph edit) — makes the Rotation /
+    -- Preview / Import-Export tabs discoverable from inside the window.
+    local editBtn = CreateFrame("Button", nil, f, "BackdropTemplate")
+    editBtn:SetSize(52, 18)
+    editBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -32, -4)
+    A.CreateBackdrop(editBtn, 0.1, 0.1, 0.1, 0.8, 0.3, 0.3, 0.3, 0.8)
+    local editLbl = editBtn:CreateFontString(nil, "OVERLAY")
+    editLbl:SetFont(FONT, 9, "OUTLINE")
+    editLbl:SetPoint("CENTER")
+    local function UpdateEditLabel()
+        local on = A.db and A.db.specUI and A.db.specUI.editMode
+        editLbl:SetText(on and "Edit: ON" or "Edit: OFF")
+    end
+    UpdateEditLabel()
+    editBtn:SetScript("OnClick", function()
+        if not A.db.specUI then A.db.specUI = {} end
+        A.db.specUI.editMode = not A.db.specUI.editMode
+        UpdateEditLabel()
+        if A.SpecUI then A.SpecUI:RebuildTabs() end
+    end)
+    self._editBtn = editBtn
+    self._updateEditBtn = UpdateEditLabel
+
     -- Spec switcher dropdown (shows all specs for current class)
     local _, playerClass = UnitClass("player")
     local classSpecs = {}
@@ -4376,6 +5003,10 @@ function SUI:Open(specID)
                             local activeTag = A._activeSpecID == self3.value and "" or " |cff888888(inactive)|r"
                             SUI._title:SetText("|cff8882d5SPHelper|r – " .. (newSpec.meta.specName or self3.value) .. activeTag)
                         end
+                        -- Auto-save pending rotation edits before switching specs
+                        if editorDirty and editorData then
+                            SaveRotationEditor()
+                        end
                         editorData = nil  -- reset rotation editor
                         SUI:SwitchTab(SUI._activeTab or 1, newSpec)
                     end
@@ -4396,6 +5027,10 @@ function SUI:Open(specID)
     xl:SetPoint("CENTER")
     xl:SetText("X")
     closeBtn:SetScript("OnClick", function()
+        -- Auto-save pending rotation edits so closing never loses work
+        if editorDirty and editorData then
+            SaveRotationEditor()
+        end
         f:Hide()
         if previewTicker then previewTicker:Cancel(); previewTicker = nil end
     end)
@@ -4525,6 +5160,10 @@ end
 --- Rebuild the tab bar from the current edit mode (called after toggling edit mode).
 function SUI:RebuildTabs()
     if not self.frame then return end
+    -- Keep the current tab (matched by build key) across the rebuild so
+    -- toggling edit mode doesn't throw the user back to the first tab.
+    local oldVisible = GetVisibleTabs()
+    local prevBuild = self._activeTab and oldVisible[self._activeTab] and oldVisible[self._activeTab].build
     if self._tabs then
         for _, btn in ipairs(self._tabs) do
             btn:Hide()
@@ -4543,8 +5182,16 @@ function SUI:RebuildTabs()
         end, tabWidth, tabSpacing)
     end
     self._tabs = tabs
-    -- Switch to first tab in case the previous index is no longer valid
-    self:SwitchTab(1)
+    -- Refresh the header edit-mode toggle label (may have changed via /sph edit)
+    if self._updateEditBtn then self._updateEditBtn() end
+    -- Switch to the same tab by build key, or the first tab if it no longer exists
+    local newIdx = 1
+    if prevBuild then
+        for i, tab in ipairs(visibleTabs) do
+            if tab.build == prevBuild then newIdx = i; break end
+        end
+    end
+    self:SwitchTab(newIdx)
 end
 
 ------------------------------------------------------------------------
@@ -4559,4 +5206,21 @@ if A.SpecManager then
             end
         end,
     })
+end
+
+------------------------------------------------------------------------
+-- Rotation-editor state accessor (used by tests/harnesses and internal
+-- preview code that needs to read the current editor buffer + dirty flag
+-- without reaching into the chunk locals).
+------------------------------------------------------------------------
+function get()
+    return {
+        dirty = function() return editorDirty end,
+        data  = function() return editorData end,
+    }
+end
+
+-- Test hook: force the editor dirty flag (same effect as any mutation).
+function setEditorDirty(v)
+    editorDirty = v and true or false
 end
