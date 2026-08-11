@@ -226,7 +226,9 @@ local spec = {
         _fromFile = true,
         -- Execution kill-shot: highest priority so a killable target is
         -- finished before DoT refreshes / filler.  The normal "Shadow Word:
-        -- Death" entry below handles the per-content always/execute settings.
+        -- Death" entry below handles the per-content "always" use for targets
+        -- that are NOT killable (suppressed below the kill threshold so the
+        -- spell is never suggested twice).
         { key = "SWD_EXEC", conditions = {{ type = "spell_can_kill_target", spellKey = "Shadow Word: Death", safetyKey = "swdSafetyPct" }, { type = "cooldown_ready", spellKey = "Shadow Word: Death" }, { type = "spec_option_enabled", optionKey = "use_SWD" }} },
         { key = "TRINKET1", optional = true, conditions = {{ type = "spec_option_enabled", optionKey = "use_trinket_1" }, { type = "target_valid" }, { type = "trinket_ready", slot = 13 }, { type = "classification_any_target", settingKey = "trinket_1_classification" }} },
         { key = "TRINKET2", optional = true, conditions = {{ type = "spec_option_enabled", optionKey = "use_trinket_2" }, { type = "target_valid" }, { type = "trinket_ready", slot = 14 }, { type = "classification_any_target", settingKey = "trinket_2_classification" }} },
@@ -308,39 +310,28 @@ local spec = {
         { key = "Shadow Word: Death",      conditions = {
           { type = "spec_option_enabled", optionKey = "use_SWD" },
           { type = "cooldown_ready", spellKey = "Shadow Word: Death" },
+          -- Killable targets are handled by the SWD_EXEC entry at the top of
+          -- the rotation; suppress this entry below the kill threshold so
+          -- SW:D is never suggested twice (kill shot + filler) at once.
+          -- Uses the same safety margin as SWD_EXEC so the two never overlap
+          -- or leave a gap.
+          { type = "not", condition = { type = "spell_can_kill_target", spellKey = "Shadow Word: Death", safetyKey = "swdSafetyPct" } },
           { type = "any_of", conditions = {
-            -- World: check swdWorld setting
+            -- World: check swdWorld setting ("always" only; "execute" is
+            -- covered by SWD_EXEC above)
             { type = "all_of", conditions = {
               { type = "content_type", contentType = "world" },
-              { type = "any_of", conditions = {
-                { type = "setting_compare", optionKey = "swdWorld", op = "==", value = "always" },
-                { type = "all_of", conditions = {
-                  { type = "setting_compare", optionKey = "swdWorld", op = "==", value = "execute" },
-                  { type = "spell_can_kill_target", spellKey = "Shadow Word: Death", safetyKey = "swdSafetyPct" },
-                }},
-              }},
+              { type = "setting_compare", optionKey = "swdWorld", op = "==", value = "always" },
             }},
             -- Dungeon: check swdDungeon setting
             { type = "all_of", conditions = {
               { type = "content_type", contentType = "dungeon" },
-              { type = "any_of", conditions = {
-                { type = "setting_compare", optionKey = "swdDungeon", op = "==", value = "always" },
-                { type = "all_of", conditions = {
-                  { type = "setting_compare", optionKey = "swdDungeon", op = "==", value = "execute" },
-                  { type = "spell_can_kill_target", spellKey = "Shadow Word: Death", safetyKey = "swdSafetyPct" },
-                }},
-              }},
+              { type = "setting_compare", optionKey = "swdDungeon", op = "==", value = "always" },
             }},
             -- Raid: check swdRaid setting
             { type = "all_of", conditions = {
               { type = "content_type", contentType = "raid" },
-              { type = "any_of", conditions = {
-                { type = "setting_compare", optionKey = "swdRaid", op = "==", value = "always" },
-                { type = "all_of", conditions = {
-                  { type = "setting_compare", optionKey = "swdRaid", op = "==", value = "execute" },
-                  { type = "spell_can_kill_target", spellKey = "Shadow Word: Death", safetyKey = "swdSafetyPct" },
-                }},
-              }},
+              { type = "setting_compare", optionKey = "swdRaid", op = "==", value = "always" },
             }},
           }},
         } },

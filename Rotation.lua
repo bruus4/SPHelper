@@ -405,11 +405,6 @@ function A:InitRotation()
     spellIcons["WAND"] = "Interface\\Icons\\INV_Wand_01"
 
     ----------------------------------------------------------------
-    -- Apply full layout (fixes bonus slot size/position at startup)
-    ----------------------------------------------------------------
-    if A.RotationResizeLayout then A.RotationResizeLayout() end
-
-    ----------------------------------------------------------------
     -- Recently-cast tracking (prevents re-suggesting mid-travel spells)
     ----------------------------------------------------------------
     local recentCast = {}  -- key = spellName, value = GetTime()
@@ -507,7 +502,7 @@ function A:InitRotation()
         -- Position bonus slots to the left of primary
         if f.bonusSlots then
             local prev = primary
-            for i = 1, 4 do
+            for i = 1, MAX_BONUS_SLOTS do
                 local slot = f.bonusSlots[i]
                 if slot then
                     slot:SetSize(SMALL, SMALL)
@@ -533,6 +528,18 @@ function A:InitRotation()
         end
         if A.RotationRefreshOpacity then A.RotationRefreshOpacity() end
     end
+
+    ----------------------------------------------------------------
+    -- Apply full layout at startup.  MUST run after the function
+    -- definition above: the bonus slots are created at their initial
+    -- MakeIcon position (all stacked at the same point left of the
+    -- primary), and only RotationResizeLayout fans them out side by
+    -- side.  The old call site (before the definition) was a silent
+    -- no-op, so every bonus slot rendered on top of each other and
+    -- multiple ready bonus abilities looked like a single slot
+    -- (user report).
+    ----------------------------------------------------------------
+    A.RotationResizeLayout()
 
     ----------------------------------------------------------------
     -- Preview support
